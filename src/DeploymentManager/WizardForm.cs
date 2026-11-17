@@ -256,6 +256,18 @@ public sealed class WizardForm : Form
         var cleanupButton = new Button { Text = "پاکسازی نسخه‌های قبلی", Width = 170, Height = 36 };
         cleanupButton.Click += async (_, _) => await CleanupPreviousVersionsAsync();
         footerButtons.Controls.Add(cleanupButton);
+        var databaseManager = new Button { Text = "مدیریت دیتابیس", Width = 145, Height = 36 };
+        databaseManager.Click += (_, _) =>
+        {
+            if (_operationRunning || _autoDeployRunning)
+            {
+                MessageBox.Show(this, "ابتدا عملیات استقرار جاری را متوقف کنید.");
+                return;
+            }
+            using var dialog = new DatabaseRelocationForm(_profile, _sql);
+            dialog.ShowDialog(this);
+        };
+        footerButtons.Controls.Add(databaseManager);
 
         footerButtons.Controls.Add(_autoDeploy);
         var viewLogs = new Button { Text = "Diagnostics Center", Width = 145, Height = 36 };

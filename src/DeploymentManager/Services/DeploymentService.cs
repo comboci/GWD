@@ -2252,15 +2252,34 @@ public sealed class DeploymentService
                     throw;
                 }
                 // Once replacement begins, cancellation must not interrupt recovery.
-                if (Directory.Exists(target)) Directory.Move(target, displaced);
+                // A failed first move leaves the original payload in place; restore IIS.
                 try
                 {
-                    Directory.Move(prepared, target);
+                    if (Directory.Exists(target)) Directory.Move(target, displaced);
+                    try
+                    {
+                        Directory.Move(prepared, target);
+                    }
+                    catch
+                    {
+                        if (!Directory.Exists(target) && Directory.Exists(displaced))
+                            Directory.Move(displaced, target);
+                        throw;
+                    }
                 }
-                catch
+                catch (Exception swapEx)
                 {
-                    if (!Directory.Exists(target) && Directory.Exists(displaced))
-                        Directory.Move(displaced, target);
+                    // If the original folder is back in place, recover its IIS state.
+                    // Otherwise keep IIS stopped and report the unsafe recovery state.
+                    if (Directory.Exists(target) && !Directory.Exists(displaced))
+                    {
+                        try { await RestoreOriginalIisStatesAsync(profile); }
+                        catch (Exception recoveryEx)
+                        {
+                            InternalDiagnostics.Record(recoveryEx, "Restore IIS after rollback folder swap failure");
+                            throw new AggregateException("Rollback folder swap failed and IIS state recovery also failed.", swapEx, recoveryEx);
+                        }
+                    }
                     throw;
                 }
                 // Preserve displaced content if deletion fails; recovery is already active.

@@ -1666,7 +1666,8 @@ public sealed class DeploymentService
                 try { await RestoreOriginalIisStatesAsync(profile); }
                 catch (Exception iisRecoveryEx)
                 {
-                    InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after activation rollback pre-swap failure");
+                    try { InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after activation rollback pre-swap failure"); }
+                    catch { }
                     throw new AggregateException("Activation rollback pre-swap failed and IIS state recovery also failed.", preSwapEx, iisRecoveryEx);
                 }
                 throw;
@@ -1684,7 +1685,8 @@ public sealed class DeploymentService
                     try { await RestoreOriginalIisStatesAsync(profile); }
                     catch (Exception iisRecoveryEx)
                     {
-                        InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after activation rollback first move failure");
+                        try { InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after activation rollback first move failure"); }
+                        catch { }
                         throw new AggregateException("Activation rollback first move failed and IIS state recovery also failed.", moveEx, iisRecoveryEx);
                     }
                 }
@@ -1713,7 +1715,8 @@ public sealed class DeploymentService
                     try { await RestoreOriginalIisStatesAsync(profile); }
                     catch (Exception iisRecoveryEx)
                     {
-                        InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after activation rollback replacement failure");
+                        try { InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after activation rollback replacement failure"); }
+                        catch { }
                         throw new AggregateException("Activation rollback replacement failed and IIS state recovery also failed.", replacementEx, iisRecoveryEx);
                     }
                 }
@@ -2248,7 +2251,8 @@ public sealed class DeploymentService
                 try { await RestoreOriginalIisStatesAsync(profile); }
                 catch (Exception iisRecoveryEx)
                 {
-                    InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after displaced-folder rollback pre-swap failure");
+                    try { InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after displaced-folder rollback pre-swap failure"); }
+                    catch { }
                     throw new AggregateException("Displaced-folder rollback pre-swap failed and IIS state recovery also failed.", stopEx, iisRecoveryEx);
                 }
                 throw;
@@ -2266,7 +2270,8 @@ public sealed class DeploymentService
                     try { await RestoreOriginalIisStatesAsync(profile); }
                     catch (Exception iisRecoveryEx)
                     {
-                        InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after displaced-folder rollback first move failure");
+                        try { InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after displaced-folder rollback first move failure"); }
+                        catch { }
                         throw new AggregateException("Displaced-folder rollback first move failed and IIS recovery also failed.", moveEx, iisRecoveryEx);
                     }
                 }
@@ -2289,7 +2294,8 @@ public sealed class DeploymentService
                     try { await RestoreOriginalIisStatesAsync(profile); }
                     catch (Exception iisRecoveryEx)
                     {
-                        InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after displaced-folder rollback replacement failure");
+                        try { InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after displaced-folder rollback replacement failure"); }
+                        catch { }
                         throw new AggregateException("Displaced-folder rollback replacement failed and IIS recovery also failed.", replacementEx, iisRecoveryEx);
                     }
                 }
@@ -2503,7 +2509,8 @@ public sealed class DeploymentService
                 try { await RestoreOriginalIisStatesAsync(profile); }
                 catch (Exception iisRecoveryEx)
                 {
-                    InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after versioned rollback preflight failure");
+                    try { InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after versioned rollback preflight failure"); }
+                    catch { }
                     throw new AggregateException("Versioned rollback preflight failed and original IIS states could not be restored.", preflightEx, iisRecoveryEx);
                 }
                 throw;
@@ -2525,7 +2532,8 @@ public sealed class DeploymentService
                         try { await RestoreOriginalIisStatesAsync(profile); }
                         catch (Exception iisRecoveryEx)
                         {
-                            InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after versioned rollback previous-path revalidation failure");
+                            try { InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after versioned rollback previous-path revalidation failure"); }
+                            catch { }
                             throw new AggregateException("Previous release path became unsafe and original IIS states could not be restored.", validationEx, iisRecoveryEx);
                         }
                         throw;
@@ -2572,7 +2580,8 @@ public sealed class DeploymentService
                             try { await RestoreOriginalIisStatesAsync(profile); }
                             catch (Exception iisRecoveryEx)
                             {
-                                InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after versioned rollback path verification mismatch");
+                                try { InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after versioned rollback path verification mismatch"); }
+                                catch { }
                                 throw new AggregateException("Versioned rollback path verification failed and IIS state recovery also failed.", verificationEx, iisRecoveryEx);
                             }
                         }
@@ -2596,7 +2605,8 @@ public sealed class DeploymentService
                     try { await RestoreOriginalIisStatesAsync(profile); }
                     catch (Exception iisRecoveryEx)
                     {
-                        InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after previous release disappeared during versioned rollback");
+                        try { InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after previous release disappeared during versioned rollback"); }
+                        catch { }
                         throw new AggregateException("Previous release became unavailable and original IIS states could not be restored.", missingPrevious, iisRecoveryEx);
                     }
                     throw missingPrevious;

@@ -2446,6 +2446,14 @@ public sealed class DeploymentService
             string? current;
             try
             {
+                // A missing or unusable previous release cannot be recovered.
+                // Reject it before stopping the currently configured site.
+                if (string.IsNullOrWhiteSpace(previousSitePath)
+                    || !Directory.Exists(previousSitePath)
+                    || (!string.IsNullOrWhiteSpace(failedPublishFolder) && PathsEqual(previousSitePath, failedPublishFolder)))
+                    throw new IOException("Recovery blocked: no valid previous site path. IIS and failed files preserved for manual recovery.");
+                DeploymentPathSafety.RequireApplicationDirectory(previousSitePath);
+                DeploymentPathSafety.RequirePlainTree(previousSitePath);
                 await StopSiteForDeploymentAsync(profile, recoveryToken);
                 current = await GetSitePhysicalPathAsync(profile, recoveryToken);
                 if (string.IsNullOrWhiteSpace(current) || string.IsNullOrWhiteSpace(failedPublishFolder)

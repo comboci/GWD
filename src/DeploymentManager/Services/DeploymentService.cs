@@ -2474,6 +2474,24 @@ public sealed class DeploymentService
             {
                 if (!string.IsNullOrWhiteSpace(previousSitePath) && Directory.Exists(previousSitePath) && !PathsEqual(previousSitePath, failedPublishFolder))
                 {
+                    // The previous release may have been replaced by an unsafe
+                    // directory after preflight and IIS STOP. Validate again
+                    // immediately before changing the active IIS physical path.
+                    try
+                    {
+                        DeploymentPathSafety.RequireApplicationDirectory(previousSitePath);
+                        DeploymentPathSafety.RequirePlainTree(previousSitePath);
+                    }
+                    catch (Exception validationEx)
+                    {
+                        try { await RestoreOriginalIisStatesAsync(profile); }
+                        catch (Exception iisRecoveryEx)
+                        {
+                            InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after versioned rollback previous-path revalidation failure");
+                            throw new AggregateException("Previous release path became unsafe and original IIS states could not be restored.", validationEx, iisRecoveryEx);
+                        }
+                        throw;
+                    }
                     _runner.Report($"[ROLLBACK] Restoring IIS site '{profile.SiteName}' to previous path: {previousSitePath}");
                     try
                     {

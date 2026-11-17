@@ -46,6 +46,9 @@ public sealed class DeploymentProfile
     public string HostingRoot { get; set; } = @"C:\inetpub\wwwroot\NSPOfficeAutomation";
     public string DeploymentLayout { get; set; } = "Single Folder";
     public bool CleanupPreviousDeployments { get; set; } = true;
+    public bool CreateBackupBeforeDeployment { get; set; } = false;
+    public bool KeepPreviousDeploymentForRollback { get; set; } = false;
+    public int PreviousDeploymentRetentionCount { get; set; } = 1;
     public bool UseDefaultIisWebsite { get; set; } = false;
     public string SiteName { get; set; } = "NSPOfficeAutomation";
     public string AppPoolName { get; set; } = "NSPOfficeAutomation";

@@ -1935,6 +1935,16 @@ public sealed class DeploymentService
                 EnforceOwnedPreviousReleaseLimit(profile, target);
             }
         }
+        // Enforce the configured limit even when this attempt did not displace a release.
+        // Only explicitly manager-owned previous releases are eligible; legacy folders stay untouched.
+        if (profile.KeepPreviousDeploymentForRollback &&
+            string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase))
+        {
+            var activeTarget = ResolveActivePublishFolder(profile);
+            DeploymentPathSafety.RequireApplicationDirectory(activeTarget);
+            if (Directory.Exists(activeTarget))
+                EnforceOwnedPreviousReleaseLimit(profile, activeTarget);
+        }
         _activeDisplacedFolder = null;
         _activeDisplacedTarget = null;
         var backup = _activeRollbackFolder;

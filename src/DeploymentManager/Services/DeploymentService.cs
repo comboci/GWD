@@ -2283,14 +2283,36 @@ public sealed class DeploymentService
     public void MarkDeploymentSuccessful(string publishFolder)
     {
         var marker = Path.Combine(publishFolder, ".deployment-incomplete");
-        // Do not claim success while the unresolved-deployment marker still exists.
-        if (File.Exists(marker))
+        var success = Path.Combine(publishFolder, ".deployment-success");
+        var pending = success + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        // Prepare the success record before removing the incomplete marker.
+        // Otherwise a failed write leaves neither marker and loses recovery state.
+        try
         {
-            File.Delete(marker);
+            File.WriteAllText(pending, DateTime.Now.ToString("O"));
             if (File.Exists(marker))
-                throw new IOException("Deployment completion marker could not be cleared: " + marker);
+            {
+                File.Delete(marker);
+                if (File.Exists(marker))
+                    throw new IOException("Deployment completion marker could not be cleared: " + marker);
+            }
+            try { File.Move(pending, success, overwrite: true); }
+            catch
+            {
+                // If publishing the success record fails, restore the unresolved state.
+                try { File.WriteAllText(marker, DateTime.Now.ToString("O")); }
+                catch (Exception recoveryEx) { InternalDiagnostics.Record(recoveryEx, "Restore incomplete marker after failed success record"); }
+                throw;
+            }
         }
-        File.WriteAllText(Path.Combine(publishFolder, ".deployment-success"), DateTime.Now.ToString("O"));
+        finally
+        {
+            if (File.Exists(pending))
+            {
+                try { File.Delete(pending); }
+                catch (Exception ex) { InternalDiagnostics.Record(ex, "Cleanup temporary deployment success marker"); }
+            }
+        }
     }
 
     private static bool PathsEqual(string a, string b)

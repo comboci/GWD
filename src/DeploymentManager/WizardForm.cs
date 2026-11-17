@@ -2789,6 +2789,12 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 5);
             if (confirmDialog.ShowDialog(this) != DialogResult.Yes) return;
         }
+        if (!isFastLocalTest)
+        {
+            var protection = $"Backup: {(_profile.CreateBackupBeforeDeployment ? "ENABLED" : "DISABLED")}; Keep previous release: {(_profile.KeepPreviousDeploymentForRollback ? "ENABLED" : "DISABLED")}; Automatic rollback: {(_profile.KeepPreviousDeploymentForRollback ? "ENABLED" : "DISABLED")}. " +
+                "Without rollback, a failed deployment may require manual recovery. Continue?";
+            if (MessageBox.Show(this, protection, "Deployment protection policy", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+        }
         _operationRunning = true;
         _deploymentCts?.Dispose();
         _deploymentCts = new CancellationTokenSource();
@@ -2914,6 +2920,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 _deployment.IisStage("COMMIT", "PASS");
                 _deployment.ResolveIisAttempt();
                 _deployment.MarkDeploymentSuccessful(publish);
+                try { _deployment.CleanupCommittedAttempt(_profile); } catch (Exception cleanupEx) { AppendLog("[CLEANUP] Current-attempt cleanup warning: " + cleanupEx.Message); }
                 _lastSuccessfulPublishPath = publish;
             }
             _deploymentStatus = "DEPLOYMENT SUCCESSFUL";

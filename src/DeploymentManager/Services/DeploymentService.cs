@@ -2658,7 +2658,22 @@ public sealed class DeploymentService
             node["ConnectionStrings"] ??= new JsonObject();
             node["ConnectionStrings"]!["DefaultConnection"] = _sql.BuildConnectionString(profile);
             node["ConnectionStrings"]!["NSPOffice"] = _sql.BuildConnectionString(profile);
-            File.WriteAllText(path, node.ToJsonString(new() { WriteIndented = true }));
+            // A failed write must not truncate a live configuration file.
+            // Keep the temporary file beside the target for same-volume atomic replacement.
+            var temporary = path + ".gwd-" + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temporary, node.ToJsonString(new() { WriteIndented = true }));
+                File.Move(temporary, path, overwrite: true);
+            }
+            finally
+            {
+                if (File.Exists(temporary))
+                {
+                    try { File.Delete(temporary); }
+                    catch (Exception ex) { InternalDiagnostics.Record(ex, "Remove temporary connection settings"); }
+                }
+            }
         }
     }
 

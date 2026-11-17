@@ -2475,7 +2475,31 @@ public sealed class DeploymentService
                 if (!string.IsNullOrWhiteSpace(previousSitePath) && Directory.Exists(previousSitePath) && !PathsEqual(previousSitePath, failedPublishFolder))
                 {
                     _runner.Report($"[ROLLBACK] Restoring IIS site '{profile.SiteName}' to previous path: {previousSitePath}");
-                    await RunRollbackCommandCheckedAsync(appcmd, $"set vdir /vdir.name:\"{profile.SiteName}/\" /physicalPath:\"{previousSitePath}\"", "restore previous site path");
+                    try
+                    {
+                        await RunRollbackCommandCheckedAsync(appcmd, $"set vdir /vdir.name:\"{profile.SiteName}/\" /physicalPath:\"{previousSitePath}\"", "restore previous site path");
+                    }
+                    catch (Exception pathRecoveryEx)
+                    {
+                        // appcmd can fail after a partial mutation. Verify the actual
+                        // IIS path before restarting the original service states.
+                        string? actualPath;
+                        try { actualPath = await GetSitePhysicalPathAsync(profile, recoveryToken); }
+                        catch (Exception probeEx)
+                        {
+                            throw new AggregateException("Versioned rollback path change failed and the active IIS path could not be verified; IIS remains stopped for manual recovery.", pathRecoveryEx, probeEx);
+                        }
+                        if (!string.IsNullOrWhiteSpace(actualPath)
+                            && (PathsEqual(actualPath, previousSitePath) || PathsEqual(actualPath, failedPublishFolder!)))
+                        {
+                            try { await RestoreOriginalIisStatesAsync(profile); }
+                            catch (Exception iisRecoveryEx)
+                            {
+                                throw new AggregateException("Versioned rollback path change failed and IIS state recovery also failed.", pathRecoveryEx, iisRecoveryEx);
+                            }
+                        }
+                        throw new IOException("Versioned rollback path change failed; current IIS path was inspected and the original error is preserved.", pathRecoveryEx);
+                    }
                     _iisAttempt?.RecordRecovery("FILES_RESTORED / IIS_UNHEALTHY");
                     await RestoreOriginalIisStatesAsync(profile);
                     if (_initialIisStates is { Site: "Started", Pool: "Started" })

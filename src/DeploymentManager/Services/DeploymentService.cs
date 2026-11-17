@@ -2642,7 +2642,7 @@ public sealed class DeploymentService
             {
                 // If publishing the success record fails, restore the unresolved state.
                 try { File.WriteAllText(marker, DateTime.Now.ToString("O")); }
-                catch (Exception recoveryEx) { InternalDiagnostics.Record(recoveryEx, "Restore incomplete marker after failed success record"); }
+                catch (Exception recoveryEx) { try { InternalDiagnostics.Record(recoveryEx, "Restore incomplete marker after failed success record"); } catch { } }
                 throw;
             }
         }
@@ -2651,7 +2651,7 @@ public sealed class DeploymentService
             if (File.Exists(pending))
             {
                 try { File.Delete(pending); }
-                catch (Exception ex) { InternalDiagnostics.Record(ex, "Cleanup temporary deployment success marker"); }
+                catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Cleanup temporary deployment success marker"); } catch { } }
             }
         }
     }

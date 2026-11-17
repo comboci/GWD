@@ -804,7 +804,7 @@ public sealed class DeploymentService
                     else continue;
                     removed++;
                 }
-                catch (Exception ex) { InternalDiagnostics.Record(ex, "Remove stale static web asset metadata: " + path); }
+                catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Remove stale static web asset metadata: " + path); } catch { } }
             }
         }
         return removed;
@@ -1221,7 +1221,7 @@ public sealed class DeploymentService
                         copied++;
                     }
                 }
-                catch (Exception ex) { InternalDiagnostics.Record(ex, "Copy NuGet archive into local feed: " + file); }
+                catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Copy NuGet archive into local feed: " + file); } catch { } }
             }
         }
         _runner.Report($"[OFFLINE-PREP] NuGet local feed synchronized. New/updated package archives: {copied}; feed: {paths.NugetFeed}");

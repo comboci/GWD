@@ -2283,8 +2283,14 @@ public sealed class DeploymentService
     public void MarkDeploymentSuccessful(string publishFolder)
     {
         var marker = Path.Combine(publishFolder, ".deployment-incomplete");
-        try { if (File.Exists(marker)) File.Delete(marker); } catch (Exception ex) { InternalDiagnostics.Record(ex, "Remove deployment incomplete marker"); }
-        try { File.WriteAllText(Path.Combine(publishFolder, ".deployment-success"), DateTime.Now.ToString("O")); } catch (Exception ex) { InternalDiagnostics.Record(ex, "Write deployment success marker"); }
+        // Do not claim success while the unresolved-deployment marker still exists.
+        if (File.Exists(marker))
+        {
+            File.Delete(marker);
+            if (File.Exists(marker))
+                throw new IOException("Deployment completion marker could not be cleared: " + marker);
+        }
+        File.WriteAllText(Path.Combine(publishFolder, ".deployment-success"), DateTime.Now.ToString("O"));
     }
 
     private static bool PathsEqual(string a, string b)

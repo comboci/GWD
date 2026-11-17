@@ -1928,7 +1928,12 @@ public sealed class DeploymentService
                 Directory.Delete(displaced, recursive: true);
                 _runner.Report("[CLEANUP] Removed current-attempt displaced release: " + displaced);
             }
-            else _runner.Report("[CLEANUP] Retained previous release for manual rollback: " + displaced);
+            else
+            {
+                File.WriteAllText(Path.Combine(displaced, ".gwd-retained-by-manager"), Path.GetFullPath(target));
+                _runner.Report("[CLEANUP] Retained previous release for manual rollback: " + displaced);
+                EnforceOwnedPreviousReleaseLimit(profile, target);
+            }
         }
         _activeDisplacedFolder = null;
         _activeDisplacedTarget = null;
@@ -1945,6 +1950,39 @@ public sealed class DeploymentService
             else _runner.Report("[CLEANUP] Retained current-attempt backup: " + backup);
         }
         _activeRollbackFolder = null;
+    }
+
+    private void EnforceOwnedPreviousReleaseLimit(DeploymentProfile profile, string target)
+    {
+        // Only this application's explicitly marked displaced releases are eligible.
+        // Legacy gwd-previous folders are never silently adopted or deleted.
+        var parent = Path.GetDirectoryName(target);
+        if (string.IsNullOrWhiteSpace(parent) || !Directory.Exists(parent)) return;
+        var prefix = Path.GetFileName(target) + ".gwd-displaced-*";
+        var owned = new List<string>();
+        foreach (var path in Directory.EnumerateDirectories(parent, prefix, SearchOption.TopDirectoryOnly))
+        {
+            var marker = Path.Combine(path, ".gwd-retained-by-manager");
+            if (!File.Exists(marker)) continue;
+            try
+            {
+                if (PathsEqual(File.ReadAllText(marker).Trim(), target))
+                    owned.Add(path);
+            }
+            catch (Exception ex) { _runner.Report("[CLEANUP] Ignored invalid ownership marker: " + ex.Message); }
+        }
+        var keep = Math.Clamp(profile.PreviousDeploymentRetentionCount, 1, 20);
+        foreach (var obsolete in owned.OrderByDescending(Directory.GetLastWriteTimeUtc).Skip(keep))
+        {
+            try
+            {
+                DeploymentPathSafety.RequirePlainTree(obsolete);
+                if (PathsEqual(obsolete, target) || !Directory.Exists(target)) continue;
+                Directory.Delete(obsolete, recursive: true);
+                _runner.Report("[CLEANUP] Removed manager-owned release beyond retention limit: " + obsolete);
+            }
+            catch (Exception ex) { _runner.Report("[CLEANUP] Retention warning for " + obsolete + ": " + ex.Message); }
+        }
     }
 
     private string ResolveActivePublishFolder(DeploymentProfile profile)

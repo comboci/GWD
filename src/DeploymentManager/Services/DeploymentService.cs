@@ -1513,7 +1513,8 @@ public sealed class DeploymentService
             try { await RestoreOriginalIisStatesAsync(profile); }
             catch (Exception recoveryEx)
             {
-                InternalDiagnostics.Record(recoveryEx, "Restore IIS after backup preparation failure");
+                try { InternalDiagnostics.Record(recoveryEx, "Restore IIS after backup preparation failure"); }
+                catch { }
                 throw new AggregateException("Backup preparation failed and original IIS states could not be restored.", backupEx, recoveryEx);
             }
             throw;

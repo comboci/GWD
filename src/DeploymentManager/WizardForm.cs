@@ -2686,7 +2686,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         deployModePanel.Controls.Add(deployModeLabel);
         deployModePanel.Controls.Add(deployMode);
         deployModePanel.Controls.Add(deployModeHelp);
-        // V159 stage 1: persist the requested policy; enforcement is implemented in the next stage.
+        // V159: policy settings are persisted per project and enforced by DeploymentService.
         var backupChoice = new CheckBox { Text = "Create Backup Before Deployment", AutoSize = true, Checked = _profile.CreateBackupBeforeDeployment, Enabled = !_operationRunning };
         var retentionChoice = new CheckBox { Text = "Keep Previous Deployment for Rollback", AutoSize = true, Checked = _profile.KeepPreviousDeploymentForRollback, Enabled = !_operationRunning };
         var retentionCount = new NumericUpDown { Minimum = 1, Maximum = 20, Value = Math.Clamp(_profile.PreviousDeploymentRetentionCount, 1, 20), Width = 55, Enabled = retentionChoice.Checked && !_operationRunning };
@@ -2700,17 +2700,25 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         policyPanel.Controls.Add(retentionCount);
         policyPanel.Controls.Add(new Label { Text = "Old releases are removed only after explicit confirmation in Deployment Cleanup.", AutoSize = true, ForeColor = Color.DarkOrange, MaximumSize = new Size(550, 0) });
         deployModePanel.Controls.Add(policyPanel);
+        reviewRoot.RowCount = 5;
+        reviewRoot.RowStyles.Clear();
+        reviewRoot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        reviewRoot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        reviewRoot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        reviewRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        reviewRoot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        reviewRoot.Controls.Add(deployModePanel, 0, 0);
         var statusBanner = new Label { Text = _deploymentStatus, AutoSize = true, Padding = new Padding(8), Font = new Font("Segoe UI Semibold", 11F), ForeColor = _deploymentStatus.Contains("UNSUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.Firebrick : (_deploymentStatus.Contains("SUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.ForestGreen : Color.DimGray) };
-        reviewRoot.Controls.Add(statusBanner, 0, 0);
+        reviewRoot.Controls.Add(statusBanner, 0, 1);
         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 210, FixedPanel = FixedPanel.None };
         void KeepHalfSplit() { if (split.Height > 160) split.SplitterDistance = Math.Max(80, (split.Height - split.SplitterWidth) / 2); }
         split.Resize += (_, _) => KeepHalfSplit();
         split.HandleCreated += (_, _) => BeginInvoke(() => KeepHalfSplit());
         var summary = new TextBox { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, Font = new Font("Consolas", 9.5F) };
         summary.Text = $"Application: {_profile.ApplicationName}\r\nBuild mode (selected on Project Source): {_profile.BuildMode}\r\nHosted website action: {(_profile.BuildMode == "Fast Local Test" ? "UNCHANGED — compile only" : "UPDATE after successful build")}\r\nDependency mode: {_profile.DependencyResolutionMode}\r\nOffline build: {_profile.OfflineBuild}\r\nTarget mode: {_profile.TargetMode}\r\nTarget: {_profile.TargetHost}\r\nDeployment Repository: {_profile.DeploymentRepositoryFolder}\r\nStable Build Workspace: {_profile.WorkspaceRoot}\r\nIncoming Source: {_profile.SourceFolder}\r\nReady publish folder: {_profile.ReadyPublishFolder}\r\nAPI project: {_profile.ApiProjectPath}\r\nTarget framework: .NET {_profile.TargetFrameworkMajor}\r\nNode required: {_profile.RequiresNode}\r\nSQL: {_profile.SqlInstance}\r\nDatabase: {_profile.DatabaseName}\r\nHosted site folder: {_profile.HostingRoot}\r\nDeployment layout: {_profile.DeploymentLayout}\r\nDefault IIS website: {_profile.UseDefaultIisWebsite}\r\nPersistent data root: {_profile.DeploymentRoot}\r\nIIS site: {_profile.SiteName}\r\nApp pool: {_profile.AppPoolName}\r\nPort: {_profile.HttpPort}\r\nHealth: {_profile.HealthPath}";
-        split.Panel1.Controls.Add(summary); split.Panel2.Controls.Add(_log); reviewRoot.Controls.Add(split, 0, 1);
+        split.Panel1.Controls.Add(summary); split.Panel2.Controls.Add(_log); reviewRoot.Controls.Add(split, 0, 2);
         _reviewActivity = new Label { Text = _activity.Text, Dock = DockStyle.Fill, AutoEllipsis = true, Height = 32, Padding = new Padding(4, 6, 4, 0), ForeColor = Color.DimGray, Font = new Font("Segoe UI Semibold", 9.5F) };
-        reviewRoot.Controls.Add(_reviewActivity, 0, 2);
+        reviewRoot.Controls.Add(_reviewActivity, 0, 3);
 
         {
             var deploymentReady = (_persistentState.LastResult == "Successful" && !string.IsNullOrWhiteSpace(_lastSuccessfulPublishPath)) || Directory.Exists(_profile.HostingRoot);
@@ -2756,7 +2764,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
 
             actions.Controls.Add(logActions, 0, 0);
             actions.Controls.Add(commandActions, 1, 0);
-            reviewRoot.Controls.Add(actions, 0, 3);
+            reviewRoot.Controls.Add(actions, 0, 4);
         }
         static string BuildModeHelp(int index) => index switch
         {
@@ -2806,7 +2814,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         remove.Click += async (_, _) =>
         {
             if (list.SelectedItems.Count != 1 || list.SelectedItems[0].Tag is not DeploymentService.CleanupCandidate selected || selected.IsActive) return;
-            var answer = MessageBox.Show(dialog, $"Permanently delete this directory and its contents?\\n\\n{selected.Path}\\n\\n{selected.Bytes / 1073741824d:F2} GiB\\n\\nThis cannot be undone.", "Confirm permanent deletion", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            var answer = MessageBox.Show(dialog, $"Permanently delete this directory and its contents?\n\n{selected.Path}\n\n{selected.Bytes / 1073741824d:F2} GiB\n\nThis cannot be undone.", "Confirm permanent deletion", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
             if (answer != DialogResult.Yes) return;
             remove.Enabled = false;
             try { await _deployment.DeleteDeploymentCleanupCandidateAsync(_profile, selected.Path); AppendLog("[CLEANUP] Deleted with explicit operator approval: " + selected.Path); }

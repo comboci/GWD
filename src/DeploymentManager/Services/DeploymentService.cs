@@ -2500,6 +2500,12 @@ public sealed class DeploymentService
                         }
                         throw new IOException("Versioned rollback path change failed; current IIS path was inspected and the original error is preserved.", pathRecoveryEx);
                     }
+                    // A successful appcmd exit does not prove the IIS vdir points
+                    // at the recovered release. Verify before starting the site.
+                    var verifiedPreviousPath = await GetSitePhysicalPathAsync(profile, recoveryToken);
+                    if (string.IsNullOrWhiteSpace(verifiedPreviousPath)
+                        || !PathsEqual(verifiedPreviousPath, previousSitePath))
+                        throw new IOException("Versioned rollback path verification failed after appcmd; IIS remains stopped and recovery is unverified.");
                     _iisAttempt?.RecordRecovery("FILES_RESTORED / IIS_UNHEALTHY");
                     await RestoreOriginalIisStatesAsync(profile);
                     if (_initialIisStates is { Site: "Started", Pool: "Started" })

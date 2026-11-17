@@ -33,7 +33,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed with exit code $LASTEXITCODE." }
 
     foreach ($name in @('README-CLI.md', 'invoke-deployment-manager.ps1', "CHANGELOG-V$major.md", "TEST-REPORT-V$major.md")) {
-        $source = Join-Path $sourceRoot $name
+        $source = if ($name -like 'CHANGELOG-*' -or $name -like 'TEST-REPORT-*') { Join-Path (Join-Path $sourceRoot 'Report') $name } else { Join-Path $sourceRoot $name }
         if (Test-Path $source) { Copy-Item -LiteralPath $source -Destination $staging -Force }
     }
 

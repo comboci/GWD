@@ -2,7 +2,11 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-title Generic Web Deployment Manager - Fast Release Build
+title Generic Web Deployment Manager - Unified Release Build
+rem Usage: build-release.cmd [--full]
+set "BUILD_MODE=FAST"
+if /I "%~1"=="--full" set "BUILD_MODE=FULL"
+if not "%~1"=="" if /I not "%~1"=="--full" (echo [ERROR] Unknown option: %~1. Use --full or no argument. & exit /b 2)
 set "PROJECT=src\DeploymentManager\DeploymentManager.csproj"
 set "SOURCE_ROOT=%CD%"
 set "DIST=dist"
@@ -12,7 +16,6 @@ set "NUGET_HTTP_CACHE_PATH=%CACHE_ROOT%\NuGetHttpCache"
 
 for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "[xml]$x=Get-Content '.\Directory.Build.props'; $x.Project.PropertyGroup.DeploymentManagerVersion"`) do set "FULL_VERSION=%%V"
 for /f "tokens=1 delims=." %%V in ("%FULL_VERSION%") do set "VERSION=%%V"
-set "RESTORE_STAMP=%CACHE_ROOT%\restore-%VERSION%-win-x64.stamp"
 
 for /f "usebackq delims=" %%R in (`powershell -NoProfile -ExecutionPolicy Bypass -File ".\resolve-release-root.ps1" -Create -PathOnly`) do set "MANAGER_ROOT=%%R"
 if not defined MANAGER_ROOT (echo [ERROR] Could not resolve Manager release/output folder from Settings. & pause & exit /b 1)
@@ -44,22 +47,19 @@ if errorlevel 1 (
 )
 
 echo ============================================================
-echo Generic Web Deployment Manager V%VERSION% - FAST RELEASE BUILD
+echo Generic Web Deployment Manager V%VERSION% - %BUILD_MODE% RELEASE BUILD
 echo Release output: %MANAGER_ROOT%
 echo ============================================================
-set "NEED_RESTORE=0"
-if not exist "%RESTORE_STAMP%" set "NEED_RESTORE=1"
-rem The fresh short-path stage excludes obj; source assets cannot satisfy --no-restore there.
-if not exist "%BUILD_STAGE%\src\DeploymentManager\obj\project.assets.json" set "NEED_RESTORE=1"
-if "%NEED_RESTORE%"=="0" (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "$p=(Get-Item '%SOURCE_ROOT%\src\DeploymentManager\DeploymentManager.csproj').LastWriteTimeUtc; $v=(Get-Item '%SOURCE_ROOT%\Directory.Build.props').LastWriteTimeUtc; $s=(Get-Item '%RESTORE_STAMP%').LastWriteTimeUtc; if($p -gt $s -or $v -gt $s){exit 10}else{exit 0}" >nul 2>&1
-  if errorlevel 10 set "NEED_RESTORE=1"
-)
-if "%NEED_RESTORE%"=="1" (
+rem The isolated stage excludes obj, so a restore is mandatory on every invocation.
+rem Full mode additionally performs an explicit clean and forces dependency resolution.
+if /I "%BUILD_MODE%"=="FULL" (
+  dotnet clean "%PROJECT%" -c Release --verbosity minimal
+  if errorlevel 1 (echo [ERROR] Clean failed. Previous EXE remains untouched. & exit /b 1)
+  dotnet restore "%PROJECT%" -r win-x64 --packages "%NUGET_PACKAGES%" --force -p:NuGetAudit=false --verbosity minimal
+) else (
   dotnet restore "%PROJECT%" -r win-x64 --packages "%NUGET_PACKAGES%" -p:NuGetAudit=false --verbosity minimal
-  if errorlevel 1 ( echo [ERROR] Restore failed. Previous EXE remains untouched. & pause & exit /b 1 )
-  >"%RESTORE_STAMP%" echo restored %DATE% %TIME%
-) else echo [RESTORE] Skipped - existing restore is still valid.
+)
+if errorlevel 1 (echo [ERROR] Restore failed. Previous EXE remains untouched. & exit /b 1)
 
 if exist "%DIST%" rmdir /s /q "%DIST%"
 dotnet publish "%PROJECT%" -c Release -r win-x64 --self-contained false --no-restore -p:NuGetAudit=false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o "%DIST%" --verbosity minimal
@@ -68,6 +68,9 @@ if errorlevel 1 ( echo [ERROR] Publish failed. Previous EXE remains untouched. &
 set "BUILT_EXE=%DIST%\GenericWeb.DeploymentManager.exe"
 copy /y "%BUILT_EXE%" "%MANAGER_ROOT%\DeploymentManager-V%VERSION%.exe" >nul || (echo [ERROR] Versioned EXE copy failed. & pause & exit /b 1)
 copy /y "%BUILT_EXE%" "%MANAGER_ROOT%\DeploymentManager.exe" >nul || (echo [ERROR] Latest EXE copy failed. & pause & exit /b 1)
+rem The published executable is outside the staging workspace; remove temporary source after success.
+rmdir /s /q "%BUILD_STAGE%" >nul 2>&1
+if exist "%BUILD_STAGE%" echo [WARNING] Temporary build workspace could not be removed: %BUILD_STAGE%
 start "" "%MANAGER_ROOT%\DeploymentManager-V%VERSION%.exe"
 echo Built: %BUILT_EXE%
 echo Published: %MANAGER_ROOT%

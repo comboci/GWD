@@ -1,6 +1,6 @@
 {
-  "version": "155.0.0",
+  "version": "156.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V155-R — اصلاح زمان‌سنج یکنواخت گزارش عملکرد ساخت"
+  "commitNote": "V156 — افزودن پاکسازی نسخه‌های قدیمی از صفحه اصلی"
 }

@@ -47,13 +47,17 @@ public sealed class PrerequisiteService
         Directory.CreateDirectory(cacheFolder);
         var destination = Path.Combine(cacheFolder, package.FileName);
         using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-        using var response = await http.GetAsync(package.DirectUrl, HttpCompletionOption.ResponseHeadersRead, ct);
+        // Bound network inactivity even when the caller supplies no cancellation token.
+        using var inactivity = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        inactivity.CancelAfter(TimeSpan.FromMinutes(2));
+        using var response = await http.GetAsync(package.DirectUrl, HttpCompletionOption.ResponseHeadersRead, inactivity.Token);
+        inactivity.CancelAfter(TimeSpan.FromMinutes(2));
         response.EnsureSuccessStatusCode();
         var total = response.Content.Headers.ContentLength;
         _runner.Report(total is > 0
             ? $"[DOWNLOAD] {package.DisplayName}: server reports {total.Value / 1024d / 1024d:0.0} MB."
             : $"[DOWNLOAD] {package.DisplayName}: download started; total size is not reported by the server.");
-        await using var input = await response.Content.ReadAsStreamAsync(ct);
+        await using var input = await response.Content.ReadAsStreamAsync(inactivity.Token);
         var temporary = Path.Combine(cacheFolder, ".gwd-download-" + Guid.NewGuid().ToString("N") + ".partial");
         long done = 0;
         try
@@ -65,9 +69,10 @@ public sealed class PrerequisiteService
                 var lastLoggedUtc = DateTime.UtcNow;
                 while (true)
                 {
-                    var read = await input.ReadAsync(buffer, ct);
+                    var read = await input.ReadAsync(buffer, inactivity.Token);
                     if (read <= 0) break;
-                    await output.WriteAsync(buffer.AsMemory(0, read), ct);
+                    await output.WriteAsync(buffer.AsMemory(0, read), inactivity.Token);
+                    inactivity.CancelAfter(TimeSpan.FromMinutes(2));
                     done += read;
                     var percent = total is > 0 ? (int)Math.Clamp(done * 100 / total.Value, 0, 100) : -1;
                     if (percent >= 0) progress?.Report(percent);
@@ -81,7 +86,7 @@ public sealed class PrerequisiteService
                         lastLoggedUtc = now;
                     }
                 }
-                await output.FlushAsync(ct);
+                await output.FlushAsync(inactivity.Token);
             }
             ct.ThrowIfCancellationRequested();
             // Never replace a cached installer with a truncated HTTP response.

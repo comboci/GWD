@@ -1563,7 +1563,7 @@ public sealed class DeploymentService
             InternalDiagnostics.Record(activationEx, "Activate staging folder");
             // Recovery is a compensating operation: never reuse a cancelled deployment token.
             // Keep the original activation failure if recovery also fails, and report both.
-            if (string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) && Directory.Exists(rollback))
+            if (profile.KeepPreviousDeploymentForRollback && string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) && Directory.Exists(rollback))
             {
                 try
                 {

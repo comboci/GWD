@@ -2512,7 +2512,16 @@ public sealed class DeploymentService
                 }
                 else
                 {
-                    throw new IOException("Recovery blocked: no previous site path. Site, binding and failed files preserved for manual recovery.");
+                    // The previous release can disappear between preflight and
+                    // the IIS path mutation. Nothing has been changed in IIS yet.
+                    var missingPrevious = new IOException("Recovery blocked: previous site path became unavailable after IIS STOP. Failed files preserved for manual recovery.");
+                    try { await RestoreOriginalIisStatesAsync(profile); }
+                    catch (Exception iisRecoveryEx)
+                    {
+                        InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after previous release disappeared during versioned rollback");
+                        throw new AggregateException("Previous release became unavailable and original IIS states could not be restored.", missingPrevious, iisRecoveryEx);
+                    }
+                    throw missingPrevious;
                 }
             }
             else throw new IOException("Recovery could not prove the active IIS path; failed files preserved for manual review.");

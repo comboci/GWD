@@ -1604,6 +1604,9 @@ public sealed class DeploymentService
             {
                 try
                 {
+                    // Validate the owned, complete rollback before another IIS STOP.
+                    // An incomplete backup cannot recover the hosted files.
+                    RequireCompleteRollback(rollback, target);
                     await StopSiteForDeploymentAsync(profile, CancellationToken.None);
                     await RestoreHostedFolderSafelyAsync(rollback, target, profile);
                     _runner.Report("[ROLLBACK] Activation failure restored the previous hosted folder.");

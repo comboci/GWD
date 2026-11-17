@@ -2215,6 +2215,11 @@ public sealed class DeploymentService
 
                 // Revalidate after potentially long backup preparation.
                 await WaitForAppPoolStoppedAsync(profile, recoveryToken);
+                // The active directory may have changed while recovery was prepared.
+                // Never move a reparse-point tree or an unsafe replacement target.
+                DeploymentPathSafety.RequireApplicationDirectory(target);
+                DeploymentPathSafety.RequirePlainTree(target);
+                DeploymentPathSafety.RequirePlainTree(prepared);
                 // Once replacement begins, cancellation must not interrupt recovery.
                 if (Directory.Exists(target)) Directory.Move(target, displaced);
                 try

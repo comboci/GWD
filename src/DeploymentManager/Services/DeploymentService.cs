@@ -109,7 +109,7 @@ public sealed class DeploymentService
                     if (!string.Equals(Read(key), "PASS", StringComparison.OrdinalIgnoreCase))
                         return new(false, $"Prepared Publish: INVALID — BUILD-METADATA.json requires {key}=PASS (actual: {Read(key)}).", Path.GetFileName(binaries[0]), true);
             }
-            catch (Exception ex) { InternalDiagnostics.Record(ex, "Validate BUILD-METADATA.json"); return new(false, "Prepared Publish: INVALID — BUILD-METADATA.json could not be parsed: " + ex.Message, Path.GetFileName(binaries[0]), true); }
+            catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Validate BUILD-METADATA.json"); } catch { } return new(false, "Prepared Publish: INVALID — BUILD-METADATA.json could not be parsed: " + ex.Message, Path.GetFileName(binaries[0]), true); }
         }
         return new(true, $"Prepared Publish: VALID — Application: {Path.GetFileName(binaries[0])}; Source Build Required: NO; Frontend Build Required: NO; .NET Publish Required: NO; Metadata: {(File.Exists(metadata) ? "PASS" : "not present")}", Path.GetFileName(binaries[0]), File.Exists(metadata));
     }
@@ -267,7 +267,7 @@ public sealed class DeploymentService
             var legacy = Path.Combine(profile.HostingRoot, ".smart-deploy-state.json");
             return File.Exists(legacy) ? JsonSerializer.Deserialize<SmartDeployState>(File.ReadAllText(legacy)) : null;
         }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Read persistent smart deploy state"); return null; }
+        catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Read persistent smart deploy state"); } catch { } return null; }
     }
 
     private void WriteSmartState(string output, SmartDeployState state)
@@ -306,7 +306,7 @@ public sealed class DeploymentService
                 else return text.Split(new[]{'\r','\n'}, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? "";
             }
         }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Read source version metadata"); }
+        catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Read source version metadata"); } catch { } }
         return "";
     }
 
@@ -327,7 +327,7 @@ public sealed class DeploymentService
     private static DateTime GetDirectoryLatestWriteUtc(string folder)
     {
         try { return Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories).Select(File.GetLastWriteTimeUtc).DefaultIfEmpty(Directory.GetLastWriteTimeUtc(folder)).Max(); }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Read directory latest write time"); return DateTime.MinValue; }
+        catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Read directory latest write time"); } catch { } return DateTime.MinValue; }
     }
 
     private sealed record FastCachePaths(string Root, string NpmCache, string NugetPackages);
@@ -1401,7 +1401,7 @@ public sealed class DeploymentService
         }
         catch (Exception ex)
         {
-            InternalDiagnostics.Record(ex, "Parse frontend package build commands");
+            try { InternalDiagnostics.Record(ex, "Parse frontend package build commands"); } catch { }
             return Array.Empty<string>();
         }
     }
@@ -2659,7 +2659,7 @@ public sealed class DeploymentService
     private static bool PathsEqual(string a, string b)
     {
         try { return string.Equals(Path.GetFullPath(a).TrimEnd('\\'), Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase); }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Compare deployment paths"); return string.Equals(a.TrimEnd('\\'), b.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase); }
+        catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Compare deployment paths"); } catch { } return string.Equals(a.TrimEnd('\\'), b.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase); }
     }
 
     public async Task RestartAppAsync(DeploymentProfile profile, CancellationToken ct = default)

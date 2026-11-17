@@ -1565,7 +1565,12 @@ public sealed class DeploymentService
                 if (Directory.Exists(preparedRelease))
                 {
                     try { Directory.Delete(preparedRelease, recursive: true); }
-                    catch (Exception ex) { InternalDiagnostics.Record(ex, "Remove incomplete prepared release"); }
+                    catch (Exception ex)
+                    {
+                        // Diagnostics must not replace an activation error or skip rollback.
+                        try { InternalDiagnostics.Record(ex, "Remove incomplete prepared release"); }
+                        catch { }
+                    }
                 }
             }
             var preservationSource = Directory.Exists(rollback) ? rollback : _activeDisplacedFolder;
@@ -1597,7 +1602,9 @@ public sealed class DeploymentService
         }
         catch (Exception activationEx)
         {
-            InternalDiagnostics.Record(activationEx, "Activate staging folder");
+            // Failure reporting must not prevent the compensating rollback.
+            try { InternalDiagnostics.Record(activationEx, "Activate staging folder"); }
+            catch { }
             // Recovery is a compensating operation: never reuse a cancelled deployment token.
             // Keep the original activation failure if recovery also fails, and report both.
             if (profile.KeepPreviousDeploymentForRollback && string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) && Directory.Exists(rollback))
@@ -1612,7 +1619,8 @@ public sealed class DeploymentService
                 }
                 catch (Exception recoveryEx)
                 {
-                    InternalDiagnostics.Record(recoveryEx, "Restore hosted folder after activation failure");
+                    try { InternalDiagnostics.Record(recoveryEx, "Restore hosted folder after activation failure"); }
+                    catch { }
                     throw new AggregateException("Activation failed and rollback also failed; hosted folder may be incomplete.", activationEx, recoveryEx);
                 }
             }

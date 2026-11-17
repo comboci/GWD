@@ -2654,7 +2654,10 @@ public sealed class DeploymentService
         {
             var path = Path.Combine(publishFolder, name);
             if (!File.Exists(path)) continue;
-            var node = JsonNode.Parse(File.ReadAllText(path))?.AsObject() ?? new JsonObject();
+            // An empty or JSON-null configuration is not a valid settings object.
+            // Never silently replace it with a new object and discard existing settings.
+            var node = JsonNode.Parse(File.ReadAllText(path)) as JsonObject
+                ?? throw new InvalidDataException("Application settings must contain a JSON object: " + path);
             node["ConnectionStrings"] ??= new JsonObject();
             node["ConnectionStrings"]!["DefaultConnection"] = _sql.BuildConnectionString(profile);
             node["ConnectionStrings"]!["NSPOffice"] = _sql.BuildConnectionString(profile);

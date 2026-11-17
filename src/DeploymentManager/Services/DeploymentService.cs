@@ -59,7 +59,7 @@ public sealed class DeploymentService
         var safe = SecretRedactor.Redact(message);
         _runner.Report(safe);
         try { _iisAttempt?.Observe(safe); }
-        catch (Exception ex) { _runner.Report("[DIAGNOSTICS] Could not persist IIS observation: " + ex.Message); InternalDiagnostics.Record(ex, "Persist IIS observation"); }
+        catch (Exception ex) { _runner.Report("[DIAGNOSTICS] Could not persist IIS observation: " + ex.Message); try { InternalDiagnostics.Record(ex, "Persist IIS observation"); } catch { } }
     }
 
     public async Task ValidateIisPreflightAsync(DeploymentProfile profile, CancellationToken ct = default)
@@ -1251,7 +1251,7 @@ public sealed class DeploymentService
         }
         finally
         {
-            try { if (Directory.Exists(temp)) Directory.Delete(temp, true); } catch (Exception ex) { InternalDiagnostics.Record(ex, "Cleanup temporary npm online-prep folder"); }
+            try { if (Directory.Exists(temp)) Directory.Delete(temp, true); } catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Cleanup temporary npm online-prep folder"); } catch { } }
         }
     }
 
@@ -1278,7 +1278,7 @@ public sealed class DeploymentService
         }
         finally
         {
-            try { if (Directory.Exists(temp)) Directory.Delete(temp, true); } catch (Exception ex) { InternalDiagnostics.Record(ex, "Cleanup temporary npm offline-test folder"); }
+            try { if (Directory.Exists(temp)) Directory.Delete(temp, true); } catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Cleanup temporary npm offline-test folder"); } catch { } }
         }
     }
 
@@ -3037,7 +3037,7 @@ public sealed class DeploymentService
                 if (File.Exists(temporary))
                 {
                     try { File.Delete(temporary); }
-                    catch (Exception ex) { InternalDiagnostics.Record(ex, "Remove temporary connection settings"); }
+                    catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Remove temporary connection settings"); } catch { } }
                 }
             }
         }

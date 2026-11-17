@@ -1462,9 +1462,24 @@ public sealed class DeploymentService
         // Stop and verify before taking the deployable snapshot. A backup taken while
         // the application is writing files cannot establish a coherent rollback version.
         IisStage("STOP", "RUNNING");
-        await StopSiteForDeploymentAsync(profile, ct);
-        await WaitForAppPoolStoppedAsync(profile, ct);
-        IisStage("STOP", "PASS");
+        try
+        {
+            await StopSiteForDeploymentAsync(profile, ct);
+            await WaitForAppPoolStoppedAsync(profile, ct);
+            IisStage("STOP", "PASS");
+        }
+        catch (Exception stopEx)
+        {
+            // STOP can partially mutate IIS before reporting failure or cancellation.
+            // Restore the original states before propagating the failed preflight.
+            try { await RestoreOriginalIisStatesAsync(profile); }
+            catch (Exception recoveryEx)
+            {
+                InternalDiagnostics.Record(recoveryEx, "Restore IIS after failed deployment stop");
+                throw new AggregateException("Deployment STOP failed and IIS state recovery also failed.", stopEx, recoveryEx);
+            }
+            throw;
+        }
         IisStage("BACKUP", "RUNNING");
         // Backup preparation happens after IIS is stopped. A failure here must
         // restore the original IIS states rather than leaving the site offline.

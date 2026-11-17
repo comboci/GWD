@@ -33,9 +33,15 @@ public sealed class PrerequisiteService
     {
         // Never silently download SQL Server 2022 for an unknown or unsupported selection.
         var selected = version?.Trim() ?? "";
-        if (selected.Contains("2019", StringComparison.OrdinalIgnoreCase))
+        // Reject ambiguous selections such as "2019/2022" rather than silently
+        // installing the first matching version.
+        var has2019 = selected.Contains("2019", StringComparison.OrdinalIgnoreCase);
+        var has2022 = selected.Contains("2022", StringComparison.OrdinalIgnoreCase);
+        if (has2019 && has2022)
+            throw new ArgumentException("Ambiguous SQL Server Express version. Select only 2019 or 2022.", nameof(version));
+        if (has2019)
             return new("sql", "SQL Server 2019 Express", "SQL2019-SSEI-Expr.exe", Sql2019ExpressUrl, Sql2019Page);
-        if (selected.Contains("2022", StringComparison.OrdinalIgnoreCase))
+        if (has2022)
             return new("sql", "SQL Server 2022 Express", "SQL2022-SSEI-Expr.exe", Sql2022ExpressUrl, Sql2022Page);
         throw new ArgumentException("Unsupported SQL Server Express version. Select 2019 or 2022.", nameof(version));
     }

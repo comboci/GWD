@@ -2801,7 +2801,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 var candidates = await _deployment.DiscoverDeploymentCleanupAsync(_profile);
                 foreach (var candidate in candidates)
                 {
-                    var item = new ListViewItem(new[] { candidate.Kind, candidate.Path, candidate.ModifiedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), (candidate.Bytes / 1073741824d).ToString("F2"), candidate.IsActive ? "ACTIVE — LOCKED" : "Old / review" }) { Tag = candidate };
+                    var item = new ListViewItem(new[] { candidate.Kind, candidate.Path, candidate.ModifiedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), (candidate.Bytes / 1073741824d).ToString("F2"), candidate.Kind.Contains("unverified", StringComparison.OrdinalIgnoreCase) ? "UNVERIFIED — LOCKED" : candidate.IsActive ? "ACTIVE — LOCKED" : "Verified / review" }) { Tag = candidate };
                     list.Items.Add(item);
                 }
                 AppendLog($"[CLEANUP] Inventory completed: {candidates.Count} candidates; no files deleted.");

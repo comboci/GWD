@@ -45,7 +45,7 @@ public sealed class DeploymentService
     }
     public void RecordDeploymentHealth(string detail) => ReportIis("[HEALTH] " + detail);
     public void IisStage(string stage, string state) => _iisAttempt?.Stage(stage, state);
-    public void ResolveIisAttempt() { _iisAttempt?.Resolve(); _filesChanged = false; _activeRollbackFolder = null; }
+    public void ResolveIisAttempt() { _iisAttempt?.Resolve(); _filesChanged = false; }
 
     private IisSafety Iis()
     {

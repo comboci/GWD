@@ -1466,6 +1466,10 @@ public sealed class DeploymentService
         await WaitForAppPoolStoppedAsync(profile, ct);
         IisStage("STOP", "PASS");
         IisStage("BACKUP", "RUNNING");
+        // Backup preparation happens after IIS is stopped. A failure here must
+        // restore the original IIS states rather than leaving the site offline.
+        try
+        {
         Directory.CreateDirectory(Path.GetDirectoryName(target) ?? profile.HostingRoot);
         if (profile.CreateBackupBeforeDeployment && string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) && Directory.Exists(target))
         {
@@ -1487,6 +1491,17 @@ public sealed class DeploymentService
         }
         else _runner.Report(profile.CreateBackupBeforeDeployment ? "[DEPLOY] BACKUP = NOT_REQUIRED; no previous Single Folder payload." : "[DEPLOY] BACKUP = SKIPPED; disabled by project policy.");
         IisStage("BACKUP", _activeRollbackFolder is not null ? "PASS" : "SKIPPED");
+        }
+        catch
+        {
+            try { await RestoreOriginalIisStatesAsync(profile); }
+            catch (Exception recoveryEx)
+            {
+                InternalDiagnostics.Record(recoveryEx, "Restore IIS after backup preparation failure");
+                throw new IOException("Backup preparation failed and original IIS states could not be restored.", recoveryEx);
+            }
+            throw;
+        }
 
         // V65: IIS may report the site/pool stopped before worker-process file handles are fully released.
         // Wait for the pool state and use bounded lock-aware retry instead of a one-shot Directory.Delete.

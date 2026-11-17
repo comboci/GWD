@@ -1,6 +1,6 @@
 <Project>
   <PropertyGroup>
-    <DeploymentManagerVersion>198.0.0</DeploymentManagerVersion>
+    <DeploymentManagerVersion>199.0.0</DeploymentManagerVersion>
     <Version>$(DeploymentManagerVersion)</Version>
     <AssemblyVersion>$(DeploymentManagerVersion).0</AssemblyVersion>
     <FileVersion>$(DeploymentManagerVersion).0</FileVersion>

@@ -54,12 +54,12 @@ rem The isolated stage excludes obj, so a restore is mandatory on every invocati
 rem Full mode additionally performs an explicit clean and forces dependency resolution.
 if /I "%BUILD_MODE%"=="FULL" (
   dotnet clean "%PROJECT%" -c Release --verbosity minimal
-  if errorlevel 1 (echo [ERROR] Clean failed. Previous EXE remains untouched. & exit /b 1)
+  if errorlevel 1 goto :clean_failed
   dotnet restore "%PROJECT%" -r win-x64 --packages "%NUGET_PACKAGES%" --force -p:NuGetAudit=false --verbosity minimal
 ) else (
   dotnet restore "%PROJECT%" -r win-x64 --packages "%NUGET_PACKAGES%" -p:NuGetAudit=false --verbosity minimal
 )
-if errorlevel 1 (echo [ERROR] Restore failed. Previous EXE remains untouched. & exit /b 1)
+if errorlevel 1 goto :restore_failed
 
 if exist "%DIST%" rmdir /s /q "%DIST%"
 dotnet publish "%PROJECT%" -c Release -r win-x64 --self-contained false --no-restore -p:NuGetAudit=false -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o "%DIST%" --verbosity minimal
@@ -72,6 +72,14 @@ rem The published executable is outside the staging workspace; remove temporary 
 rmdir /s /q "%BUILD_STAGE%" >nul 2>&1
 if exist "%BUILD_STAGE%" echo [WARNING] Temporary build workspace could not be removed: %BUILD_STAGE%
 start "" "%MANAGER_ROOT%\DeploymentManager-V%VERSION%.exe"
-echo Built: %BUILT_EXE%
+echo Built and published: %MANAGER_ROOT%\DeploymentManager-V%VERSION%.exe
 echo Published: %MANAGER_ROOT%
 exit /b 0
+
+:clean_failed
+echo [ERROR] Clean failed. Previous EXE remains untouched.
+exit /b 1
+
+:restore_failed
+echo [ERROR] Restore failed. Previous EXE remains untouched.
+exit /b 1

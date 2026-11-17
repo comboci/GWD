@@ -2597,6 +2597,65 @@ public sealed class DeploymentService
         }
     }
 
+    public sealed record CleanupCandidate(string Path, DateTime ModifiedUtc, long Bytes, bool IsActive, string Kind);
+
+    public async Task<IReadOnlyList<CleanupCandidate>> DiscoverDeploymentCleanupAsync(DeploymentProfile profile, CancellationToken ct = default)
+    {
+        var activeIisPath = await GetSitePhysicalPathAsync(profile, ct);
+        if (string.IsNullOrWhiteSpace(activeIisPath))
+            throw new IOException("Cleanup scan blocked: IIS active physical path could not be established.");
+        var active = Path.GetFullPath(activeIisPath);
+        var hosting = Path.GetFullPath(profile.HostingRoot);
+        var parent = Path.GetDirectoryName(hosting) ?? throw new IOException("Hosting parent is unknown.");
+        var baseName = Path.GetFileName(hosting.TrimEnd(Path.DirectorySeparatorChar));
+        var candidates = new List<(string Path, string Kind)>();
+        if (Directory.Exists(parent))
+        {
+            foreach (var directory in Directory.EnumerateDirectories(parent, baseName + ".gwd-previous-*", SearchOption.TopDirectoryOnly))
+                candidates.Add((directory, "Previous IIS release"));
+            foreach (var directory in Directory.EnumerateDirectories(parent, baseName + ".gwd-displaced-*", SearchOption.TopDirectoryOnly))
+                candidates.Add((directory, "Displaced IIS release"));
+        }
+        var backupRoot = GetRollbackRoot(profile);
+        if (Directory.Exists(backupRoot))
+            foreach (var directory in Directory.EnumerateDirectories(backupRoot, "*", SearchOption.TopDirectoryOnly))
+                candidates.Add((directory, "Application backup"));
+        var output = new List<CleanupCandidate>();
+        foreach (var item in candidates.DistinctBy(x => x.Path, StringComparer.OrdinalIgnoreCase))
+        {
+            ct.ThrowIfCancellationRequested();
+            var path = Path.GetFullPath(item.Path);
+            DeploymentPathSafety.RequirePlainTree(path);
+            bool isActive = PathsEqual(path, active) || PathsEqual(path, hosting)
+                || active.StartsWith(path.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)
+                || hosting.StartsWith(path.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
+            long size = 0;
+            if (!isActive)
+                foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0) throw new IOException("Reparse-point file blocks cleanup: " + file);
+                    size += new FileInfo(file).Length;
+                }
+            output.Add(new CleanupCandidate(path, Directory.GetLastWriteTimeUtc(path), size, isActive, item.Kind));
+        }
+        return output.OrderByDescending(x => x.ModifiedUtc).ToArray();
+    }
+
+    public async Task DeleteDeploymentCleanupCandidateAsync(DeploymentProfile profile, string selectedPath, CancellationToken ct = default)
+    {
+        if (_iisAttempt is { IsDisposed: false }) throw new IOException("Cleanup blocked during an active deployment attempt.");
+        var candidates = await DiscoverDeploymentCleanupAsync(profile, ct);
+        var candidate = candidates.SingleOrDefault(x => PathsEqual(x.Path, selectedPath))
+            ?? throw new IOException("Selected path is not an approved cleanup candidate; rescan required.");
+        if (candidate.IsActive) throw new IOException("Deletion refused: path is active or contains the active IIS directory.");
+        DeploymentPathSafety.RequirePlainTree(candidate.Path);
+        Directory.Delete(candidate.Path, recursive: true);
+        if (candidate.Kind == "Application backup" && File.Exists(candidate.Path + ".complete.json"))
+            File.Delete(candidate.Path + ".complete.json");
+        _runner.Report("[CLEANUP] Operator-confirmed removal: " + candidate.Path);
+    }
+
     public void CleanupPreviousDeployments(DeploymentProfile profile, string currentPublishFolder)
     {
         if (!profile.CleanupPreviousDeployments || !string.Equals(profile.DeploymentLayout, "Versioned Folders", StringComparison.OrdinalIgnoreCase)) return;

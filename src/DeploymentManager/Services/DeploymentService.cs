@@ -2214,9 +2214,23 @@ public sealed class DeploymentService
                 CopyRecoveryPayloadWithDeadline(rollback, prepared);
 
                 // Do not stop a potentially healthy site until the verified recovery copy is ready.
-                try { await StopSiteForDeploymentAsync(profile, recoveryToken); }
-                catch (Exception ex) { throw new IOException("FILES_NOT_RESTORED / IIS_UNHEALTHY: safe STOP could not be verified; backup and current files preserved. " + ex.Message, ex); }
-                await WaitForAppPoolStoppedAsync(profile, recoveryToken);
+                // A partially completed STOP or a failed state verification must not
+                // leave IIS offline while the original hosted files are unchanged.
+                try
+                {
+                    await StopSiteForDeploymentAsync(profile, recoveryToken);
+                    await WaitForAppPoolStoppedAsync(profile, recoveryToken);
+                }
+                catch (Exception stopEx)
+                {
+                    try { await RestoreOriginalIisStatesAsync(profile); }
+                    catch (Exception recoveryEx)
+                    {
+                        InternalDiagnostics.Record(recoveryEx, "Restore IIS after failed rollback STOP");
+                        throw new AggregateException("Rollback STOP failed and original IIS states could not be restored; hosted files were preserved.", stopEx, recoveryEx);
+                    }
+                    throw new IOException("Rollback STOP failed; original IIS states restored and hosted files preserved.", stopEx);
+                }
                 // The active directory may have changed while recovery was prepared.
                 // Never move a reparse-point tree or an unsafe replacement target.
                 DeploymentPathSafety.RequireApplicationDirectory(target);

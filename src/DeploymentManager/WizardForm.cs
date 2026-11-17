@@ -2686,6 +2686,20 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         deployModePanel.Controls.Add(deployModeLabel);
         deployModePanel.Controls.Add(deployMode);
         deployModePanel.Controls.Add(deployModeHelp);
+        // V159 stage 1: persist the requested policy; enforcement is implemented in the next stage.
+        var backupChoice = new CheckBox { Text = "Create Backup Before Deployment", AutoSize = true, Checked = _profile.CreateBackupBeforeDeployment, Enabled = !_operationRunning };
+        var retentionChoice = new CheckBox { Text = "Keep Previous Deployment for Rollback", AutoSize = true, Checked = _profile.KeepPreviousDeploymentForRollback, Enabled = !_operationRunning };
+        var retentionCount = new NumericUpDown { Minimum = 1, Maximum = 20, Value = Math.Clamp(_profile.PreviousDeploymentRetentionCount, 1, 20), Width = 55, Enabled = retentionChoice.Checked && !_operationRunning };
+        backupChoice.CheckedChanged += (_, _) => { _profile.CreateBackupBeforeDeployment = backupChoice.Checked; _appData.SaveProjectProfile(_profile); };
+        retentionChoice.CheckedChanged += (_, _) => { _profile.KeepPreviousDeploymentForRollback = retentionChoice.Checked; retentionCount.Enabled = retentionChoice.Checked && !_operationRunning; _appData.SaveProjectProfile(_profile); };
+        retentionCount.ValueChanged += (_, _) => { _profile.PreviousDeploymentRetentionCount = (int)retentionCount.Value; _appData.SaveProjectProfile(_profile); };
+        var policyPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true, Padding = new Padding(8, 2, 8, 2) };
+        policyPanel.Controls.Add(backupChoice);
+        policyPanel.Controls.Add(retentionChoice);
+        policyPanel.Controls.Add(new Label { Text = "Keep count:", AutoSize = true, Padding = new Padding(8, 4, 0, 0) });
+        policyPanel.Controls.Add(retentionCount);
+        policyPanel.Controls.Add(new Label { Text = "Policy configuration only in V159 stage 1 — deployment safety behavior remains unchanged until stage 2.", AutoSize = true, ForeColor = Color.DarkOrange, MaximumSize = new Size(550, 0) });
+        deployModePanel.Controls.Add(policyPanel);
         var statusBanner = new Label { Text = _deploymentStatus, AutoSize = true, Padding = new Padding(8), Font = new Font("Segoe UI Semibold", 11F), ForeColor = _deploymentStatus.Contains("UNSUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.Firebrick : (_deploymentStatus.Contains("SUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.ForestGreen : Color.DimGray) };
         reviewRoot.Controls.Add(statusBanner, 0, 0);
         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 210, FixedPanel = FixedPanel.None };

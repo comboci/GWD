@@ -107,7 +107,7 @@ public sealed class PrerequisiteService
     {
         EnsureInstaller(installerPath);
         await _runner.RunCheckedAsync(installerPath, "/install /quiet /norestart", ct: ct);
-        await _runner.RunAsync("iisreset.exe", "/restart", ct: ct);
+        await _runner.RunCheckedAsync("iisreset.exe", "/restart", ct: ct);
     }
 
     public async Task InstallDotNetSdkAsync(string installerPath, CancellationToken ct = default)

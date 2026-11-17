@@ -2055,6 +2055,38 @@ public sealed class DeploymentService
             _runner.Report("[ROLLBACK] AUTOMATIC ROLLBACK DISABLED by project policy. Current and displaced files preserved for manual recovery.");
             return;
         }
+        if (!hasSingleFolderBackup && profile.KeepPreviousDeploymentForRollback
+            && string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(_activeDisplacedFolder) && Directory.Exists(_activeDisplacedFolder))
+        {
+            var target = Path.GetFullPath(profile.HostingRoot);
+            var displaced = _activeDisplacedFolder;
+            if (string.IsNullOrWhiteSpace(_activeDisplacedTarget) || !PathsEqual(target, _activeDisplacedTarget))
+                throw new IOException("Rollback refused: previous payload does not match the active deployment target.");
+            DeploymentPathSafety.RequireApplicationDirectory(target);
+            DeploymentPathSafety.RequirePlainTree(displaced);
+            await StopSiteForDeploymentAsync(profile, CancellationToken.None);
+            await WaitForAppPoolStoppedAsync(profile, CancellationToken.None);
+            var failed = target + ".gwd-failed-" + Guid.NewGuid().ToString("N");
+            if (Directory.Exists(target)) Directory.Move(target, failed);
+            try { Directory.Move(displaced, target); }
+            catch
+            {
+                if (!Directory.Exists(target) && Directory.Exists(failed)) Directory.Move(failed, target);
+                throw;
+            }
+            _activeDisplacedFolder = null;
+            _activeDisplacedTarget = null;
+            await RestoreOriginalIisStatesAsync(profile);
+            if (_initialIisStates is { Site: "Started", Pool: "Started" })
+            {
+                var health = await HealthCheckAsync(profile, CancellationToken.None);
+                if (!health.Ok) throw new IOException("Previous payload restored but HTTP health failed: " + health.Detail);
+            }
+            _runner.Report("[ROLLBACK] Previous release restored from current-attempt displaced folder; failed payload retained: " + failed);
+            ResolveIisAttempt();
+            return;
+        }
         if (string.IsNullOrWhiteSpace(failedPublishFolder) && !hasSingleFolderBackup) return;
         // Recovery must finish even if the original deployment was cancelled.
         // Callers must not pass the cancelled deployment token into compensating actions.

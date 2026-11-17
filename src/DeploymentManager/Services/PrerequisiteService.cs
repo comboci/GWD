@@ -86,6 +86,11 @@ public sealed class PrerequisiteService
                 await output.FlushAsync(ct);
             }
             ct.ThrowIfCancellationRequested();
+            // Never replace a cached installer with a truncated HTTP response.
+            if (total is > 0 && done != total.Value)
+                throw new IOException($"Installer download size mismatch: expected {total.Value} bytes, received {done} bytes.");
+            if (done == 0)
+                throw new IOException("Installer download was empty; cached installer was not replaced.");
             File.Move(temporary, destination, overwrite: true);
             progress?.Report(100);
             _runner.Report($"[DOWNLOAD] {package.DisplayName}: completed — {done / 1024d / 1024d:0.0} MB saved to {destination}");

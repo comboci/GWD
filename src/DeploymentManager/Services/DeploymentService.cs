@@ -15,6 +15,8 @@ public sealed class DeploymentService
     private readonly AppDataService _appData;
     private SmartDeployState? _lastPreparedState;
     private string? _activeRollbackFolder;
+    private string? _activeDisplacedFolder;
+    private string? _activeDisplacedTarget;
     public DeploymentService(CommandRunner runner, SqlServerService sql, AppDataService appData) { _runner = runner; _sql = sql; _appData = appData; }
 
     private IisDeploymentAttempt? _iisAttempt;
@@ -28,6 +30,8 @@ public sealed class DeploymentService
             throw new IOException("LOCAL_TARGET_SAFETY_BLOCK: a remote or unknown target profile cannot be executed by the local IIS engine.");
         ValidateDeploymentPaths(profile);
         _activeRollbackFolder = null;
+        _activeDisplacedFolder = null;
+        _activeDisplacedTarget = null;
         _filesChanged = false;
         _initialIisStates = null;
         _iisAttempt = new IisDeploymentAttempt(
@@ -1446,7 +1450,7 @@ public sealed class DeploymentService
         if (!Directory.Exists(stagingFolder)) throw new DirectoryNotFoundException("Staging folder was not found: " + stagingFolder);
         await ValidateIisPreflightAsync(profile, ct);
         var target = ResolveActivePublishFolder(profile);
-        var rollback = CreateUniqueRollbackFolder(profile);
+        var rollback = profile.CreateBackupBeforeDeployment ? CreateUniqueRollbackFolder(profile) : Path.Combine(profile.DeploymentRoot, "Backups", SanitizeFolderName(profile.ApplicationName), "unused-" + Guid.NewGuid().ToString("N"));
         DeploymentPathSafety.RequireApplicationDirectory(target);
         DeploymentPathSafety.RequirePlainTree(target);
         DeploymentPathSafety.RequirePlainTree(stagingFolder);
@@ -1463,7 +1467,7 @@ public sealed class DeploymentService
         IisStage("STOP", "PASS");
         IisStage("BACKUP", "RUNNING");
         Directory.CreateDirectory(Path.GetDirectoryName(target) ?? profile.HostingRoot);
-        if (string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) && Directory.Exists(target))
+        if (profile.CreateBackupBeforeDeployment && string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) && Directory.Exists(target))
         {
             var inventory = CaptureRecoveryInventory(target, ct);
             CopyDirectory(target, rollback, ct);
@@ -1481,7 +1485,7 @@ public sealed class DeploymentService
             _iisAttempt.Observe($"BACKUP_COMPLETE path={rollback}; manifest={rollback}.complete.json");
             _runner.Report($"[DEPLOY] BACKUP = PASS; SHA256 inventory verified; path={rollback}");
         }
-        else _runner.Report("[DEPLOY] BACKUP = NOT_REQUIRED; no previous Single Folder payload.");
+        else _runner.Report(profile.CreateBackupBeforeDeployment ? "[DEPLOY] BACKUP = NOT_REQUIRED; no previous Single Folder payload." : "[DEPLOY] BACKUP = SKIPPED; disabled by project policy.");
         IisStage("BACKUP", _activeRollbackFolder is not null ? "PASS" : "SKIPPED");
 
         // V65: IIS may report the site/pool stopped before worker-process file handles are fully released.
@@ -1508,12 +1512,21 @@ public sealed class DeploymentService
                 DeploymentPathSafety.RequirePlainTree(preparedRelease);
                 _filesChanged = true;
                 if (_iisAttempt is not null) _iisAttempt.FilesChanged = true;
-                if (Directory.Exists(fullTarget)) Directory.Move(fullTarget, displacedRelease);
+                if (Directory.Exists(fullTarget))
+                {
+                    Directory.Move(fullTarget, displacedRelease);
+                    _activeDisplacedFolder = displacedRelease;
+                    _activeDisplacedTarget = fullTarget;
+                }
                 try { Directory.Move(preparedRelease, fullTarget); }
                 catch
                 {
                     if (!Directory.Exists(fullTarget) && Directory.Exists(displacedRelease))
+                    {
                         Directory.Move(displacedRelease, fullTarget);
+                        _activeDisplacedFolder = null;
+                        _activeDisplacedTarget = null;
+                    }
                     throw;
                 }
             }
@@ -1525,12 +1538,13 @@ public sealed class DeploymentService
                     catch (Exception ex) { InternalDiagnostics.Record(ex, "Remove incomplete prepared release"); }
                 }
             }
-            if (Directory.Exists(rollback))
+            var preservationSource = Directory.Exists(rollback) ? rollback : _activeDisplacedFolder;
+            if (!string.IsNullOrWhiteSpace(preservationSource) && Directory.Exists(preservationSource))
             {
                 foreach (var relative in profile.PreserveProductionFiles ?? Array.Empty<string>())
                 {
                     if (string.IsNullOrWhiteSpace(relative)) continue;
-                    var previous = DeploymentPathSafety.RelativeFile(rollback, relative);
+                    var previous = DeploymentPathSafety.RelativeFile(preservationSource, relative);
                     var deployed = DeploymentPathSafety.RelativeFile(target, relative);
                     if (!File.Exists(previous)) continue;
                     Directory.CreateDirectory(Path.GetDirectoryName(deployed) ?? target);
@@ -1890,12 +1904,47 @@ public sealed class DeploymentService
             }
         }
         catch (Exception ex) { _runner.Report("[FAST] Warning: persistent build-state commit failed: " + ex.Message); }
-        // V62: successful deployment backups are intentionally retained for rollback/history.
-        // Keep only the newest five backups for this application.
-        CleanupOldRollbackBackups(profile, keep: 5);
+        // V159: cleanup of this attempt is delayed until the IIS attempt is resolved.
+        // Never remove the only previous payload before the deployment is committed.
         // Retain recovery ownership until the attempt journal and markers resolve.
         // A later COMMIT/Resolve failure must still be able to restore this backup.
         CleanupPreviousDeployments(profile, currentPublishFolder);
+    }
+
+    public void CleanupCommittedAttempt(DeploymentProfile profile)
+    {
+        // Called only after successful health, release verification and IIS attempt resolution.
+        // Do not enumerate or delete unrelated historical artifacts.
+        var displaced = _activeDisplacedFolder;
+        var target = _activeDisplacedTarget;
+        if (!string.IsNullOrWhiteSpace(displaced) && !string.IsNullOrWhiteSpace(target) && Directory.Exists(displaced))
+        {
+            DeploymentPathSafety.RequireApplicationDirectory(target);
+            DeploymentPathSafety.RequirePlainTree(displaced);
+            if (PathsEqual(displaced, target) || !Directory.Exists(target))
+                throw new IOException("Cleanup refused: active IIS payload cannot be positively distinguished.");
+            if (!profile.KeepPreviousDeploymentForRollback)
+            {
+                Directory.Delete(displaced, recursive: true);
+                _runner.Report("[CLEANUP] Removed current-attempt displaced release: " + displaced);
+            }
+            else _runner.Report("[CLEANUP] Retained previous release for manual rollback: " + displaced);
+        }
+        _activeDisplacedFolder = null;
+        _activeDisplacedTarget = null;
+        var backup = _activeRollbackFolder;
+        if (!string.IsNullOrWhiteSpace(backup) && Directory.Exists(backup))
+        {
+            if (!profile.KeepPreviousDeploymentForRollback)
+            {
+                DeploymentPathSafety.RequirePlainTree(backup);
+                Directory.Delete(backup, recursive: true);
+                if (File.Exists(backup + ".complete.json")) File.Delete(backup + ".complete.json");
+                _runner.Report("[CLEANUP] Removed current-attempt backup: " + backup);
+            }
+            else _runner.Report("[CLEANUP] Retained current-attempt backup: " + backup);
+        }
+        _activeRollbackFolder = null;
     }
 
     private string ResolveActivePublishFolder(DeploymentProfile profile)
@@ -2001,6 +2050,11 @@ public sealed class DeploymentService
         }
         var hasSingleFolderBackup = string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase)
             && Directory.Exists(GetRollbackFolder(profile));
+        if (!profile.KeepPreviousDeploymentForRollback)
+        {
+            _runner.Report("[ROLLBACK] AUTOMATIC ROLLBACK DISABLED by project policy. Current and displaced files preserved for manual recovery.");
+            return;
+        }
         if (string.IsNullOrWhiteSpace(failedPublishFolder) && !hasSingleFolderBackup) return;
         // Recovery must finish even if the original deployment was cancelled.
         // Callers must not pass the cancelled deployment token into compensating actions.

@@ -2660,7 +2660,10 @@ public sealed class DeploymentService
         if (Directory.Exists(backupRoot))
             foreach (var directory in Directory.EnumerateDirectories(backupRoot, "*", SearchOption.TopDirectoryOnly))
                 candidates.Add((directory, "Application backup"));
-        var output = new List<CleanupCandidate>();
+        var output = new List<CleanupCandidate>
+        {
+            new(active, Directory.GetLastWriteTimeUtc(active), 0, true, "ACTIVE IIS — protected")
+        };
         foreach (var item in candidates.DistinctBy(x => x.Path, StringComparer.OrdinalIgnoreCase))
         {
             ct.ThrowIfCancellationRequested();

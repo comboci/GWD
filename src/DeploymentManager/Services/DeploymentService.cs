@@ -2357,7 +2357,8 @@ public sealed class DeploymentService
                     try { await RestoreOriginalIisStatesAsync(profile); }
                     catch (Exception recoveryEx)
                     {
-                        InternalDiagnostics.Record(recoveryEx, "Restore IIS after failed rollback STOP");
+                        try { InternalDiagnostics.Record(recoveryEx, "Restore IIS after failed rollback STOP"); }
+                        catch { }
                         throw new AggregateException("Rollback STOP failed and original IIS states could not be restored; hosted files were preserved.", stopEx, recoveryEx);
                     }
                     throw new IOException("Rollback STOP failed; original IIS states restored and hosted files preserved.", stopEx);
@@ -2377,7 +2378,8 @@ public sealed class DeploymentService
                     try { await RestoreOriginalIisStatesAsync(profile); }
                     catch (Exception recoveryEx)
                     {
-                        InternalDiagnostics.Record(recoveryEx, "Restore IIS after rollback path validation failure");
+                        try { InternalDiagnostics.Record(recoveryEx, "Restore IIS after rollback path validation failure"); }
+                        catch { }
                         throw new AggregateException("Rollback path validation failed and IIS state recovery also failed.", validationEx, recoveryEx);
                     }
                     throw;
@@ -2407,7 +2409,8 @@ public sealed class DeploymentService
                         try { await RestoreOriginalIisStatesAsync(profile); }
                         catch (Exception recoveryEx)
                         {
-                            InternalDiagnostics.Record(recoveryEx, "Restore IIS after rollback folder swap failure");
+                            try { InternalDiagnostics.Record(recoveryEx, "Restore IIS after rollback folder swap failure"); }
+                        catch { }
                             throw new AggregateException("Rollback folder swap failed and IIS state recovery also failed.", swapEx, recoveryEx);
                         }
                     }

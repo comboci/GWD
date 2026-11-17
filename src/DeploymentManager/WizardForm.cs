@@ -1,282 +1,17 @@
-using GenericWeb.DeploymentManager.Models;
-using GenericWeb.DeploymentManager.Services;
-using System.Text;
-using System.Net;
-using System.Net.Sockets;
-using System.Text.RegularExpressions;
-using System.Security.Cryptography;
-using System.Text.Json;
-using System.IO.Compression;
+        footer.Controls.Add(footerButtons, 1, 0);
+        root.Controls.Add(footer, 1, 1);
 
-namespace GenericWeb.DeploymentManager;
-
-public sealed class WizardForm : Form
-{
-    private readonly DeploymentProfile _profile = new();
-    private readonly AppDataService _appData = new();
-    private readonly LogService _logService;
-    private DeploymentState _persistentState = new();
-    private bool _operationRunning;
-    private readonly CommandRunner _runner = new();
-    private readonly EnvironmentService _environment;
-    private readonly PrerequisiteService _prereq;
-    private readonly SqlServerService _sql;
-    private readonly DeploymentService _deployment;
-    private readonly DeploymentHistoryService _history;
-    private readonly RemoteDeploymentService _remote;
-    private readonly RuntimeMetricsService _runtimeMetrics = new();
-    private readonly BackgroundHealthMonitor _healthMonitor;
-    private readonly Label _iisHealth = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 2, 0), Text = "○ IIS" };
-    private readonly Label _sqlHealth = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(4, 8, 2, 0), Text = "○ SQL" };
-    private readonly Label _httpHealth = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(4, 8, 2, 0), Text = "○ HTTP" };
-    private readonly Label _healthChecked = new() { AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(6, 8, 8, 0), Text = "Checked: —" };
-    private readonly System.Windows.Forms.Timer _runtimeMetricsTimer = new() { Interval = 5000 };
-    private readonly Label _resourceUsage = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 8, 0), Text = "CPU/RAM: sampling..." };
-
-    private readonly string[] _steps =
-    {
-        "Project Source & Dependencies", "Target & Identity", "Environment Scan", "IIS", "Installers & Runtimes",
-        "SQL Server & Database", "Deployment Location", "Review & Deploy"
-    };
-
-    private readonly List<Label> _stepLabels = new();
-    private readonly FlowLayoutPanel _stepPanel = new();
-    private readonly Panel _content = new();
-    private readonly Button _back = new() { Text = "< Back", Width = 135, Height = 40 };
-    private readonly Button _next = new() { Text = "Next >", Width = 135, Height = 40 };
-    private readonly Button _autoDeploy = new() { Text = "Auto Deploy", Width = 145, Height = 40 };
-    private bool _autoDeployRunning;
-    private bool _offlineDependenciesReady;
-    private bool _dependencySyncRunning;
-    private string _offlineDependenciesDetail = "Not checked";
-    private readonly Label _pageTitle = new() { AutoSize = true, Font = new Font("Segoe UI Semibold", 18F) };
-    private readonly Label _pageDescription = new() { AutoSize = true, MaximumSize = new Size(820, 0), ForeColor = Color.DimGray };
-    private readonly Label _stepIndicator = new() { AutoSize = true, ForeColor = Color.DimGray, Font = new Font("Segoe UI Semibold", 9.5F) };
-    private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font("Consolas", 9F) };
-    private readonly ProgressBar _progress = new() { Dock = DockStyle.Bottom, Height = 16 };
-    private readonly Label _activity = new() { AutoSize = false, Dock = DockStyle.Fill, Height = 36, Padding = new Padding(8, 0, 8, 0), TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.DimGray, Text = "Ready" };
-
-    private int _pageIndex;
-    private int _lastLoggedPageIndex = -1;
-    private bool _scanCompleted;
-    private PrerequisiteState _iisState = new(false, "Not scanned");
-    private PrerequisiteState _hostingState = new(false, "Not scanned");
-    private PrerequisiteState _sdkState = new(false, "Not scanned");
-    private PrerequisiteState _nodeState = new(false, "Not scanned");
-    private List<SqlInstanceInfo> _sqlInstances = new();
-    private bool _sqlAdminConnectionVerified => _sql.Connections.State(_profile).Verified;
-    private bool _databaseConnectionVerified => _sqlAdminConnectionVerified && !string.IsNullOrWhiteSpace(_profile.DatabaseName);
-    private bool _iisAutoVerified;
-    private bool _runtimesAutoVerified;
-    private bool _sqlDatabaseAutoVerified => _databaseConnectionVerified;
-    private bool _deploymentLocationAutoVerified;
-    private CancellationTokenSource? _backgroundVerifyCts;
-    private int _preparedValidationGeneration;
-    private string? _lastErrorReportPath;
-    private string _deploymentStatus = "Not started";
-    private string? _lastSuccessfulPublishPath;
-    private string _deploymentElapsedText = "Elapsed: 00:00:00";
-    private Label? _deploymentElapsedLabel;
-    private LogViewMode _logViewMode = LogViewMode.Normal;
-    private readonly List<(DateTime At, string Line)> _uiLogLines = new();
-    private ComboBox? _logModeCombo;
-    private Label? _reviewActivity;
-    private CancellationTokenSource? _deploymentCts;
-    private CancellationTokenSource? _autoDeployCts;
-    private string ProfilesFolder => Path.Combine(_appData.Root, "Profiles");
-
-    public WizardForm()
-    {
-        _logService = new LogService(_appData);
-        _persistentState = _appData.LoadState();
-        _deploymentStatus = _persistentState.LastResult == "RecoveryFailed" ? "PREVIOUS DEPLOYMENT — RECOVERY FAILED" : (_persistentState.LastResult == "Failed" ? "PREVIOUS DEPLOYMENT UNSUCCESSFUL" : (_persistentState.LastResult == "Successful" ? "PREVIOUS DEPLOYMENT SUCCESSFUL" : "Not started"));
-        _environment = new EnvironmentService(_runner);
-        _prereq = new PrerequisiteService(_runner);
-        _sql = new SqlServerService(_runner, _prereq);
-        _deployment = new DeploymentService(_runner, _sql, _appData);
-        _history = new DeploymentHistoryService();
-        _remote = new RemoteDeploymentService(_runner, _prereq);
-        _healthMonitor = new BackgroundHealthMonitor(_environment, _sql, _profile);
-        _profile.InstallerCacheFolder = _appData.GetInstallerCacheFolder();
-        _profile.DeploymentRepositoryFolder = _appData.GetDeploymentRepositoryFolder();
-        _profile.WorkspaceRoot = _appData.GetWorkspaceRoot();
-        _profile.InstallerCacheFolder = Path.Combine(_profile.DeploymentRepositoryFolder, "Installers");
-        _appData.SaveDeploymentRepositoryFolder(_profile.DeploymentRepositoryFolder);
-        // V40: the selected dependency mode is authoritative and persists across page rebuilds/restarts.
-        _profile.DependencyResolutionMode = NormalizeDependencyMode(_appData.GetDependencyResolutionMode());
-        _profile.OfflineBuild = string.Equals(_profile.DependencyResolutionMode, "Offline Only", StringComparison.OrdinalIgnoreCase);
-        var identity = _appData.GetDeploymentIdentitySettings();
-        _profile.ApplicationName = identity.ApplicationName;
-        _profile.SiteName = identity.SiteName;
-        _profile.AppPoolName = identity.SiteName;
-        _profile.DatabaseName = identity.DatabaseName;
-        var savedRemote = _appData.GetRemoteCredential();
-        if (savedRemote.Remember)
-        {
-            _profile.TargetHost = savedRemote.Host;
-            _profile.RemoteUserName = savedRemote.UserName;
-            _profile.RemotePassword = savedRemote.Password;
-        }
-        var hostingSettings = _appData.GetHostingSettings();
-        _profile.HostingRoot = NormalizeAutoHostingRoot(hostingSettings.HostingRoot, identity.ApplicationName);
-        _profile.DeploymentLayout = hostingSettings.DeploymentLayout;
-        _profile.CleanupPreviousDeployments = hostingSettings.CleanupPreviousDeployments;
-        _profile.UseDefaultIisWebsite = hostingSettings.UseDefaultIisWebsite;
-        if (_profile.UseDefaultIisWebsite) { _profile.HostingRoot = @"C:\inetpub\wwwroot"; _profile.DeploymentLayout = "Single Folder"; _profile.HttpPort = 80; _profile.HostHeader = string.Empty; }
-        _runner.Output += AppendLog;
-
-        Text = $"Generic Web Deployment Manager {ProductInfo.DisplayVersion} — Unified Diagnostics & Smart Settings";
-        Width = 1280;
-        Height = 860;
-        MinimumSize = new Size(1080, 740);
-        StartPosition = FormStartPosition.CenterScreen;
-        WindowState = FormWindowState.Maximized;
-        Font = new Font("Segoe UI", 9.5F);
-        // Scale controls consistently when Windows display DPI is changed.
-        AutoScaleMode = AutoScaleMode.Dpi;
-
-        BuildShell();
-        _runtimeMetricsTimer.Tick += (_, _) => UpdateRuntimeMetrics();
-        _runtimeMetricsTimer.Start();
-        UpdateRuntimeMetrics();
-        FormClosing += WizardForm_FormClosing;
-        _healthMonitor.Updated += OnHealthUpdated;
-        _healthMonitor.Start();
-        ShowPage(0);
-        AppendLog($"Deployment Manager {ProductInfo.DisplayVersion} started. GUI and headless CLI share the deployment services. Persistent state: {_appData.StateFile}");
-        AppendLog("Deployment history: " + _history.Root);
-        AppendLog("Deployment Repository: " + _profile.DeploymentRepositoryFolder);
-        AppendLog("Stable Build Workspace Root: " + _profile.WorkspaceRoot);
-    }
-
-    private void OnHealthUpdated(HealthSnapshot snapshot)
-    {
-        if (IsDisposed || Disposing) return;
-        BeginInvoke(() =>
-        {
-            _iisHealth.Text = snapshot.IisInstalled ? "✓ IIS" : "✕ IIS";
-            _iisHealth.ForeColor = snapshot.IisInstalled ? Color.ForestGreen : Color.Firebrick;
-            _iisHealth.Tag = snapshot.IisInstalled ? $"IIS installed — {snapshot.SiteCount} site(s), {snapshot.AppPoolCount} app pool(s); target health not verified" : "IIS missing/unavailable";
-
-            var sqlState = _sql.Connections.State(_profile);
-            _sqlHealth.Text = sqlState.Verified ? "✓ SQL Server" : "○ SQL Server";
-            _sqlHealth.ForeColor = sqlState.Verified ? Color.ForestGreen : Color.Firebrick;
-            _sqlHealth.Tag = sqlState.Detail;
-
-            var httpHealthy = snapshot.HttpStatus is >= 200 and < 400;
-            _httpHealth.Text = snapshot.HttpStatus is null ? "○ HTTP" : httpHealthy ? $"✓ HTTP {snapshot.HttpStatus}" : $"✕ HTTP {snapshot.HttpStatus}";
-            _httpHealth.ForeColor = snapshot.HttpStatus is null ? Color.Gray : httpHealthy ? Color.ForestGreen : Color.Firebrick;
-            _httpHealth.Tag = snapshot.HttpDetail;
-            _healthChecked.Text = $"Checked: {snapshot.CheckedAt:HH:mm:ss}";
-
-            UpdateStepIndicator();
-        });
-    }
-
-    private void BuildShell()
-    {
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250));
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
-
-        _stepPanel.Dock = DockStyle.Fill;
-        _stepPanel.FlowDirection = FlowDirection.TopDown;
-        _stepPanel.WrapContents = false;
-        _stepPanel.AutoScroll = true;
-        _stepPanel.BackColor = Color.FromArgb(245, 247, 250);
-        _stepPanel.Padding = new Padding(14, 20, 10, 10);
-        foreach (var step in _steps)
-        {
-            var label = new Label
-            {
-                Text = step,
-                AutoSize = false,
-                Width = 215,
-                Height = 48,
-                Padding = new Padding(12, 12, 4, 0),
-                Font = new Font("Segoe UI Semibold", 10.5F),
-                ForeColor = Color.Gray,
-                BackColor = Color.Transparent,
-                Cursor = Cursors.Hand
-            };
-            var stepIndex = _stepLabels.Count;
-            label.Click += (_, _) => { if (!_operationRunning && !_autoDeployRunning && !_dependencySyncRunning) ShowPage(stepIndex); };
-            _stepLabels.Add(label);
-            _stepPanel.Controls.Add(label);
-        }
-        root.Controls.Add(_stepPanel, 0, 0);
-        root.SetRowSpan(_stepPanel, 2);
-
-        var right = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, Padding = new Padding(26, 18, 26, 0) };
-        right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var header = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2 };
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        header.Controls.Add(_pageTitle, 0, 0);
-        _stepIndicator.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        header.Controls.Add(_stepIndicator, 1, 0);
-
-        right.Controls.Add(header, 0, 0);
-        right.Controls.Add(_pageDescription, 0, 1);
-        _content.Dock = DockStyle.Fill;
-        // Auto-sized wizard rows can exceed the available height, especially at 125%/150% DPI.
-        // Keep the footer visible and scroll the page instead of clipping/overlapping fields.
-        _content.AutoScroll = true;
-        _content.Padding = new Padding(0, 18, 0, 0);
-        right.Controls.Add(_content, 0, 2);
-        root.Controls.Add(right, 1, 0);
-
-        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(10, 8, 14, 8) };
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var statusPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
-        var healthTip = new ToolTip { AutoPopDelay = 12000, InitialDelay = 350, ReshowDelay = 100 };
-        healthTip.SetToolTip(_iisHealth, "IIS health status");
-        healthTip.SetToolTip(_sqlHealth, "SQL Server health status");
-        healthTip.SetToolTip(_httpHealth, "HTTP application health status");
-        statusPanel.Controls.Add(_activity);
-        statusPanel.Controls.Add(_resourceUsage);
-        footer.Controls.Add(statusPanel, 0, 0);
-
-        var footerButtons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(8, 0, 0, 0) };
-        footerButtons.Controls.Add(_next);
-        footerButtons.Controls.Add(_back);
-        var resetWizard = new Button { Text = "Start Over", Width = 125, Height = 36 };
-        var startOverMenu = new ContextMenuStrip();
-        resetWizard.ContextMenuStrip = startOverMenu;
-        startOverMenu.Items.Add("Start Over — Clear Log", null, (_, _) => ResetWizard(clearLog: true));
-        startOverMenu.Items.Add("Start Over — Keep Log", null, (_, _) => ResetWizard(clearLog: false));
-        resetWizard.Click += (_, _) => startOverMenu.Show(resetWizard, new Point(0, resetWizard.Height));
-        footerButtons.Controls.Add(resetWizard);
-        var cleanupButton = new Button { Text = "پاکسازی نسخه‌های قبلی", Width = 170, Height = 36 };
-        cleanupButton.Click += async (_, _) => await CleanupPreviousVersionsAsync();
-        footerButtons.Controls.Add(cleanupButton);
-        var databaseManager = new Button { Text = "مدیریت دیتابیس", Width = 145, Height = 36 };
-        databaseManager.Click += (_, _) =>
-        {
-            if (_operationRunning || _autoDeployRunning)
-            {
-                MessageBox.Show(this, "ابتدا عملیات استقرار جاری را متوقف کنید.");
-                return;
-            }
-            using var dialog = new DatabaseRelocationForm(_profile, _sql);
-            dialog.ShowDialog(this);
-        };
-        footerButtons.Controls.Add(databaseManager);
-
-        footerButtons.Controls.Add(_autoDeploy);
-        var viewLogs = new Button { Text = "Diagnostics Center", Width = 145, Height = 36 };
-        viewLogs.Click += (_, _) =>
-        {
-            using var dialog = new DiagnosticsCenterForm(_appData, _history, _profile, _deployment, _logService.LogFile, _runtimeMetrics);
-            dialog.ShowDialog(this);
-        };
-        footerButtons.Controls.Add(viewLogs);
+        Controls.Add(root);
+        Controls.Add(_progress);
+        var menu = new MenuStrip { Dock = DockStyle.Top };
+        var fileMenu = new ToolStripMenuItem("File");
+        var saveMenu = new ToolStripMenuItem("Save Profile");
+        saveMenu.Click += (_, _) => { if (_operationRunning || _autoDeployRunning) return; ShowPage(0); _saveProfileAction?.PerformClick(); };
+        var loadMenu = new ToolStripMenuItem("Load Profile");
+        loadMenu.Click += (_, _) => { if (_operationRunning || _autoDeployRunning) return; ShowPage(0); _loadProfileAction?.PerformClick(); };
+        fileMenu.DropDownItems.Add(saveMenu);
+        fileMenu.DropDownItems.Add(loadMenu);
+        fileMenu.DropDownItems.Add(new ToolStripSeparator());
         var settingsButton = new Button { Text = "Settings", Width = 110, Height = 36 };
         settingsButton.Click += (_, _) =>
         {
@@ -288,12 +23,34 @@ public sealed class WizardForm : Form
                 AppendLog("Settings updated. Release output: " + _appData.GetManagerReleaseRoot());
             }
         };
-        footerButtons.Controls.Add(settingsButton);
-        footer.Controls.Add(footerButtons, 1, 0);
-        root.Controls.Add(footer, 1, 1);
 
-        Controls.Add(root);
-        Controls.Add(_progress);
+
+        var settingsMenu = new ToolStripMenuItem("Settings");
+        settingsMenu.Click += (_, _) => settingsButton.PerformClick();
+        fileMenu.DropDownItems.Add(settingsMenu);
+        var databaseMenu = new ToolStripMenuItem("Database Management");
+        databaseMenu.Click += (_, _) =>
+        {
+            if (_operationRunning || _autoDeployRunning || _dependencySyncRunning)
+            {
+                MessageBox.Show(this, "Stop the current operation before opening Database Management.");
+                return;
+            }
+            using var dialog = new DatabaseRelocationForm(_profile, _sql);
+            dialog.ShowDialog(this);
+        };
+        fileMenu.DropDownItems.Add(databaseMenu);
+        var cleanupMenu = new ToolStripMenuItem("Clean Previous Versions");
+        cleanupMenu.Click += async (_, _) => { if (!_operationRunning && !_autoDeployRunning) await CleanupPreviousVersionsAsync(); };
+        fileMenu.DropDownItems.Add(cleanupMenu);
+        menu.Items.Add(fileMenu);
+        var toolsMenu = new ToolStripMenuItem("Tools");
+        var diagnosticsMenu = new ToolStripMenuItem("Diagnostics Center");
+        diagnosticsMenu.Click += (_, _) => viewLogs.PerformClick();
+        toolsMenu.DropDownItems.Add(diagnosticsMenu);
+        menu.Items.Add(toolsMenu);
+        MainMenuStrip = menu;
+        Controls.Add(menu);
 
         _back.Click += (_, _) => { if (_pageIndex > 0) ShowPage(_pageIndex - 1); };
         _next.Click += async (_, _) => await NextAsync();
@@ -970,6 +727,8 @@ public sealed class WizardForm : Form
         var lockSource = new CheckBox { Text = "Lock source", AutoSize = true, Checked = false, Margin = new Padding(8, 7, 3, 3) };
         var saveProfile = new Button { Text = "Save Profile", AutoSize = true };
         var loadProfile = new Button { Text = "Load Profile", AutoSize = true };
+        _saveProfileAction = saveProfile;
+        _loadProfileAction = loadProfile;
         var exportSource = new Button { Text = "Export Clean Source ZIP", AutoSize = true };
         // A single compact action strip stays opposite the Deployment profile label.
         foreach (var action in new Control[] { saveProfile, loadProfile, lockSource, exportSource })
@@ -978,7 +737,7 @@ public sealed class WizardForm : Form
             action.Margin = new Padding(2, 1, 3, 1);
         }
         var profileActions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight };
-        profileActions.Controls.AddRange(new Control[] { saveProfile, loadProfile, lockSource, exportSource });
+        profileActions.Controls.AddRange(new Control[] { lockSource, exportSource });
         var sourceRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
         sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         sourceRow.Controls.Add(source, 0, 0); sourceRow.Controls.Add(browse, 1, 0);

@@ -2441,8 +2441,27 @@ public sealed class DeploymentService
         var appcmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "inetsrv", "appcmd.exe");
         if (File.Exists(appcmd))
         {
-            await StopSiteForDeploymentAsync(profile, recoveryToken);
-            var current = await GetSitePhysicalPathAsync(profile, recoveryToken);
+            // A failed STOP or site-path probe must not strand a versioned
+            // deployment offline before its IIS configuration is changed.
+            string? current;
+            try
+            {
+                await StopSiteForDeploymentAsync(profile, recoveryToken);
+                current = await GetSitePhysicalPathAsync(profile, recoveryToken);
+                if (string.IsNullOrWhiteSpace(current) || string.IsNullOrWhiteSpace(failedPublishFolder)
+                    || !PathsEqual(current, failedPublishFolder))
+                    throw new IOException("Recovery could not prove the active IIS path; failed files preserved for manual review.");
+            }
+            catch (Exception preflightEx)
+            {
+                try { await RestoreOriginalIisStatesAsync(profile); }
+                catch (Exception iisRecoveryEx)
+                {
+                    InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after versioned rollback preflight failure");
+                    throw new AggregateException("Versioned rollback preflight failed and original IIS states could not be restored.", preflightEx, iisRecoveryEx);
+                }
+                throw;
+            }
             if (!string.IsNullOrWhiteSpace(current) && !string.IsNullOrWhiteSpace(failedPublishFolder) && PathsEqual(current, failedPublishFolder))
             {
                 if (!string.IsNullOrWhiteSpace(previousSitePath) && Directory.Exists(previousSitePath) && !PathsEqual(previousSitePath, failedPublishFolder))

@@ -1638,11 +1638,26 @@ public sealed class DeploymentService
             CopyRecoveryPayloadWithDeadline(rollback, prepared);
             DeploymentPathSafety.RequirePlainTree(prepared);
             // Keep the current hosted service running until the recovery copy is ready.
-            await StopSiteForDeploymentAsync(profile, CancellationToken.None);
-            // The STOP request is not proof that IIS has released the live files.
-            // Recheck immediately before moving the active directory during recovery.
-            await WaitForAppPoolStoppedAsync(profile, CancellationToken.None);
-            DeploymentPathSafety.RequirePlainTree(fullTarget);
+            // Until the first folder move, any STOP or path-validation failure
+            // must restore the original IIS state; the hosted payload is untouched.
+            try
+            {
+                await StopSiteForDeploymentAsync(profile, CancellationToken.None);
+                await WaitForAppPoolStoppedAsync(profile, CancellationToken.None);
+                DeploymentPathSafety.RequireApplicationDirectory(fullTarget);
+                DeploymentPathSafety.RequirePlainTree(fullTarget);
+                DeploymentPathSafety.RequirePlainTree(prepared);
+            }
+            catch (Exception preSwapEx)
+            {
+                try { await RestoreOriginalIisStatesAsync(profile); }
+                catch (Exception iisRecoveryEx)
+                {
+                    InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after activation rollback pre-swap failure");
+                    throw new AggregateException("Activation rollback pre-swap failed and IIS state recovery also failed.", preSwapEx, iisRecoveryEx);
+                }
+                throw;
+            }
             if (Directory.Exists(fullTarget)) Directory.Move(fullTarget, displaced);
             try
             {

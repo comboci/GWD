@@ -2687,6 +2687,16 @@ public sealed class DeploymentService
             bool isActive = PathsEqual(path, active) || PathsEqual(path, hosting)
                 || active.StartsWith(path.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)
                 || hosting.StartsWith(path.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase);
+            // A matching folder name is not proof that GWD created it.
+            // Unknown and incomplete recovery artifacts are visible but never deletable here.
+            bool verifiedOwnership = item.Kind switch
+            {
+                "Previous IIS release" => File.Exists(Path.Combine(path, ".gwd-retained-by-manager"))
+                    && PathsEqual(File.ReadAllText(Path.Combine(path, ".gwd-retained-by-manager")).Trim(), hosting),
+                "Application backup" => File.Exists(path + ".complete.json"),
+                _ => false
+            };
+            bool protectedCandidate = isActive || !verifiedOwnership;
             long size = 0;
             if (!isActive)
                 foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
@@ -2695,7 +2705,8 @@ public sealed class DeploymentService
                     if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0) throw new IOException("Reparse-point file blocks cleanup: " + file);
                     size += new FileInfo(file).Length;
                 }
-            output.Add(new CleanupCandidate(path, Directory.GetLastWriteTimeUtc(path), size, isActive, item.Kind));
+            output.Add(new CleanupCandidate(path, Directory.GetLastWriteTimeUtc(path), size, protectedCandidate,
+                verifiedOwnership ? item.Kind : item.Kind + " (unverified — protected)"));
         }
         return output.OrderByDescending(x => x.ModifiedUtc).ToArray();
     }

@@ -2394,7 +2394,13 @@ public sealed class DeploymentService
                 if (Directory.Exists(displaced))
                 {
                     try { Directory.Delete(displaced, recursive: true); }
-                    catch (Exception ex) { InternalDiagnostics.Record(ex, "Cleanup displaced hosted folder after rollback"); }
+                    catch (Exception ex)
+                    {
+                        // Displaced-folder cleanup is best-effort after the verified
+                        // file swap. Diagnostics failure must not skip IIS restart.
+                        try { InternalDiagnostics.Record(ex, "Cleanup displaced hosted folder after rollback"); }
+                        catch { }
+                    }
                 }
             }
             finally

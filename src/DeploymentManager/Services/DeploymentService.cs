@@ -2233,9 +2233,24 @@ public sealed class DeploymentService
                 }
                 // The active directory may have changed while recovery was prepared.
                 // Never move a reparse-point tree or an unsafe replacement target.
-                DeploymentPathSafety.RequireApplicationDirectory(target);
-                DeploymentPathSafety.RequirePlainTree(target);
-                DeploymentPathSafety.RequirePlainTree(prepared);
+                try
+                {
+                    DeploymentPathSafety.RequireApplicationDirectory(target);
+                    DeploymentPathSafety.RequirePlainTree(target);
+                    DeploymentPathSafety.RequirePlainTree(prepared);
+                }
+                catch (Exception validationEx)
+                {
+                    // No hosted files have been moved. Restore IIS if final path
+                    // validation fails after the verified STOP.
+                    try { await RestoreOriginalIisStatesAsync(profile); }
+                    catch (Exception recoveryEx)
+                    {
+                        InternalDiagnostics.Record(recoveryEx, "Restore IIS after rollback path validation failure");
+                        throw new AggregateException("Rollback path validation failed and IIS state recovery also failed.", validationEx, recoveryEx);
+                    }
+                    throw;
+                }
                 // Once replacement begins, cancellation must not interrupt recovery.
                 if (Directory.Exists(target)) Directory.Move(target, displaced);
                 try

@@ -1507,13 +1507,13 @@ public sealed class DeploymentService
         else _runner.Report(profile.CreateBackupBeforeDeployment ? "[DEPLOY] BACKUP = NOT_REQUIRED; no previous Single Folder payload." : "[DEPLOY] BACKUP = SKIPPED; disabled by project policy.");
         IisStage("BACKUP", _activeRollbackFolder is not null ? "PASS" : "SKIPPED");
         }
-        catch
+        catch (Exception backupEx)
         {
             try { await RestoreOriginalIisStatesAsync(profile); }
             catch (Exception recoveryEx)
             {
                 InternalDiagnostics.Record(recoveryEx, "Restore IIS after backup preparation failure");
-                throw new IOException("Backup preparation failed and original IIS states could not be restored.", recoveryEx);
+                throw new AggregateException("Backup preparation failed and original IIS states could not be restored.", backupEx, recoveryEx);
             }
             throw;
         }

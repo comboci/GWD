@@ -2197,13 +2197,15 @@ public sealed class DeploymentService
         if (string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) && Directory.Exists(rollback))
         {
             _runner.Report("[ROLLBACK] Restoring the previous Single Folder deployment.");
+            // Reject an incomplete or foreign backup before stopping the running site.
+            // A missing/corrupt manifest must not take a potentially healthy site offline.
+            var target = Path.GetFullPath(profile.HostingRoot);
+            DeploymentPathSafety.RequireApplicationDirectory(target);
+            RequireCompleteRollback(rollback, target);
             _iisAttempt?.RecordRecovery("FILES_NOT_RESTORED / IIS_UNVERIFIED");
             try { await StopSiteForDeploymentAsync(profile, recoveryToken); }
             catch (Exception ex) { throw new IOException("FILES_NOT_RESTORED / IIS_UNHEALTHY: safe STOP could not be verified; backup and current files preserved. " + ex.Message, ex); }
-            var target = Path.GetFullPath(profile.HostingRoot);
-            DeploymentPathSafety.RequireApplicationDirectory(target);
             DeploymentPathSafety.RequirePlainTree(target);
-            RequireCompleteRollback(rollback, target);
             // Prepare the recovery payload before touching the active folder. A failed
             // copy must not destroy the only remaining hosted deployment.
             var parent = Path.GetDirectoryName(target) ?? throw new IOException("Hosted path has no parent directory.");

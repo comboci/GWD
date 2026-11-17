@@ -41,9 +41,28 @@ public sealed class BackgroundHealthMonitor : IDisposable
     }
     private async Task LoopAsync()
     {
-        try { await Task.Delay(TimeSpan.FromSeconds(5), _cts.Token); while (!_cts.IsCancellationRequested) { await CheckAsync(_cts.Token); await Task.Delay(TimeSpan.FromMinutes(10), _cts.Token); } }
-        catch (OperationCanceledException) { }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Background health monitor loop"); }
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), _cts.Token);
+            while (!_cts.IsCancellationRequested)
+            {
+                try
+                {
+                    await CheckAsync(_cts.Token);
+                }
+                catch (OperationCanceledException) when (_cts.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    InternalDiagnostics.Record(ex, "Background health monitor cycle");
+                }
+
+                await Task.Delay(TimeSpan.FromMinutes(10), _cts.Token);
+            }
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
     }
     private async Task CheckAsync(CancellationToken ct)
     {

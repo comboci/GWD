@@ -1717,7 +1717,12 @@ public sealed class DeploymentService
             if (Directory.Exists(displaced))
             {
                 try { Directory.Delete(displaced, recursive: true); }
-                catch (Exception ex) { InternalDiagnostics.Record(ex, "Cleanup displaced hosted folder after activation rollback"); }
+                catch (Exception ex)
+                {
+                    // Cleanup diagnostics must not abort a completed file recovery.
+                    try { InternalDiagnostics.Record(ex, "Cleanup displaced hosted folder after activation rollback"); }
+                    catch { }
+                }
             }
         }
         finally
@@ -1725,7 +1730,12 @@ public sealed class DeploymentService
             if (Directory.Exists(prepared))
             {
                 try { Directory.Delete(prepared, recursive: true); }
-                catch (Exception ex) { InternalDiagnostics.Record(ex, "Cleanup prepared activation rollback folder"); }
+                catch (Exception ex)
+                {
+                    // Preserve the primary recovery error if diagnostics also fail.
+                    try { InternalDiagnostics.Record(ex, "Cleanup prepared activation rollback folder"); }
+                    catch { }
+                }
             }
         }
     }

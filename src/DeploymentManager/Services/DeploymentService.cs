@@ -1627,7 +1627,6 @@ public sealed class DeploymentService
                 catch (Exception ex) { InternalDiagnostics.Record(ex, "Cleanup prepared activation rollback folder"); }
             }
         }
-        return Task.CompletedTask;
     }
 
     private async Task WaitForAppPoolStoppedAsync(DeploymentProfile profile, CancellationToken ct)

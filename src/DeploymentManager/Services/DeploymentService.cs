@@ -1681,10 +1681,29 @@ public sealed class DeploymentService
             {
                 Directory.Move(prepared, fullTarget);
             }
-            catch
+            catch (Exception replacementEx)
             {
-                if (!Directory.Exists(fullTarget) && Directory.Exists(displaced))
-                    Directory.Move(displaced, fullTarget);
+                // If installing the prepared rollback fails, restore the displaced
+                // original payload before restarting IIS. Never restart IIS when
+                // the active folder is still missing.
+                try
+                {
+                    if (!Directory.Exists(fullTarget) && Directory.Exists(displaced))
+                        Directory.Move(displaced, fullTarget);
+                }
+                catch (Exception folderRecoveryEx)
+                {
+                    throw new AggregateException("Activation rollback replacement failed and the original hosted folder could not be restored.", replacementEx, folderRecoveryEx);
+                }
+                if (Directory.Exists(fullTarget) && !Directory.Exists(displaced))
+                {
+                    try { await RestoreOriginalIisStatesAsync(profile); }
+                    catch (Exception iisRecoveryEx)
+                    {
+                        InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after activation rollback replacement failure");
+                        throw new AggregateException("Activation rollback replacement failed and IIS state recovery also failed.", replacementEx, iisRecoveryEx);
+                    }
+                }
                 throw;
             }
             if (Directory.Exists(displaced))

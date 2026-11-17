@@ -2231,11 +2231,45 @@ public sealed class DeploymentService
                 throw;
             }
             var failed = target + ".gwd-failed-" + Guid.NewGuid().ToString("N");
-            if (Directory.Exists(target)) Directory.Move(target, failed);
-            try { Directory.Move(displaced, target); }
-            catch
+            try
             {
-                if (!Directory.Exists(target) && Directory.Exists(failed)) Directory.Move(failed, target);
+                if (Directory.Exists(target)) Directory.Move(target, failed);
+            }
+            catch (Exception moveEx)
+            {
+                // No hosted files were displaced: recover the original IIS state.
+                if (Directory.Exists(target) && !Directory.Exists(failed))
+                {
+                    try { await RestoreOriginalIisStatesAsync(profile); }
+                    catch (Exception iisRecoveryEx)
+                    {
+                        InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after displaced-folder rollback first move failure");
+                        throw new AggregateException("Displaced-folder rollback first move failed and IIS recovery also failed.", moveEx, iisRecoveryEx);
+                    }
+                }
+                throw;
+            }
+            try { Directory.Move(displaced, target); }
+            catch (Exception replacementEx)
+            {
+                try
+                {
+                    if (!Directory.Exists(target) && Directory.Exists(failed))
+                        Directory.Move(failed, target);
+                }
+                catch (Exception folderRecoveryEx)
+                {
+                    throw new AggregateException("Displaced-folder rollback replacement and original-folder restoration both failed.", replacementEx, folderRecoveryEx);
+                }
+                if (Directory.Exists(target) && !Directory.Exists(failed))
+                {
+                    try { await RestoreOriginalIisStatesAsync(profile); }
+                    catch (Exception iisRecoveryEx)
+                    {
+                        InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after displaced-folder rollback replacement failure");
+                        throw new AggregateException("Displaced-folder rollback replacement failed and IIS recovery also failed.", replacementEx, iisRecoveryEx);
+                    }
+                }
                 throw;
             }
             _activeDisplacedFolder = null;

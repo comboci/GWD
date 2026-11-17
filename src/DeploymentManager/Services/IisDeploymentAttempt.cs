@@ -140,7 +140,14 @@ public sealed class IisDeploymentAttempt : IDisposable
             foreach (var path in createdMarkers)
             {
                 try { if (File.Exists(path)) File.Delete(path); }
-                catch (Exception ex) { InternalDiagnostics.Record(ex, "Remove incomplete IIS mutation marker"); }
+                catch (Exception ex)
+                {
+                    // Diagnostics are best-effort. A diagnostics write failure
+                    // must not replace the marker-creation error or interrupt
+                    // cleanup of the remaining markers.
+                    try { InternalDiagnostics.Record(ex, "Remove incomplete IIS mutation marker"); }
+                    catch { }
+                }
             }
             throw;
         }

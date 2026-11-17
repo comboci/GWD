@@ -2715,12 +2715,12 @@ public sealed class DeploymentService
                         if (rootResponse.IsSuccessStatusCode)
                             return new(true, $"Configured health endpoint returned 404, but application root is reachable: {(int)rootResponse.StatusCode} {rootResponse.StatusCode} — {rootUrl}. No rollback required for a missing optional endpoint.", "HEALTH_ENDPOINT_MISSING_APP_REACHABLE", (int)rootResponse.StatusCode, rootUrl);
                     }
-                    catch (Exception ex) { _runner.Report("[HEALTH] Root fallback after health-endpoint 404 failed: " + ex.Message); }
+                    catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested) { _runner.Report("[HEALTH] Root fallback after health-endpoint 404 failed: " + ex.Message); }
                 }
                 // A persistent startup crash benefits from one short retry, while warm-up/transient failures get all retries.
                 if (classification == "ASP.NET_CORE_STARTUP_FAILURE_500_30" && attempt >= 2) break;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 last = new(false, $"Layer IIS: Site/AppPool Started. Layer HTTP: request failed — {url} (attempt {attempt}/4)\r\n{ex.Message}", "HTTP_UNREACHABLE", null, url);
             }

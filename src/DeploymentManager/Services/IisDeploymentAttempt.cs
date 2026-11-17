@@ -117,14 +117,36 @@ public sealed class IisDeploymentAttempt : IDisposable
         if (Resolved) throw new IOException("A resolved IIS attempt cannot begin another mutation.");
         if (MutationStarted) return;
         // Write-ahead marker survives application termination, including a partial STOP.
-        foreach (var path in _unresolved)
+        var createdMarkers = new List<string>();
+        try
         {
-            DeploymentPathSafety.Normalize(path);
-            using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-            stream.Write(Encoding.UTF8.GetBytes(Id));
-            stream.Flush(flushToDisk: true);
+            foreach (var path in _unresolved)
+            {
+                DeploymentPathSafety.Normalize(path);
+                using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                // Track the marker immediately: even a failed write or flush
+                // can leave a newly created file on disk.
+                createdMarkers.Add(path);
+                stream.Write(Encoding.UTF8.GetBytes(Id));
+                stream.Flush(flushToDisk: true);
+            }
+        }
+        catch
+        {
+            // No IIS mutation has begun. Remove only markers created by this
+            // attempt; an interrupted marker creation must not permanently
+            // block the next deployment. Keep any marker that cannot be safely
+            // removed, so manual recovery remains conservative.
+            foreach (var path in createdMarkers)
+            {
+                try { if (File.Exists(path)) File.Delete(path); }
+                catch (Exception ex) { InternalDiagnostics.Record(ex, "Remove incomplete IIS mutation marker"); }
+            }
+            throw;
         }
         MutationStarted = true;
+        // Once marker creation succeeds, a journal failure must retain all
+        // markers: the caller may already be about to mutate IIS.
         Save();
     }
     public void Resolve()

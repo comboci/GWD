@@ -29,9 +29,16 @@ public sealed class PrerequisiteService
     public InstallerDescriptor Node() => new(
         "node", "Node.js 22 LTS x64", "node-v22.23.2-x64.msi", NodeLtsMsiUrl, NodeDownloadPage);
 
-    public InstallerDescriptor Sql(string version) => version.Contains("2019", StringComparison.OrdinalIgnoreCase)
-        ? new("sql", "SQL Server 2019 Express", "SQL2019-SSEI-Expr.exe", Sql2019ExpressUrl, Sql2019Page)
-        : new("sql", "SQL Server 2022 Express", "SQL2022-SSEI-Expr.exe", Sql2022ExpressUrl, Sql2022Page);
+    public InstallerDescriptor Sql(string version)
+    {
+        // Never silently download SQL Server 2022 for an unknown or unsupported selection.
+        var selected = version?.Trim() ?? "";
+        if (selected.Contains("2019", StringComparison.OrdinalIgnoreCase))
+            return new("sql", "SQL Server 2019 Express", "SQL2019-SSEI-Expr.exe", Sql2019ExpressUrl, Sql2019Page);
+        if (selected.Contains("2022", StringComparison.OrdinalIgnoreCase))
+            return new("sql", "SQL Server 2022 Express", "SQL2022-SSEI-Expr.exe", Sql2022ExpressUrl, Sql2022Page);
+        throw new ArgumentException("Unsupported SQL Server Express version. Select 2019 or 2022.", nameof(version));
+    }
 
     public string? FindCached(string cacheFolder, InstallerDescriptor package)
     {

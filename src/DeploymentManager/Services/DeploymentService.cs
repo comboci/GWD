@@ -1958,7 +1958,7 @@ public sealed class DeploymentService
         // Legacy gwd-previous folders are never silently adopted or deleted.
         var parent = Path.GetDirectoryName(target);
         if (string.IsNullOrWhiteSpace(parent) || !Directory.Exists(parent)) return;
-        var prefix = Path.GetFileName(target) + ".gwd-displaced-*";
+        var prefix = Path.GetFileName(target) + ".gwd-previous-*";
         var owned = new List<string>();
         foreach (var path in Directory.EnumerateDirectories(parent, prefix, SearchOption.TopDirectoryOnly))
         {
@@ -2639,10 +2639,12 @@ public sealed class DeploymentService
 
     public async Task<IReadOnlyList<CleanupCandidate>> DiscoverDeploymentCleanupAsync(DeploymentProfile profile, CancellationToken ct = default)
     {
+        if (_iisAttempt is { IsDisposed: false }) throw new IOException("Cleanup blocked during an active deployment attempt.");
         var activeIisPath = await GetSitePhysicalPathAsync(profile, ct);
         if (string.IsNullOrWhiteSpace(activeIisPath))
             throw new IOException("Cleanup scan blocked: IIS active physical path could not be established.");
         var active = Path.GetFullPath(activeIisPath);
+        if (!Directory.Exists(active)) throw new IOException("Cleanup blocked: active IIS directory does not exist.");
         var hosting = Path.GetFullPath(profile.HostingRoot);
         var parent = Path.GetDirectoryName(hosting) ?? throw new IOException("Hosting parent is unknown.");
         var baseName = Path.GetFileName(hosting.TrimEnd(Path.DirectorySeparatorChar));
@@ -2688,6 +2690,11 @@ public sealed class DeploymentService
             ?? throw new IOException("Selected path is not an approved cleanup candidate; rescan required.");
         if (candidate.IsActive) throw new IOException("Deletion refused: path is active or contains the active IIS directory.");
         DeploymentPathSafety.RequirePlainTree(candidate.Path);
+        // Recheck the active IIS path immediately before the destructive operation.
+        var currentIisPath = await GetSitePhysicalPathAsync(profile, ct);
+        if (string.IsNullOrWhiteSpace(currentIisPath) || !PathsEqual(currentIisPath, profile.HostingRoot)
+            && (PathsEqual(currentIisPath, candidate.Path) || currentIisPath.StartsWith(candidate.Path.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)))
+            throw new IOException("Cleanup blocked: active IIS path changed or overlaps the selected directory.");
         Directory.Delete(candidate.Path, recursive: true);
         if (candidate.Kind == "Application backup" && File.Exists(candidate.Path + ".complete.json"))
             File.Delete(candidate.Path + ".complete.json");

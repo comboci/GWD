@@ -13,7 +13,9 @@ internal sealed class DatabaseRelocationForm : Form
     private readonly TextBox _destination = new() { Dock = DockStyle.Top, PlaceholderText = @"D:\SQLData" };
     private readonly TextBox _details = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
     private readonly Button _inspect = new() { Text = "Refresh database size", Width = 180 };
-    private readonly Button _move = new() { Text = "Backup + Detach / Attach", Width = 210, Enabled = false };
+    private readonly Button _move = new() { Text = "Detach, Move && Attach", Width = 210, Enabled = false };
+    private readonly ProgressBar _relocationProgress = new() { Dock = DockStyle.Top, Height = 18, Minimum = 0, Maximum = 4 };
+    private readonly Label _stage = new() { Dock = DockStyle.Top, Height = 32, Text = "Ready", Font = new Font("Segoe UI Semibold", 10F), Padding = new Padding(8, 5, 0, 0) };
     private List<DatabaseFile> _files = new();
     private string _database = "";
 
@@ -33,7 +35,9 @@ internal sealed class DatabaseRelocationForm : Form
             if (picker.ShowDialog(this) == DialogResult.OK) _destination.Text = picker.SelectedPath;
         };
         toolbar.Controls.Add(_inspect); toolbar.Controls.Add(browse); toolbar.Controls.Add(_move);
-        Controls.Add(_details); Controls.Add(_destination); Controls.Add(toolbar);
+        _details.Font = new Font("Segoe UI", 11F);
+        _details.WordWrap = true;
+        Controls.Add(_details); Controls.Add(_relocationProgress); Controls.Add(_stage); Controls.Add(_destination); Controls.Add(toolbar);
         _inspect.Click += async (_, _) => await InspectAsync();
         _move.Click += async (_, _) => await RelocateAsync();
         Shown += async (_, _) => await InspectAsync();
@@ -76,7 +80,7 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
                 "Total allocated: " + (files.Sum(f => f.Bytes) / 1048576d).ToString("N1") + " MB" + Environment.NewLine +
                 string.Join(Environment.NewLine, files.Select(f => $"{f.Type}: {f.Bytes / 1048576d:N1} MB | {f.PhysicalPath}")) +
                 Environment.NewLine + Environment.NewLine +
-                "Move requires a verified backup, exclusive database access, and local SQL Server file permissions. Original files are retained for recovery.";
+                "Relocation requires exclusive database access and local SQL Server file permissions. No new backup is created. Original files are retained for recovery.";
             _move.Enabled = true;
         }
         catch (Exception ex) { _details.Text = "Inspection failed: " + ex.Message; }
@@ -112,11 +116,13 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
         catch (Exception ex) { MessageBox.Show(this, ex.Message, "Preflight failed", MessageBoxButtons.OK, MessageBoxIcon.Error); return; }
 
         var confirmation = MessageBox.Show(this,
-            $"Database: {_database}\nDestination: {target}\n\nThis will back up the database, disconnect its users, detach it, copy its files and attach the copies. The application will be unavailable during relocation. Continue?",
+            $"Database: {_database}\nDestination: {target}\n\nThis will disconnect database users, detach the database, copy its files and attach the copies WITHOUT creating a backup. Ensure an independent verified backup exists before proceeding. The application will be unavailable during relocation. Continue?",
             "Confirm database relocation", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (confirmation != DialogResult.Yes) return;
 
         _inspect.Enabled = false; _move.Enabled = false;
+        _relocationProgress.Value = 0;
+        _stage.Text = "Checking SQL permissions...";
         var detached = false;
         var attachedAtDestination = false;
         var copies = _files.Select(f => Path.Combine(target, Path.GetFileName(f.PhysicalPath))).ToList();
@@ -129,16 +135,16 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
                 if (Convert.ToInt32(await admin.ExecuteScalarAsync()) != 1)
                     throw new UnauthorizedAccessException("SQL sysadmin permission is required.");
             }
-            var backupPath = Path.Combine(Path.GetDirectoryName(_files[0].PhysicalPath)!, _database + "-GWD-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss") + ".bak");
-            _details.AppendText(Environment.NewLine + "Creating backup: " + backupPath);
-            await ExecuteAsync(connection, $"BACKUP DATABASE {Identifier(_database)} TO DISK = {Literal(backupPath)} WITH COPY_ONLY, CHECKSUM, INIT");
-            await ExecuteAsync(connection, $"RESTORE VERIFYONLY FROM DISK = {Literal(backupPath)} WITH CHECKSUM");
-            _details.AppendText(Environment.NewLine + "Backup verified. Detaching...");
+            _stage.Text = "Detaching database...";
+            _details.AppendText(Environment.NewLine + "Detaching database (no backup created)...");
             await ExecuteAsync(connection, $"ALTER DATABASE {Identifier(_database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE");
             try
             {
                 await ExecuteAsync(connection, $"EXEC master.dbo.sp_detach_db @dbname={Literal(_database)}, @skipchecks=N'false'");
                 detached = true;
+                _relocationProgress.Value = 1;
+                _stage.Text = "Copying database files...";
+                _details.AppendText(Environment.NewLine + "Detached. Copying files...");
             }
             catch
             {
@@ -151,17 +157,32 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
                 if (new FileInfo(copies[i]).Length != new FileInfo(_files[i].PhysicalPath).Length)
                     throw new IOException("Copied file length mismatch.");
             }
+            _relocationProgress.Value = 2;
+            _stage.Text = "Attaching database at destination...";
+            _details.AppendText(Environment.NewLine + "Files copied. Attaching...");
             var attachFiles = string.Join(", ", copies.Select(p => "(FILENAME = " + Literal(p) + ")"));
             await ExecuteAsync(connection, $"CREATE DATABASE {Identifier(_database)} ON {attachFiles} FOR ATTACH");
             detached = false;
             attachedAtDestination = true;
+            _relocationProgress.Value = 3;
+            _stage.Text = "Verifying database is online...";
             await ExecuteAsync(connection, $"ALTER DATABASE {Identifier(_database)} SET MULTI_USER");
-            _details.AppendText(Environment.NewLine + "Relocation completed. Original database files and verified backup have NOT been deleted.");
-            MessageBox.Show(this, "Relocation completed. Keep the original files and backup until runtime review.", "Success");
+            await using (var verify = connection.CreateCommand())
+            {
+                verify.CommandText = "SELECT state_desc FROM sys.databases WHERE name = @db";
+                verify.Parameters.AddWithValue("@db", _database);
+                if (!string.Equals(Convert.ToString(await verify.ExecuteScalarAsync()), "ONLINE", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("Database did not return to ONLINE state.");
+            }
+            _relocationProgress.Value = 4;
+            _stage.Text = "Completed — database online";
+            _details.AppendText(Environment.NewLine + "Relocation completed. Original database files retained. No backup was created.");
+            MessageBox.Show(this, "Relocation completed. Keep the original database files until runtime review.", "Success");
             await InspectAsync();
         }
         catch (Exception ex)
         {
+            _stage.Text = "Failed — inspect recovery log";
             _details.AppendText(Environment.NewLine + "ERROR: " + ex.Message);
             if (detached && !attachedAtDestination)
             {
@@ -175,7 +196,7 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
                 }
                 catch (Exception rollback)
                 {
-                    _details.AppendText(Environment.NewLine + "CRITICAL: automatic reattach failed: " + rollback.Message + ". Original files and backup were retained. Manual SQL recovery is required.");
+                    _details.AppendText(Environment.NewLine + "CRITICAL: automatic reattach failed: " + rollback.Message + ". Original files were retained. Manual SQL recovery is required.");
                 }
             }
             MessageBox.Show(this, "Relocation failed. Inspect the log and database status before retrying.", "Relocation error", MessageBoxButtons.OK, MessageBoxIcon.Error);

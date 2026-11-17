@@ -2505,7 +2505,23 @@ public sealed class DeploymentService
                     var verifiedPreviousPath = await GetSitePhysicalPathAsync(profile, recoveryToken);
                     if (string.IsNullOrWhiteSpace(verifiedPreviousPath)
                         || !PathsEqual(verifiedPreviousPath, previousSitePath))
-                        throw new IOException("Versioned rollback path verification failed after appcmd; IIS remains stopped and recovery is unverified.");
+                    {
+                        var verificationEx = new IOException("Versioned rollback path verification failed after appcmd; recovery is unverified.");
+                        // If appcmd reported success but IIS still points at the
+                        // original failed release, no path swap took effect. Restore
+                        // the pre-attempt IIS state instead of stranding it stopped.
+                        if (!string.IsNullOrWhiteSpace(verifiedPreviousPath)
+                            && PathsEqual(verifiedPreviousPath, failedPublishFolder!))
+                        {
+                            try { await RestoreOriginalIisStatesAsync(profile); }
+                            catch (Exception iisRecoveryEx)
+                            {
+                                InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after versioned rollback path verification mismatch");
+                                throw new AggregateException("Versioned rollback path verification failed and IIS state recovery also failed.", verificationEx, iisRecoveryEx);
+                            }
+                        }
+                        throw verificationEx;
+                    }
                     _iisAttempt?.RecordRecovery("FILES_RESTORED / IIS_UNHEALTHY");
                     await RestoreOriginalIisStatesAsync(profile);
                     if (_initialIisStates is { Site: "Started", Pool: "Started" })

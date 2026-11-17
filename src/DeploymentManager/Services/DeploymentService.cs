@@ -1552,7 +1552,14 @@ public sealed class DeploymentService
                     _runner.Report($"[CONFIG] Preserved production file: {relative}");
                 }
             }
-            Directory.Delete(stagingFolder, recursive: true);
+            // Staging cleanup is not part of activation: a locked leftover must not
+            // trigger rollback of an otherwise successfully activated release.
+            try { Directory.Delete(stagingFolder, recursive: true); }
+            catch (Exception cleanupEx)
+            {
+                InternalDiagnostics.Record(cleanupEx, "Cleanup staging folder after activation");
+                _runner.Report("[DEPLOY] Staging cleanup deferred; active release was not rolled back.");
+            }
             IisStage("FILE_DEPLOY", "PASS");
             _runner.Report("[DEPLOY] FILE_DEPLOY = PASS");
             _runner.Report($"[DEPLOY] Activated hosted site folder: {target}");

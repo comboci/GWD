@@ -1568,7 +1568,7 @@ public sealed class DeploymentService
                 try
                 {
                     await StopSiteForDeploymentAsync(profile, CancellationToken.None);
-                    await RestoreHostedFolderSafelyAsync(rollback, target);
+                    await RestoreHostedFolderSafelyAsync(rollback, target, profile);
                     _runner.Report("[ROLLBACK] Activation failure restored the previous hosted folder.");
                 }
                 catch (Exception recoveryEx)
@@ -1584,7 +1584,7 @@ public sealed class DeploymentService
     // Prepare the backup copy before changing the active folder. If activation failed
     // midway through copying, keep that partial folder available until the replacement
     // is installed. This method intentionally ignores deployment cancellation.
-    private Task RestoreHostedFolderSafelyAsync(string rollback, string target)
+    private async Task RestoreHostedFolderSafelyAsync(string rollback, string target, DeploymentProfile profile)
     {
         DeploymentPathSafety.RequireApplicationDirectory(target);
         DeploymentPathSafety.RequirePlainTree(target);
@@ -1597,6 +1597,11 @@ public sealed class DeploymentService
         try
         {
             CopyRecoveryPayloadWithDeadline(rollback, prepared);
+            DeploymentPathSafety.RequirePlainTree(prepared);
+            // The previous STOP request is not proof that IIS has released the live files.
+            // Recheck immediately before moving the active directory during recovery.
+            await WaitForAppPoolStoppedAsync(profile, CancellationToken.None);
+            DeploymentPathSafety.RequirePlainTree(fullTarget);
             if (Directory.Exists(fullTarget)) Directory.Move(fullTarget, displaced);
             try
             {

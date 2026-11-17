@@ -253,6 +253,10 @@ public sealed class WizardForm : Form
         startOverMenu.Items.Add("Start Over — Keep Log", null, (_, _) => ResetWizard(clearLog: false));
         resetWizard.Click += (_, _) => startOverMenu.Show(resetWizard, new Point(0, resetWizard.Height));
         footerButtons.Controls.Add(resetWizard);
+        var cleanupButton = new Button { Text = "پاکسازی نسخه‌های قبلی", Width = 170, Height = 36 };
+        cleanupButton.Click += async (_, _) => await CleanupPreviousVersionsAsync();
+        footerButtons.Controls.Add(cleanupButton);
+
         footerButtons.Controls.Add(_autoDeploy);
         var viewLogs = new Button { Text = "Diagnostics Center", Width = 145, Height = 36 };
         viewLogs.Click += (_, _) =>
@@ -302,6 +306,77 @@ public sealed class WizardForm : Form
         var sample = _runtimeMetrics.Sample();
         _resourceUsage.Text = sample.ToDisplayText();
         _resourceUsage.ForeColor = sample.WorkingSetBytes > 768L * 1024 * 1024 ? Color.Firebrick : (sample.WorkingSetBytes > 384L * 1024 * 1024 ? Color.DarkOrange : Color.DimGray);
+    }
+
+    private async Task CleanupPreviousVersionsAsync()
+    {
+        if (_operationRunning || _autoDeployRunning)
+        {
+            MessageBox.Show(this, "ابتدا عملیات استقرار جاری را متوقف کنید.", "پاکسازی", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        // Only direct children of the configured IIS hosting root are eligible.
+        var root = string.IsNullOrWhiteSpace(_profile.HostingRoot) ? @"C:\inetpub" : _profile.HostingRoot;
+        try
+        {
+            root = Path.GetFullPath(Environment.ExpandEnvironmentVariables(root)).TrimEnd(Path.DirectorySeparatorChar);
+            if (!Directory.Exists(root)) throw new DirectoryNotFoundException(root);
+            if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("مسیر اصلی یک لینک یا Reparse Point است.");
+            var candidates = Directory.EnumerateDirectories(root, "wwwroot.gwd-previous-*", SearchOption.TopDirectoryOnly)
+                .Where(p => Path.GetFileName(p).StartsWith("wwwroot.gwd-previous-", StringComparison.OrdinalIgnoreCase))
+                .Where(p => (File.GetAttributes(p) & FileAttributes.ReparsePoint) == 0)
+                .ToArray();
+            if (candidates.Length == 0)
+            {
+                MessageBox.Show(this, "هیچ نسخه قدیمی قابل پاکسازی پیدا نشد.", "پاکسازی");
+                return;
+            }
+
+            // Refuse to delete a folder currently configured as this IIS site's physical path.
+            var active = await _deployment.GetSitePhysicalPathAsync(_profile, CancellationToken.None);
+            if (!string.IsNullOrWhiteSpace(active))
+            {
+                var activePath = Path.GetFullPath(Environment.ExpandEnvironmentVariables(active)).TrimEnd(Path.DirectorySeparatorChar);
+                candidates = candidates.Where(p => !string.Equals(Path.GetFullPath(p).TrimEnd(Path.DirectorySeparatorChar), activePath, StringComparison.OrdinalIgnoreCase)).ToArray();
+            }
+            if (candidates.Length == 0) throw new IOException("تمام مسیرهای پیدا شده در حال استفاده هستند.");
+
+            var answer = MessageBox.Show(this,
+                $"تعداد {candidates.Length} پوشه نسخه قدیمی در مسیر {root} حذف خواهند شد.\nاین عملیات قابل بازگشت نیست. ادامه می‌دهید؟",
+                "تأیید پاکسازی", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes) return;
+
+            int deleted = 0;
+            var failures = new List<string>();
+            foreach (var folder in candidates)
+            {
+                try
+                {
+                    // Recheck immediately before deletion; never traverse a linked directory.
+                    if ((File.GetAttributes(folder) & FileAttributes.ReparsePoint) != 0) throw new IOException("Reparse Point");
+                    if (Directory.EnumerateFileSystemEntries(folder, "*", SearchOption.AllDirectories)
+                        .Any(p => (File.GetAttributes(p) & FileAttributes.ReparsePoint) != 0))
+                        throw new IOException("پوشه حاوی لینک است و حذف نشد.");
+                    Directory.Delete(folder, recursive: true);
+                    deleted++;
+                    AppendLog("[CLEANUP] Deleted: " + folder);
+                }
+                catch (Exception ex)
+                {
+                    failures.Add(Path.GetFileName(folder) + ": " + ex.Message);
+                    AppendLog("[CLEANUP] Failed: " + folder + " — " + ex.Message);
+                }
+            }
+            MessageBox.Show(this, $"پاکسازی پایان یافت. حذف‌شده: {deleted}، ناموفق: {failures.Count}" +
+                (failures.Count > 0 ? "\\n" + string.Join("\\n", failures.Take(5)) : ""),
+                "نتیجه پاکسازی", MessageBoxButtons.OK, failures.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "پاکسازی انجام نشد: " + ex.Message, "خطا", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void ResetWizard(bool clearLog)

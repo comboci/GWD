@@ -1592,7 +1592,10 @@ public sealed class DeploymentService
             try { Directory.Delete(stagingFolder, recursive: true); }
             catch (Exception cleanupEx)
             {
-                InternalDiagnostics.Record(cleanupEx, "Cleanup staging folder after activation");
+                // Staging cleanup is best-effort. A diagnostics failure must not
+                // turn an otherwise successful activation into a rollback.
+                try { InternalDiagnostics.Record(cleanupEx, "Cleanup staging folder after activation"); }
+                catch { }
                 _runner.Report("[DEPLOY] Staging cleanup deferred; active release was not rolled back.");
             }
             IisStage("FILE_DEPLOY", "PASS");

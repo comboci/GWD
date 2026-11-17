@@ -36,12 +36,10 @@ public sealed class PrerequisiteService
     public string? FindCached(string cacheFolder, InstallerDescriptor package)
     {
         var exact = Path.Combine(cacheFolder, package.FileName);
-        if (File.Exists(exact)) return exact;
-        if (!Directory.Exists(cacheFolder)) return null;
-        var stem = Path.GetFileNameWithoutExtension(package.FileName);
-        return Directory.EnumerateFiles(cacheFolder, "*", SearchOption.TopDirectoryOnly)
-            .FirstOrDefault(x => Path.GetExtension(x).Equals(Path.GetExtension(package.FileName), StringComparison.OrdinalIgnoreCase)
-                && Path.GetFileNameWithoutExtension(x).Contains(stem, StringComparison.OrdinalIgnoreCase));
+        // Never treat an empty or differently named installer as the requested package.
+        // Substring matches could select a different version or architecture.
+        if (!File.Exists(exact)) return null;
+        return new FileInfo(exact).Length > 0 ? exact : null;
     }
 
     public async Task<string> DownloadAsync(InstallerDescriptor package, string cacheFolder, IProgress<int>? progress = null, CancellationToken ct = default)

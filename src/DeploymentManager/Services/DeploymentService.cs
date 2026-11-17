@@ -1658,7 +1658,25 @@ public sealed class DeploymentService
                 }
                 throw;
             }
-            if (Directory.Exists(fullTarget)) Directory.Move(fullTarget, displaced);
+            // A failed first move leaves the original payload untouched. Restore IIS
+            // instead of leaving the previously running site stopped.
+            try
+            {
+                if (Directory.Exists(fullTarget)) Directory.Move(fullTarget, displaced);
+            }
+            catch (Exception moveEx)
+            {
+                if (Directory.Exists(fullTarget) && !Directory.Exists(displaced))
+                {
+                    try { await RestoreOriginalIisStatesAsync(profile); }
+                    catch (Exception iisRecoveryEx)
+                    {
+                        InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after activation rollback first move failure");
+                        throw new AggregateException("Activation rollback first move failed and IIS state recovery also failed.", moveEx, iisRecoveryEx);
+                    }
+                }
+                throw;
+            }
             try
             {
                 Directory.Move(prepared, fullTarget);

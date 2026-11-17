@@ -2698,7 +2698,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         policyPanel.Controls.Add(retentionChoice);
         policyPanel.Controls.Add(new Label { Text = "Keep count:", AutoSize = true, Padding = new Padding(8, 4, 0, 0) });
         policyPanel.Controls.Add(retentionCount);
-        policyPanel.Controls.Add(new Label { Text = "Policy configuration only in V159 stage 1 — deployment safety behavior remains unchanged until stage 2.", AutoSize = true, ForeColor = Color.DarkOrange, MaximumSize = new Size(550, 0) });
+        policyPanel.Controls.Add(new Label { Text = "Old releases are removed only after explicit confirmation in Deployment Cleanup.", AutoSize = true, ForeColor = Color.DarkOrange, MaximumSize = new Size(550, 0) });
         deployModePanel.Controls.Add(policyPanel);
         var statusBanner = new Label { Text = _deploymentStatus, AutoSize = true, Padding = new Padding(8), Font = new Font("Segoe UI Semibold", 11F), ForeColor = _deploymentStatus.Contains("UNSUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.Firebrick : (_deploymentStatus.Contains("SUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.ForestGreen : Color.DimGray) };
         reviewRoot.Controls.Add(statusBanner, 0, 0);
@@ -2750,6 +2750,10 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             var folderToOpen = deployPath;
             openFolder.LinkClicked += (_, __) => OpenTarget(folderToOpen!);
             logActions.Controls.Add(openFolder);
+            var cleanupButton = new Button { Text = "Deployment Cleanup...", AutoSize = true, Enabled = !_operationRunning };
+            cleanupButton.Click += async (_, _) => await ShowDeploymentCleanupAsync();
+            logActions.Controls.Add(cleanupButton);
+
             actions.Controls.Add(logActions, 0, 0);
             actions.Controls.Add(commandActions, 1, 0);
             reviewRoot.Controls.Add(actions, 0, 3);
@@ -2762,6 +2766,55 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         };
 
         _content.Controls.Add(reviewRoot);
+    }
+
+    private async Task ShowDeploymentCleanupAsync()
+    {
+        if (_operationRunning) return;
+        using var dialog = new Form { Text = "Deployment Cleanup — review before deletion", Width = 1050, Height = 540, StartPosition = FormStartPosition.CenterParent };
+        var list = new ListView { Dock = DockStyle.Fill, View = View.Details, FullRowSelect = true, MultiSelect = false };
+        list.Columns.Add("Type", 170);
+        list.Columns.Add("Path", 540);
+        list.Columns.Add("Modified (local)", 160);
+        list.Columns.Add("Size (GiB)", 90);
+        list.Columns.Add("Status", 100);
+        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 52 };
+        var refresh = new Button { Text = "Refresh", AutoSize = true };
+        var remove = new Button { Text = "Delete selected...", AutoSize = true, Enabled = false };
+        var close = new Button { Text = "Close", AutoSize = true };
+        toolbar.Controls.Add(refresh); toolbar.Controls.Add(remove); toolbar.Controls.Add(close);
+        dialog.Controls.Add(list); dialog.Controls.Add(toolbar);
+        close.Click += (_, _) => dialog.Close();
+        async Task RefreshAsync()
+        {
+            refresh.Enabled = false; remove.Enabled = false; list.Items.Clear();
+            try
+            {
+                var candidates = await _deployment.DiscoverDeploymentCleanupAsync(_profile);
+                foreach (var candidate in candidates)
+                {
+                    var item = new ListViewItem(new[] { candidate.Kind, candidate.Path, candidate.ModifiedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), (candidate.Bytes / 1073741824d).ToString("F2"), candidate.IsActive ? "ACTIVE — LOCKED" : "Old / review" }) { Tag = candidate };
+                    list.Items.Add(item);
+                }
+                AppendLog($"[CLEANUP] Inventory completed: {candidates.Count} candidates; no files deleted.");
+            }
+            catch (Exception ex) { MessageBox.Show(dialog, ex.Message, "Cleanup scan blocked", MessageBoxButtons.OK, MessageBoxIcon.Warning); AppendLog("[CLEANUP] Scan failed: " + ex.Message); }
+            finally { refresh.Enabled = true; }
+        }
+        list.SelectedIndexChanged += (_, _) => remove.Enabled = list.SelectedItems.Count == 1 && list.SelectedItems[0].Tag is DeploymentService.CleanupCandidate c && !c.IsActive;
+        refresh.Click += async (_, _) => await RefreshAsync();
+        remove.Click += async (_, _) =>
+        {
+            if (list.SelectedItems.Count != 1 || list.SelectedItems[0].Tag is not DeploymentService.CleanupCandidate selected || selected.IsActive) return;
+            var answer = MessageBox.Show(dialog, $"Permanently delete this directory and its contents?\\n\\n{selected.Path}\\n\\n{selected.Bytes / 1073741824d:F2} GiB\\n\\nThis cannot be undone.", "Confirm permanent deletion", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes) return;
+            remove.Enabled = false;
+            try { await _deployment.DeleteDeploymentCleanupCandidateAsync(_profile, selected.Path); AppendLog("[CLEANUP] Deleted with explicit operator approval: " + selected.Path); }
+            catch (Exception ex) { AppendLog("[CLEANUP] Deletion failed: " + ex.Message); MessageBox.Show(dialog, ex.Message, "Deletion blocked", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            await RefreshAsync();
+        };
+        dialog.Shown += async (_, _) => await RefreshAsync();
+        dialog.ShowDialog(this);
     }
 
     private void RequestDeploymentCancellation()

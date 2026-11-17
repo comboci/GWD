@@ -2408,7 +2408,13 @@ public sealed class DeploymentService
                 if (Directory.Exists(prepared))
                 {
                     try { Directory.Delete(prepared, recursive: true); }
-                    catch (Exception ex) { InternalDiagnostics.Record(ex, "Cleanup prepared rollback folder"); }
+                    catch (Exception ex)
+                    {
+                        // Cleanup runs in finally; never replace the primary
+                        // recovery error or prevent subsequent IIS restoration.
+                        try { InternalDiagnostics.Record(ex, "Cleanup prepared rollback folder"); }
+                        catch { }
+                    }
                 }
             }
             _iisAttempt?.RecordRecovery("FILES_RESTORED / IIS_UNHEALTHY");

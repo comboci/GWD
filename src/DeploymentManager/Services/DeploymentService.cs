@@ -1475,7 +1475,8 @@ public sealed class DeploymentService
             try { await RestoreOriginalIisStatesAsync(profile); }
             catch (Exception recoveryEx)
             {
-                InternalDiagnostics.Record(recoveryEx, "Restore IIS after failed deployment stop");
+                try { InternalDiagnostics.Record(recoveryEx, "Restore IIS after failed deployment stop"); }
+                catch { }
                 throw new AggregateException("Deployment STOP failed and IIS state recovery also failed.", stopEx, recoveryEx);
             }
             throw;

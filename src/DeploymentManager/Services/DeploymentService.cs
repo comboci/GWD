@@ -2210,8 +2210,26 @@ public sealed class DeploymentService
                 throw new IOException("Rollback refused: previous payload does not match the active deployment target.");
             DeploymentPathSafety.RequireApplicationDirectory(target);
             DeploymentPathSafety.RequirePlainTree(displaced);
-            await StopSiteForDeploymentAsync(profile, CancellationToken.None);
-            await WaitForAppPoolStoppedAsync(profile, CancellationToken.None);
+            // A partially successful STOP must not leave the original payload offline
+            // when verification fails before any folder has been moved.
+            try
+            {
+                await StopSiteForDeploymentAsync(profile, CancellationToken.None);
+                await WaitForAppPoolStoppedAsync(profile, CancellationToken.None);
+                DeploymentPathSafety.RequireApplicationDirectory(target);
+                DeploymentPathSafety.RequirePlainTree(target);
+                DeploymentPathSafety.RequirePlainTree(displaced);
+            }
+            catch (Exception stopEx)
+            {
+                try { await RestoreOriginalIisStatesAsync(profile); }
+                catch (Exception iisRecoveryEx)
+                {
+                    InternalDiagnostics.Record(iisRecoveryEx, "Restore IIS after displaced-folder rollback pre-swap failure");
+                    throw new AggregateException("Displaced-folder rollback pre-swap failed and IIS state recovery also failed.", stopEx, iisRecoveryEx);
+                }
+                throw;
+            }
             var failed = target + ".gwd-failed-" + Guid.NewGuid().ToString("N");
             if (Directory.Exists(target)) Directory.Move(target, failed);
             try { Directory.Move(displaced, target); }

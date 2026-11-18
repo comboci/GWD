@@ -3450,16 +3450,47 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
 
     private static void ExportCleanSourceZip(string sourceRoot, string zipPath, IReadOnlyCollection<string> exclusions)
     {
-        if (File.Exists(zipPath)) File.Delete(zipPath);
-        var root = Path.GetFullPath(sourceRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        var excluded = new HashSet<string>(exclusions.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim().Trim('\\','/')), StringComparer.OrdinalIgnoreCase);
-        using var archive = ZipFile.Open(zipPath, ZipArchiveMode.Create);
-        foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+        var root = Path.GetFullPath(sourceRoot);
+        var destination = Path.GetFullPath(zipPath);
+        if (DeploymentPathSafety.Contains(root.TrimEnd('\\', '/'), destination))
+            throw new IOException("The export ZIP must be outside the source folder.");
+        // Reject a linked source root or linked ancestor before reading any source files.
+        var ancestor = root;
+        while (!string.IsNullOrEmpty(ancestor))
         {
-            var relative = Path.GetRelativePath(root, file);
-            var parts = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            if (parts.Any(p => excluded.Contains(p))) continue;
-            archive.CreateEntryFromFile(file, relative, CompressionLevel.Optimal);
+            if ((File.GetAttributes(ancestor) & FileAttributes.ReparsePoint) != 0)
+                throw new IOException("The source path contains a filesystem link: " + ancestor);
+            ancestor = Path.GetDirectoryName(ancestor);
+        }
+
+        var excluded = new HashSet<string>(exclusions.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim().Trim('\\', '/')), StringComparer.OrdinalIgnoreCase);
+        // Validate the entire included tree before replacing an existing archive.
+        void Visit(string directory, Action<string, string>? addFile)
+        {
+            foreach (var item in Directory.EnumerateFileSystemEntries(directory))
+            {
+                var relative = Path.GetRelativePath(root, item);
+                if (relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).Any(excluded.Contains))
+                    continue;
+                var attributes = File.GetAttributes(item);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("The source contains a filesystem link: " + relative);
+                if ((attributes & FileAttributes.Directory) != 0) Visit(item, addFile);
+                else addFile?.Invoke(item, relative);
+            }
+        }
+
+        Visit(root, null);
+        if (File.Exists(destination)) File.Delete(destination);
+        try
+        {
+            using var archive = ZipFile.Open(destination, ZipArchiveMode.Create);
+            Visit(root, (file, relative) => archive.CreateEntryFromFile(file, relative, CompressionLevel.Optimal));
+        }
+        catch
+        {
+            if (File.Exists(destination)) File.Delete(destination);
+            throw;
         }
     }
 

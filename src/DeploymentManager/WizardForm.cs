@@ -26,6 +26,12 @@ public sealed class WizardForm : Form
     private readonly RemoteDeploymentService _remote;
     private readonly RuntimeMetricsService _runtimeMetrics = new();
     private readonly BackgroundHealthMonitor _healthMonitor;
+    private readonly NotifyIcon _trayIcon = new();
+    private readonly System.Windows.Forms.Timer _trayBlinkTimer = new() { Interval = 550 };
+    private readonly Icon _traySuccessIcon = CreateTrayStatusIcon(Color.ForestGreen, true);
+    private readonly Icon _trayFailureIcon = CreateTrayStatusIcon(Color.Firebrick, false);
+    private bool _trayBlinkVisible = true;
+    private bool _trayAlertActive;
     private readonly Label _iisHealth = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 2, 0), Text = "○ IIS" };
     private readonly Label _sqlHealth = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(4, 8, 2, 0), Text = "○ SQL" };
     private readonly Label _httpHealth = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(4, 8, 2, 0), Text = "○ HTTP" };
@@ -140,6 +146,23 @@ public sealed class WizardForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
 
         BuildShell();
+        _trayIcon.Icon = Icon ?? SystemIcons.Application;
+        _trayIcon.Text = "GWD — Ready";
+        _trayIcon.Visible = true;
+        _trayIcon.MouseClick += (_, e) =>
+        {
+            if (e.Button != MouseButtons.Left) return;
+            AcknowledgeTrayAlert();
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+            Show();
+            Activate();
+        };
+        _trayBlinkTimer.Tick += (_, _) =>
+        {
+            if (!_trayAlertActive) return;
+            _trayBlinkVisible = !_trayBlinkVisible;
+            _trayIcon.Icon = _trayBlinkVisible ? (_persistentState.LastResult == "Successful" ? _traySuccessIcon : _trayFailureIcon) : (Icon ?? SystemIcons.Application);
+        };
         _runtimeMetricsTimer.Tick += (_, _) => UpdateRuntimeMetrics();
         _runtimeMetricsTimer.Start();
         UpdateRuntimeMetrics();
@@ -2894,6 +2917,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             if (MessageBox.Show(this, protection, "Deployment protection policy", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
         }
         _operationRunning = true;
+        AcknowledgeTrayAlert();
         _deploymentCts?.Dispose();
         _deploymentCts = new CancellationTokenSource();
         var ct = _deploymentCts.Token;
@@ -3023,6 +3047,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             }
             _deploymentStatus = "DEPLOYMENT SUCCESSFUL";
             _persistentState.LastResult = "Successful";
+            if (!isFastLocalTest) ShowTrayDeploymentResult(true);
             _progress.Value = 100;
             var host = string.IsNullOrWhiteSpace(_profile.HostHeader) ? "localhost" : _profile.HostHeader;
             var successUrl = _profile.HttpPort == 80 ? $"http://{host}" : $"http://{host}:{_profile.HttpPort}";
@@ -3086,6 +3111,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 _persistentState.LastResult = "RecoveryFailed";
                 AppendLog("[CLEANUP] Recovery FAILED: " + cleanupEx);
             }
+            ShowTrayDeploymentResult(false);
             _lastErrorReportPath = CreateErrorReport(ex);
                 MessageBox.Show(
                 this,
@@ -3434,6 +3460,58 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                low.Contains("npm http fetch get 200") || low.Contains("reify failed optional dependency");
     }
 
+    private static Icon CreateTrayStatusIcon(Color color, bool success)
+    {
+        using var bitmap = new Bitmap(32, 32);
+        using (var graphics = Graphics.FromImage(bitmap))
+        {
+            graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using var background = new SolidBrush(color);
+            using var pen = new Pen(Color.White, 3.8f) { StartCap = System.Drawing.Drawing2D.LineCap.Round, EndCap = System.Drawing.Drawing2D.LineCap.Round };
+            graphics.FillEllipse(background, 1, 1, 30, 30);
+            if (success)
+                graphics.DrawLines(pen, new[] { new Point(8, 16), new Point(14, 22), new Point(25, 10) });
+            else
+            {
+                graphics.DrawLine(pen, 10, 10, 22, 22);
+                graphics.DrawLine(pen, 22, 10, 10, 22);
+            }
+        }
+        var handle = bitmap.GetHicon();
+        try
+        {
+            using var temporary = Icon.FromHandle(handle);
+            return (Icon)temporary.Clone();
+        }
+        finally { DestroyIcon(handle); }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool DestroyIcon(IntPtr handle);
+
+    private void AcknowledgeTrayAlert()
+    {
+        _trayAlertActive = false;
+        _trayBlinkTimer.Stop();
+        _trayBlinkVisible = true;
+        _trayIcon.Icon = Icon ?? SystemIcons.Application;
+        _trayIcon.Text = "GWD — Ready";
+    }
+
+    private void ShowTrayDeploymentResult(bool success)
+    {
+        if (IsDisposed || Disposing) return;
+        _trayAlertActive = true;
+        _trayBlinkVisible = true;
+        _trayIcon.Icon = success ? _traySuccessIcon : _trayFailureIcon;
+        _trayIcon.Text = success ? "GWD — Deployment successful" : "GWD — Deployment failed";
+        _trayBlinkTimer.Start();
+        _trayIcon.ShowBalloonTip(5000, success ? "Deployment completed" : "Deployment failed",
+            success ? "Deployment completed successfully. Click the tray icon to acknowledge." : "Deployment failed. Open GWD to review the error.",
+            success ? ToolTipIcon.Info : ToolTipIcon.Error);
+    }
+
     private void WizardForm_FormClosing(object? sender, FormClosingEventArgs e)
     {
         var warning = _operationRunning
@@ -3441,6 +3519,12 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             : "Do you want to close Deployment Manager?";
         if (MessageBox.Show(this, warning, "Confirm exit", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
         { e.Cancel = true; return; }
+        _trayBlinkTimer.Stop();
+        _trayBlinkTimer.Dispose();
+        _trayIcon.Visible = false;
+        _trayIcon.Dispose();
+        _traySuccessIcon.Dispose();
+        _trayFailureIcon.Dispose();
         _runtimeMetricsTimer.Stop();
         _runtimeMetricsTimer.Dispose();
         _runtimeMetrics.Dispose();

@@ -283,8 +283,33 @@ internal static class CliApplication
                     throw new IOException("Pre-rollback site folder is missing; attempted restore preserved for inspection.");
                 DeploymentPathSafety.RequirePlainTree(failed);
                 DeploymentPathSafety.RequirePlainTree(profile.HostingRoot);
-                if (Directory.Exists(profile.HostingRoot)) Directory.Delete(profile.HostingRoot, true);
-                Directory.Move(failed, profile.HostingRoot);
+                // Never destroy the attempted restore before the original release is back.
+                // A sibling quarantine preserves both payloads if either move fails.
+                var quarantine = profile.HostingRoot.TrimEnd('\\', '/') + ".__cli_recovery_" + Guid.NewGuid().ToString("N");
+                var quarantinedRestore = false;
+                if (Directory.Exists(profile.HostingRoot))
+                {
+                    DeploymentPathSafety.RequireSeparate(profile.HostingRoot, quarantine);
+                    Directory.Move(profile.HostingRoot, quarantine);
+                    quarantinedRestore = true;
+                }
+                try
+                {
+                    Directory.Move(failed, profile.HostingRoot);
+                }
+                catch (Exception moveEx)
+                {
+                    if (quarantinedRestore && !Directory.Exists(profile.HostingRoot) && Directory.Exists(quarantine))
+                    {
+                        try { Directory.Move(quarantine, profile.HostingRoot); }
+                        catch (Exception compensationEx)
+                        {
+                            throw new AggregateException("Original release restoration failed and attempted restore could not be returned to the active path; both payloads retained for manual recovery.", moveEx, compensationEx);
+                        }
+                    }
+                    throw;
+                }
+                // Keep the attempted restore in quarantine for manual inspection.
                 await deployment.RestoreOriginalIisStatesAsync(profile);
                 runner.Report("[ROLLBACK] Original files and IIS states restored; HTTP health not checked; unresolved evidence retained.");
             }

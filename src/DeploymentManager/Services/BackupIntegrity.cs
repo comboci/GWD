@@ -38,10 +38,22 @@ public static class BackupIntegrity
 
     public static void Complete(string backup, string project, string target, Dictionary<string, string> inventory)
     {
-        DeploymentPathSafety.Normalize(backup + ".complete.json");
-        using var stream = new FileStream(backup + ".complete.json", FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        JsonSerializer.Serialize(stream, new Manifest(Guid.NewGuid().ToString("N"), project, DeploymentPathSafety.RequireApplicationDirectory(target), inventory));
-        stream.Flush(flushToDisk: true);
+        var marker = DeploymentPathSafety.Normalize(backup + ".complete.json");
+        var temporary = DeploymentPathSafety.Normalize(marker + "." + Guid.NewGuid().ToString("N") + ".tmp");
+        try
+        {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                JsonSerializer.Serialize(stream, new Manifest(Guid.NewGuid().ToString("N"), project, DeploymentPathSafety.RequireApplicationDirectory(target), inventory));
+                stream.Flush(flushToDisk: true);
+            }
+            // Publish the completion marker only after its content has been flushed.
+            File.Move(temporary, marker);
+        }
+        finally
+        {
+            if (File.Exists(temporary)) File.Delete(temporary);
+        }
     }
 
     public static Manifest Require(string backup, string project, string target)

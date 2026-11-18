@@ -3035,13 +3035,15 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             {
                 _deployment.IisStage("HEALTH", "PASS");
                 _deployment.IisStage("COMMIT", "RUNNING");
-                try { _deployment.FinalizeSuccessfulDeployment(_profile, publish); } catch (Exception cleanupEx) { AppendLog("[CLEANUP] Post-success cleanup warning: " + cleanupEx.Message); }
             }
             if (!isFastLocalTest)
             {
                 _deployment.IisStage("COMMIT", "PASS");
                 _deployment.ResolveIisAttempt();
                 _deployment.MarkDeploymentSuccessful(publish);
+                // Persistent successful-build state must not advance before the
+                // attempt and deployment completion markers have both succeeded.
+                try { _deployment.FinalizeSuccessfulDeployment(_profile, publish); } catch (Exception cleanupEx) { AppendLog("[CLEANUP] Post-success cleanup warning: " + cleanupEx.Message); }
                 try { _deployment.CleanupCommittedAttempt(_profile); } catch (Exception cleanupEx) { AppendLog("[CLEANUP] Current-attempt cleanup warning: " + cleanupEx.Message); }
                 _lastSuccessfulPublishPath = publish;
             }

@@ -58,6 +58,8 @@ public sealed class WizardForm : Form
 
     private Button? _saveProfileAction;
     private Button? _loadProfileAction;
+    private CheckBox? _lockSourceAction;
+    private Button? _exportSourceAction;
     private int _pageIndex;
     private int _lastLoggedPageIndex = -1;
     private bool _scanCompleted;
@@ -262,7 +264,7 @@ public sealed class WizardForm : Form
             using var dialog = new DiagnosticsCenterForm(_appData, _history, _profile, _deployment, _logService.LogFile, _runtimeMetrics);
             dialog.ShowDialog(this);
         };
-        footerButtons.Controls.Add(viewLogs);
+        // Diagnostics Center is accessed from the Actions menu, not the wizard footer.
         footer.Controls.Add(footerButtons, 1, 0);
         root.Controls.Add(footer, 1, 1);
 
@@ -314,11 +316,16 @@ public sealed class WizardForm : Form
         deploymentCleanupMenu.Click += async (_, _) => { if (!_operationRunning && !_autoDeployRunning && !_dependencySyncRunning) await ShowDeploymentCleanupAsync(); };
         actionsMenu.DropDownItems.Add(deploymentCleanupMenu);
         menu.Items.Add(actionsMenu);
-        var toolsMenu = new ToolStripMenuItem("Tools");
+        actionsMenu.DropDownItems.Add(new ToolStripSeparator());
+        var lockSourceMenu = new ToolStripMenuItem("Lock Source") { CheckOnClick = false };
+        lockSourceMenu.Click += (_, _) => { if (_pageIndex != 0) ShowPage(0); if (_lockSourceAction is { IsDisposed: false } control) { control.Checked = !control.Checked; lockSourceMenu.Checked = control.Checked; } };
+        actionsMenu.DropDownItems.Add(lockSourceMenu);
+        var exportSourceMenu = new ToolStripMenuItem("Export Clean Source ZIP");
+        exportSourceMenu.Click += (_, _) => { if (_pageIndex != 0) ShowPage(0); _exportSourceAction?.PerformClick(); };
+        actionsMenu.DropDownItems.Add(exportSourceMenu);
         var diagnosticsMenu = new ToolStripMenuItem("Diagnostics Center");
         diagnosticsMenu.Click += (_, _) => viewLogs.PerformClick();
-        toolsMenu.DropDownItems.Add(diagnosticsMenu);
-        menu.Items.Add(toolsMenu);
+        actionsMenu.DropDownItems.Add(diagnosticsMenu);
         MainMenuStrip = menu;
         Controls.Add(menu);
 
@@ -1001,6 +1008,8 @@ public sealed class WizardForm : Form
         _saveProfileAction = saveProfile;
         _loadProfileAction = loadProfile;
         var exportSource = new Button { Text = "Export Clean Source ZIP", AutoSize = true };
+        _lockSourceAction = lockSource;
+        _exportSourceAction = exportSource;
         // A single compact action strip stays opposite the Deployment profile label.
         foreach (var action in new Control[] { saveProfile, loadProfile, lockSource, exportSource })
         {
@@ -1008,7 +1017,7 @@ public sealed class WizardForm : Form
             action.Margin = new Padding(2, 1, 3, 1);
         }
         var profileActions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight };
-        profileActions.Controls.AddRange(new Control[] { lockSource, exportSource });
+        // Actions are exposed through the top menu; no duplicate controls on the page.
         var sourceRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
         sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         sourceRow.Controls.Add(source, 0, 0); sourceRow.Controls.Add(browse, 1, 0);
@@ -1050,7 +1059,7 @@ public sealed class WizardForm : Form
         var dependencySyncActivity = new Label { AutoSize = true, ForeColor = Color.RoyalBlue, MaximumSize = new Size(800, 0), Visible = false, Text = "Checking dependencies..." };
 
         AddRow(form, "Source folder", sourceRow);
-        AddRow(form, "Deployment profile", profileActions);
+
         AddRow(form, "Detected source root", detectedRoot);
         AddRow(form, "Application name", app);
         AddRow(form, "IIS site name", site);

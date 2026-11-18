@@ -174,6 +174,14 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
                 File.Copy(_files[i].PhysicalPath, copies[i], overwrite: false);
                 if (new FileInfo(copies[i]).Length != new FileInfo(_files[i].PhysicalPath).Length)
                     throw new IOException("Copied file length mismatch.");
+                // File length alone cannot detect corruption or a partial overwrite
+                // that preserves length. Verify the full payload before SQL ATTACH.
+                await using var originalStream = new FileStream(_files[i].PhysicalPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                await using var copiedStream = new FileStream(copies[i], FileMode.Open, FileAccess.Read, FileShare.Read);
+                var originalHash = await System.Security.Cryptography.SHA256.HashDataAsync(originalStream);
+                var copiedHash = await System.Security.Cryptography.SHA256.HashDataAsync(copiedStream);
+                if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(originalHash, copiedHash))
+                    throw new IOException("Copied database file SHA-256 mismatch: " + _files[i].LogicalName);
             }
             _relocationProgress.Value = 2;
             _stage.Text = "Attaching database at destination...";

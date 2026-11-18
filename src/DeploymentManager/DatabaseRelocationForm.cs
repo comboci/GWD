@@ -207,14 +207,40 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
                 try
                 {
                     await using var recovery = await OpenMasterAsync();
-                    var originals = string.Join(", ", _files.Select(f => "(FILENAME = " + Literal(f.PhysicalPath) + ")"));
-                    await ExecuteAsync(recovery, $"CREATE DATABASE {Identifier(_database)} ON {originals} FOR ATTACH");
+                    // ATTACH can succeed server-side even if the client times out.
+                    // Resolve the actual file ownership before any compensating ATTACH.
+                    var registered = new List<string>();
+                    await using (var check = recovery.CreateCommand())
+                    {
+                        check.CommandText = @"SELECT mf.physical_name
+FROM sys.master_files mf JOIN sys.databases d ON d.database_id = mf.database_id
+WHERE d.name = @db ORDER BY mf.file_id";
+                        check.Parameters.AddWithValue("@db", _database);
+                        await using var reader = await check.ExecuteReaderAsync();
+                        while (await reader.ReadAsync()) registered.Add(reader.GetString(0));
+                    }
+                    if (registered.Count == 0)
+                    {
+                        var originals = string.Join(", ", _files.Select(f => "(FILENAME = " + Literal(f.PhysicalPath) + ")"));
+                        await ExecuteAsync(recovery, $"CREATE DATABASE {Identifier(_database)} ON {originals} FOR ATTACH");
+                        _details.AppendText(Environment.NewLine + "Rollback: original files reattached.");
+                    }
+                    else
+                    {
+                        var actual = registered.Select(Path.GetFullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                        var originalPaths = _files.Select(f => Path.GetFullPath(f.PhysicalPath)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                        var destinationPaths = copies.Select(Path.GetFullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                        if (!actual.SetEquals(originalPaths) && !actual.SetEquals(destinationPaths))
+                            throw new IOException("Database is attached to unexpected files; automatic recovery blocked.");
+                        _details.AppendText(Environment.NewLine + (actual.SetEquals(destinationPaths)
+                            ? "Recovery: destination files were already attached; duplicate ATTACH skipped."
+                            : "Recovery: original files were already attached; duplicate ATTACH skipped."));
+                    }
                     await ExecuteAsync(recovery, $"ALTER DATABASE {Identifier(_database)} SET MULTI_USER");
-                    _details.AppendText(Environment.NewLine + "Rollback: original files reattached.");
                 }
                 catch (Exception rollback)
                 {
-                    _details.AppendText(Environment.NewLine + "CRITICAL: automatic reattach failed: " + rollback.Message + ". Original files were retained. Manual SQL recovery is required.");
+                    _details.AppendText(Environment.NewLine + "CRITICAL: automatic recovery failed or catalog ownership is uncertain: " + rollback.Message + ". Original files were retained. Manual SQL recovery is required.");
                 }
             }
             else if (attachedAtDestination)

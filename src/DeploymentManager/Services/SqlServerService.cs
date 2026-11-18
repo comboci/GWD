@@ -305,18 +305,25 @@ END;";
         }
         finally
         {
-            if (normalRestartNeeded)
+            try
             {
-                _runner.Report("[SQL RECOVERY] Returning SQL Server to normal multi-user mode...");
-                await StopServiceBestEffortAsync(serviceName, CancellationToken.None);
-                await StartServiceCheckedAsync(serviceName, null, CancellationToken.None);
-                await WaitForServiceStateAsync(serviceName, "RUNNING", TimeSpan.FromSeconds(30), CancellationToken.None);
+                if (normalRestartNeeded)
+                {
+                    _runner.Report("[SQL RECOVERY] Returning SQL Server to normal multi-user mode...");
+                    await StopServiceBestEffortAsync(serviceName, CancellationToken.None);
+                    await StartServiceCheckedAsync(serviceName, null, CancellationToken.None);
+                    await WaitForServiceStateAsync(serviceName, "RUNNING", TimeSpan.FromSeconds(30), CancellationToken.None);
+                }
             }
-
-            if (agentWasRunning)
+            finally
             {
-                _runner.Report($"[SQL RECOVERY] Restoring SQL Agent service {agentName}...");
-                await StartServiceBestEffortAsync(agentName, CancellationToken.None);
+                // A failed SQL Server restart must not skip restoring the Agent
+                // that was running before emergency recovery began.
+                if (agentWasRunning)
+                {
+                    _runner.Report($"[SQL RECOVERY] Restoring SQL Agent service {agentName}...");
+                    await StartServiceBestEffortAsync(agentName, CancellationToken.None);
+                }
             }
         }
 

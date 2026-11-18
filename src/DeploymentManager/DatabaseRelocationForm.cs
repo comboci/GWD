@@ -125,6 +125,7 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
         _stage.Text = "Checking SQL permissions...";
         var detached = false;
         var attachedAtDestination = false;
+        var singleUserAttempted = false;
         var copies = _files.Select(f => Path.Combine(target, Path.GetFileName(f.PhysicalPath))).ToList();
         try
         {
@@ -157,6 +158,7 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
                 throw new IOException("Database file metadata changed since inspection; refresh and retry before detaching.");
             _stage.Text = "Detaching database...";
             _details.AppendText(Environment.NewLine + "Detaching database (no backup created)...");
+            singleUserAttempted = true;
             await ExecuteAsync(connection, $"ALTER DATABASE {Identifier(_database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE");
             try
             {
@@ -285,6 +287,30 @@ WHERE d.name = @db ORDER BY mf.file_id";
                 catch (Exception recoveryError)
                 {
                     _details.AppendText(Environment.NewLine + "CRITICAL: destination database may remain SINGLE_USER: " + recoveryError.Message + ". Manual SQL recovery is required; original files retained.");
+                }
+            }
+            else if (singleUserAttempted)
+            {
+                // SET SINGLE_USER may have succeeded before the client timed out.
+                // Restore access only if this database still exists; do not attach files.
+                try
+                {
+                    await using var recovery = await OpenMasterAsync();
+                    await using var state = recovery.CreateCommand();
+                    state.CommandText = "SELECT user_access_desc FROM sys.databases WHERE name = @db";
+                    state.Parameters.AddWithValue("@db", _database);
+                    var access = Convert.ToString(await state.ExecuteScalarAsync());
+                    if (string.Equals(access, "SINGLE_USER", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await ExecuteAsync(recovery, $"ALTER DATABASE {Identifier(_database)} SET MULTI_USER");
+                        _details.AppendText(Environment.NewLine + "Recovery: database returned to MULTI_USER after interrupted access change.");
+                    }
+                    else if (access is null)
+                        _details.AppendText(Environment.NewLine + "CRITICAL: database is not registered; manual SQL recovery is required.");
+                }
+                catch (Exception recoveryError)
+                {
+                    _details.AppendText(Environment.NewLine + "CRITICAL: unable to verify or restore database access: " + recoveryError.Message);
                 }
             }
             MessageBox.Show(this, "Relocation failed. Inspect the log and database status before retrying.", "Relocation error", MessageBoxButtons.OK, MessageBoxIcon.Error);

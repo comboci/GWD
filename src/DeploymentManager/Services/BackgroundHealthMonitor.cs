@@ -67,9 +67,9 @@ public sealed class BackgroundHealthMonitor : IDisposable
     private async Task CheckAsync(CancellationToken ct)
     {
         bool iis=false; int sites=0,pools=0; bool? sqlOk=null; string sqlDetail="Not configured"; int? httpStatus=null; string httpDetail="Not checked";
-        try { iis=(await _environment.CheckIisAsync()).Installed; if(iis){ sites=(await _environment.ListIisSitesAsync(ct)).Count; pools=(await _environment.ListIisAppPoolsAsync(ct)).Count; } } catch(Exception ex){ InternalDiagnostics.Record(ex,"Background IIS health"); }
-        if(!string.IsNullOrWhiteSpace(_profile.SqlInstance)) { try { sqlDetail=await _sql.TestConnectionWithSafeFallbackAsync(_profile, ct); sqlOk=_sql.Connections.State(_profile).Verified; } catch(Exception ex){ sqlOk=false; sqlDetail=SecretRedactor.Redact(ex.Message); } }
-        if(iis && !string.IsNullOrWhiteSpace(_profile.SiteName)) { try { var uri=new Uri($"http://localhost:{_profile.HttpPort}{(_profile.HealthPath.StartsWith('/')?_profile.HealthPath:"/"+_profile.HealthPath)}"); using var r=await _http.GetAsync(uri,ct); httpStatus=(int)r.StatusCode; httpDetail=$"HTTP {httpStatus}"; } catch(Exception ex){ httpDetail=ex.Message; } }
+        try { iis=(await _environment.CheckIisAsync()).Installed; if(iis){ sites=(await _environment.ListIisSitesAsync(ct)).Count; pools=(await _environment.ListIisAppPoolsAsync(ct)).Count; } } catch(OperationCanceledException) when (ct.IsCancellationRequested) { throw; } catch(Exception ex){ InternalDiagnostics.Record(ex,"Background IIS health"); }
+        if(!string.IsNullOrWhiteSpace(_profile.SqlInstance)) { try { sqlDetail=await _sql.TestConnectionWithSafeFallbackAsync(_profile, ct); sqlOk=_sql.Connections.State(_profile).Verified; } catch(OperationCanceledException) when (ct.IsCancellationRequested) { throw; } catch(Exception ex){ sqlOk=false; sqlDetail=SecretRedactor.Redact(ex.Message); } }
+        if(iis && !string.IsNullOrWhiteSpace(_profile.SiteName)) { try { var uri=new Uri($"http://localhost:{_profile.HttpPort}{(_profile.HealthPath.StartsWith('/')?_profile.HealthPath:"/"+_profile.HealthPath)}"); using var r=await _http.GetAsync(uri,ct); httpStatus=(int)r.StatusCode; httpDetail=$"HTTP {httpStatus}"; } catch(OperationCanceledException) when (ct.IsCancellationRequested) { throw; } catch(Exception ex){ httpDetail=ex.Message; } }
         var snap=new HealthSnapshot(DateTime.Now,iis,sites,pools,sqlOk,sqlDetail,httpStatus,httpDetail); Latest=snap; Updated?.Invoke(snap);
     }
     public void Dispose(){ _cts.Cancel(); _cts.Dispose(); _http.Dispose(); }

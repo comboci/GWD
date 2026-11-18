@@ -156,6 +156,11 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
                     string.Equals(pair.First.Type, pair.Second.Type, StringComparison.Ordinal) &&
                     pair.First.Bytes == pair.Second.Bytes))
                 throw new IOException("Database file metadata changed since inspection; refresh and retry before detaching.");
+            // Do not relocate a database with known logical corruption.
+            // CHECKDB errors must abort before any SINGLE_USER or DETACH mutation.
+            _stage.Text = "Checking database integrity...";
+            _details.AppendText(Environment.NewLine + "Running DBCC CHECKDB before detach...");
+            await ExecuteAsync(connection, $"DBCC CHECKDB ({Literal(_database)}) WITH NO_INFOMSGS, ALL_ERRORMSGS");
             _stage.Text = "Detaching database...";
             _details.AppendText(Environment.NewLine + "Detaching database (no backup created)...");
             singleUserAttempted = true;

@@ -405,7 +405,7 @@ internal static class CliApplication
     }
 
     private static CliResult ListBackups(DeploymentProfile profile) => CliResult.Ok("backups list", profile.ApplicationName, new() { ["backups"] = GetBackups(profile).Select(x => new { path = x, version = DetectVersion(x), createdUtc = Directory.GetCreationTimeUtc(x) }).ToArray() });
-    private static IEnumerable<string> GetBackups(DeploymentProfile profile) => Directory.Exists(ProjectBackupRoot(profile)) ? Directory.EnumerateDirectories(ProjectBackupRoot(profile)).Where(path => !Path.GetFileName(path).StartsWith(".incomplete-", StringComparison.OrdinalIgnoreCase)).OrderByDescending(Directory.GetCreationTimeUtc) : [];
+    private static IEnumerable<string> GetBackups(DeploymentProfile profile) => Directory.Exists(ProjectBackupRoot(profile)) ? Directory.EnumerateDirectories(ProjectBackupRoot(profile)).Where(path => !Path.GetFileName(path).StartsWith(".incomplete-", StringComparison.OrdinalIgnoreCase) && File.Exists(path + ".complete.json")).OrderByDescending(Directory.GetCreationTimeUtc) : [];
     private static string ProjectBackupRoot(DeploymentProfile p)
     {
         var name = SafeName(p.ApplicationName);

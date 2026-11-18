@@ -135,6 +135,26 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
                 if (Convert.ToInt32(await admin.ExecuteScalarAsync()) != 1)
                     throw new UnauthorizedAccessException("SQL sysadmin permission is required.");
             }
+            // The inspection snapshot may be stale. Re-read the SQL catalog
+            // immediately before SINGLE_USER/DETACH, before any mutation.
+            var currentFiles = new List<DatabaseFile>();
+            await using (var current = connection.CreateCommand())
+            {
+                current.CommandText = @"SELECT mf.name, mf.physical_name, mf.type_desc, mf.size * CAST(8192 AS bigint)
+FROM sys.master_files mf INNER JOIN sys.databases d ON mf.database_id=d.database_id
+WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
+                current.Parameters.AddWithValue("@db", _database);
+                await using var reader = await current.ExecuteReaderAsync();
+                while (await reader.ReadAsync())
+                    currentFiles.Add(new DatabaseFile(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3)));
+            }
+            if (currentFiles.Count != _files.Count ||
+                !_files.Zip(currentFiles).All(pair =>
+                    string.Equals(pair.First.LogicalName, pair.Second.LogicalName, StringComparison.Ordinal) &&
+                    string.Equals(Path.GetFullPath(pair.First.PhysicalPath), Path.GetFullPath(pair.Second.PhysicalPath), StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(pair.First.Type, pair.Second.Type, StringComparison.Ordinal) &&
+                    pair.First.Bytes == pair.Second.Bytes))
+                throw new IOException("Database file metadata changed since inspection; refresh and retry before detaching.");
             _stage.Text = "Detaching database...";
             _details.AppendText(Environment.NewLine + "Detaching database (no backup created)...");
             await ExecuteAsync(connection, $"ALTER DATABASE {Identifier(_database)} SET SINGLE_USER WITH ROLLBACK IMMEDIATE");

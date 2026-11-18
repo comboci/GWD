@@ -322,7 +322,8 @@ END;";
                 if (agentWasRunning)
                 {
                     _runner.Report($"[SQL RECOVERY] Restoring SQL Agent service {agentName}...");
-                    await StartServiceBestEffortAsync(agentName, CancellationToken.None);
+                    await StartServiceCheckedAsync(agentName, null, CancellationToken.None);
+                    await WaitForServiceStateAsync(agentName, "RUNNING", TimeSpan.FromSeconds(30), CancellationToken.None);
                 }
             }
         }

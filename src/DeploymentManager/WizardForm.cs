@@ -3084,6 +3084,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 _deploymentStatus = "DEPLOYMENT CANCELLED — RECOVERY FAILED";
                 _persistentState.LastResult = "RecoveryFailed";
                 AppendLog("[CANCEL] Cleanup/recovery FAILED: " + cleanupEx);
+                ShowTrayDeploymentResult(false);
             }
             MessageBox.Show(this,
                 cleanupOk ? "Deployment cancelled. Recovery handler completed; inspect the log for separate cleanup warnings. Restoration was not independently verified." : "Deployment cancelled and cleanup/recovery FAILED. Previous deployment state is uncertain. Review the log before retrying.",

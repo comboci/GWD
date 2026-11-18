@@ -148,7 +148,25 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
             }
             catch
             {
-                try { await ExecuteAsync(connection, $"ALTER DATABASE {Identifier(_database)} SET MULTI_USER"); } catch { /* report original exception */ }
+                // A timeout can occur after SQL Server has detached the database.
+                // Probe the actual catalog using a fresh master connection rather
+                // than trusting the local flag or the failed command connection.
+                try
+                {
+                    await using var probe = await OpenMasterAsync();
+                    await using var check = probe.CreateCommand();
+                    check.CommandText = "SELECT COUNT(*) FROM sys.databases WHERE name = @db";
+                    check.Parameters.AddWithValue("@db", _database);
+                    detached = Convert.ToInt32(await check.ExecuteScalarAsync()) == 0;
+                    if (!detached)
+                        await ExecuteAsync(probe, $"ALTER DATABASE {Identifier(_database)} SET MULTI_USER");
+                }
+                catch (Exception probeError)
+                {
+                    // Unknown catalog state: do not assume a safe reattach.
+                    detached = false;
+                    _details.AppendText(Environment.NewLine + "CRITICAL: DETACH outcome could not be verified: " + probeError.Message + ". Inspect sys.databases and original MDF/LDF files manually.");
+                }
                 throw;
             }
             for (var i = 0; i < _files.Count; i++)

@@ -139,7 +139,13 @@ public sealed class IisDeploymentAttempt : IDisposable
             // removed, so manual recovery remains conservative.
             foreach (var path in createdMarkers)
             {
-                try { if (File.Exists(path)) File.Delete(path); }
+                try
+                {
+                    // Only remove the marker if this attempt still owns its content.
+                    // A different writer may have replaced it after our CreateNew.
+                    if (File.Exists(path) && File.ReadAllText(path) == Id)
+                        File.Delete(path);
+                }
                 catch (Exception ex)
                 {
                     // Diagnostics are best-effort. A diagnostics write failure

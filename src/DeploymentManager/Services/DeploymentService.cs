@@ -2422,18 +2422,11 @@ public sealed class DeploymentService
                     }
                     throw;
                 }
-                // Preserve displaced content if deletion fails; recovery is already active.
+                // Preserve the displaced release until IIS state and HTTP health are
+                // verified. A successful folder swap alone does not prove recovery;
+                // retain the prior payload for manual recovery if later steps fail.
                 if (Directory.Exists(displaced))
-                {
-                    try { Directory.Delete(displaced, recursive: true); }
-                    catch (Exception ex)
-                    {
-                        // Displaced-folder cleanup is best-effort after the verified
-                        // file swap. Diagnostics failure must not skip IIS restart.
-                        try { InternalDiagnostics.Record(ex, "Cleanup displaced hosted folder after rollback"); }
-                        catch { }
-                    }
-                }
+                    _runner.Report("[ROLLBACK] Displaced release retained for manual recovery: " + displaced);
             }
             finally
             {

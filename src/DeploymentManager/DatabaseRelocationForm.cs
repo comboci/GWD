@@ -199,6 +199,22 @@ WHERE d.name=@db AND d.state_desc='ONLINE' ORDER BY mf.file_id";
                     _details.AppendText(Environment.NewLine + "CRITICAL: automatic reattach failed: " + rollback.Message + ". Original files were retained. Manual SQL recovery is required.");
                 }
             }
+            else if (attachedAtDestination)
+            {
+                // The destination database is already attached. A failed MULTI_USER
+                // transition or ONLINE probe must not leave it in SINGLE_USER mode
+                // without a compensating attempt. Never detach or delete either copy.
+                try
+                {
+                    await using var recovery = await OpenMasterAsync();
+                    await ExecuteAsync(recovery, $"ALTER DATABASE {Identifier(_database)} SET MULTI_USER");
+                    _details.AppendText(Environment.NewLine + "Recovery: destination database returned to MULTI_USER; verify ONLINE state before use.");
+                }
+                catch (Exception recoveryError)
+                {
+                    _details.AppendText(Environment.NewLine + "CRITICAL: destination database may remain SINGLE_USER: " + recoveryError.Message + ". Manual SQL recovery is required; original files retained.");
+                }
+            }
             MessageBox.Show(this, "Relocation failed. Inspect the log and database status before retrying.", "Relocation error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally { _inspect.Enabled = true; }

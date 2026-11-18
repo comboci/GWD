@@ -13,10 +13,19 @@ public sealed class BackgroundHealthMonitor : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(8) };
     private Task? _loop;
+    private readonly object _lifecycleLock = new();
+    private bool _disposed;
     public HealthSnapshot? Latest { get; private set; }
     public event Action<HealthSnapshot>? Updated;
     public BackgroundHealthMonitor(EnvironmentService environment, SqlServerService sql, DeploymentProfile profile) { _environment=environment; _sql=sql; _profile=profile; }
-    public void Start() => _loop ??= Task.Run(LoopAsync);
+    public void Start()
+    {
+        lock (_lifecycleLock)
+        {
+            if (_disposed) return;
+            _loop ??= Task.Run(LoopAsync);
+        }
+    }
     public async Task RefreshNowAsync(CancellationToken ct=default) => await CheckAsync(ct);
     public bool HasRecentSuccessfulSql(TimeSpan maxAge) => _sql.Connections.HasRecentSuccessfulSql(_profile, maxAge);
     public void ReportSqlSuccess(string detail)
@@ -72,5 +81,35 @@ public sealed class BackgroundHealthMonitor : IDisposable
         if(iis && !string.IsNullOrWhiteSpace(_profile.SiteName)) { try { var uri=new Uri($"http://localhost:{_profile.HttpPort}{(_profile.HealthPath.StartsWith('/')?_profile.HealthPath:"/"+_profile.HealthPath)}"); using var r=await _http.GetAsync(uri,ct); httpStatus=(int)r.StatusCode; httpDetail=$"HTTP {httpStatus}"; } catch(OperationCanceledException) when (ct.IsCancellationRequested) { throw; } catch(Exception ex){ httpDetail=ex.Message; } }
         var snap=new HealthSnapshot(DateTime.Now,iis,sites,pools,sqlOk,sqlDetail,httpStatus,httpDetail); Latest=snap; Updated?.Invoke(snap);
     }
-    public void Dispose(){ _cts.Cancel(); _cts.Dispose(); _http.Dispose(); }
+    public void Dispose()
+    {
+        Task? running;
+        lock (_lifecycleLock)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _cts.Cancel();
+            running = _loop;
+        }
+
+        // Do not release the cancellation source or HTTP client while the loop uses them.
+        if (running is null)
+        {
+            _http.Dispose();
+            _cts.Dispose();
+            return;
+        }
+
+        _ = running.ContinueWith(
+            completed =>
+            {
+                if (completed.IsFaulted)
+                    InternalDiagnostics.Record(completed.Exception!, "Background health monitor shutdown");
+                _http.Dispose();
+                _cts.Dispose();
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
 }

@@ -3435,6 +3435,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         _runtimeMetricsTimer.Stop();
         _runtimeMetricsTimer.Dispose();
         _runtimeMetrics.Dispose();
+        _healthMonitor.Updated -= OnHealthUpdated;
         _healthMonitor.Dispose();
         _persistentState.LastStage = _steps[Math.Clamp(_pageIndex,0,_steps.Length-1)];
         _persistentState.LastSourceFolder = _profile.SourceFolder;

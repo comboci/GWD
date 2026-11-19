@@ -3039,8 +3039,10 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             if (!isFastLocalTest)
             {
                 _deployment.IisStage("COMMIT", "PASS");
-                _deployment.ResolveIisAttempt();
+                // Publish the success marker while the IIS recovery journal and rollback
+                // ownership are still active. A marker-write failure must not disable rollback.
                 _deployment.MarkDeploymentSuccessful(publish);
+                _deployment.ResolveIisAttempt();
                 // Persistent successful-build state must not advance before the
                 // attempt and deployment completion markers have both succeeded.
                 try { _deployment.FinalizeSuccessfulDeployment(_profile, publish); } catch (Exception cleanupEx) { AppendLog("[CLEANUP] Post-success cleanup warning: " + cleanupEx.Message); }

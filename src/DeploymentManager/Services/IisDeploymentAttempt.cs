@@ -178,9 +178,33 @@ public sealed class IisDeploymentAttempt : IDisposable
         Resolved = true;
         try { Save(); }
         catch { Resolved = false; throw; }
+        // Once the journal is durably resolved, a marker cleanup failure is not a
+        // deployment failure: rolling back a healthy release would be unsafe.
+        // Retain any undeleted marker to block subsequent deployments until reviewed.
         // Locks stay open until Dispose. Never delete lock files or expire another lease.
         foreach (var path in _unresolved)
-            if (File.Exists(path) && File.ReadAllText(path) == Id) File.Delete(path);
+        {
+            try
+            {
+                if (File.Exists(path) && File.ReadAllText(path) == Id)
+                    File.Delete(path);
+            }
+            catch (IOException ex)
+            {
+                RecordMarkerCleanupWarning(path, ex);
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                RecordMarkerCleanupWarning(path, ex);
+            }
+        }
+    }
+    private void RecordMarkerCleanupWarning(string path, Exception error)
+    {
+        try { _log("[IIS] Resolved journal; recovery marker cleanup requires manual review: " + path); }
+        catch { }
+        try { InternalDiagnostics.Record(error, "Remove resolved IIS recovery marker"); }
+        catch { }
     }
     public void AssertOwnership()
     {

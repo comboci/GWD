@@ -18,6 +18,7 @@ public sealed class RuntimeMetricsService : IDisposable
 {
     private readonly Process _process = Process.GetCurrentProcess();
     private readonly Queue<RuntimeMetricSample> _history = new();
+    private RuntimeMetricSample? _latestSample;
     private readonly object _sync = new();
     private DateTimeOffset _lastAt = DateTimeOffset.Now;
     private TimeSpan _lastCpu;
@@ -50,6 +51,7 @@ public sealed class RuntimeMetricsService : IDisposable
             _lastCpu = cpuNow;
             var sample = new RuntimeMetricSample(now, cpu, _process.WorkingSet64, _process.PrivateMemorySize64, GC.GetTotalMemory(false), _process.Threads.Count);
             _history.Enqueue(sample);
+            _latestSample = sample;
             while (_history.Count > MaxSamples) _history.Dequeue();
             return sample;
         }
@@ -58,6 +60,13 @@ public sealed class RuntimeMetricsService : IDisposable
             InternalDiagnostics.Record(ex, "Runtime metrics sample");
             return new RuntimeMetricSample(DateTimeOffset.Now, 0, 0, 0, GC.GetTotalMemory(false), 0);
         }
+    }
+
+    // Read-only observer: displaying metrics must not record a second sample
+    // or distort the CPU measurement interval used by the wizard timer.
+    public RuntimeMetricSample? GetLatestSample()
+    {
+        lock (_sync) return _latestSample;
     }
 
     public RuntimeMetricSample[] GetHistory()

@@ -13,6 +13,8 @@ public sealed partial class DiagnosticsCenterForm : Form
     private readonly DiagnosticBundleService _bundle = new();
     private readonly RuntimeMetricsService _runtimeMetrics;
     private readonly System.Windows.Forms.Timer _metricsTimer = new() { Interval = 2000 };
+    private TabPage? _runtimeResourcesTab;
+    private Action? _refreshRuntimeResources;
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
     private readonly Dictionary<TabPage, DiagnosticExportSection> _sectionByTab = new();
     private readonly Dictionary<TabPage, Func<TabPage>> _lazyTabs = new();
@@ -126,6 +128,7 @@ public sealed partial class DiagnosticsCenterForm : Form
         {
             MaterializeSelectedTab();
             UpdateActionMenuState();
+            UpdateRuntimeResourcesVisibility();
         };
 
         root.Controls.Add(_tabs, 0, 2);
@@ -135,6 +138,25 @@ public sealed partial class DiagnosticsCenterForm : Form
         // cancellation; the worker disposes its temporary ZIP in its own finally.
         FormClosing += (_, _) => { _exportGeneration++; _exportCts?.Cancel(); };
         FormClosed += (_, _) => { _metricsTimer.Stop(); _metricsTimer.Dispose(); };
+    }
+
+    private void UpdateRuntimeResourcesVisibility()
+    {
+        var active = _runtimeResourcesTab is { IsDisposed: false } tab &&
+            ReferenceEquals(_tabs.SelectedTab, tab);
+        if (!active)
+        {
+            _metricsTimer.Stop();
+            return;
+        }
+
+        // Only the main Wizard owns CPU sampling. Activate this view on demand,
+        // and refresh immediately on return without recording a new sample.
+        if (!_metricsTimer.Enabled)
+        {
+            _metricsTimer.Start();
+            _refreshRuntimeResources?.Invoke();
+        }
     }
 
     private void UpdateActionMenuState()
@@ -466,20 +488,47 @@ public sealed partial class DiagnosticsCenterForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         var current = new Label { AutoSize = true, Font = new Font("Segoe UI Semibold", 11F), Text = "Sampling..." };
         var history = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Font = new Font("Consolas", 9F) };
-        var note = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(1000, 0), Text = "History is bounded to the most recent 720 samples. Deployment Manager does not run periodic forced GC; UI/log buffers are bounded and page controls are disposed normally so real leaks are not hidden." };
+        var note = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(1000, 0), Text = "CPU/RAM is sampled by the main Wizard every 5 seconds. This tab displays the latest measured sample and never creates extra samples. History is bounded to 720 measurements; no forced GC runs." };
         root.Controls.Add(current, 0, 0); root.Controls.Add(history, 0, 1); root.Controls.Add(note, 0, 2);
-        void Refresh()
+        DateTimeOffset? lastRenderedAt = null;
+        void Refresh(bool force = false)
         {
-            var sample = _runtimeMetrics.Sample();
-            current.Text = sample.ToDisplayText();
-            var lines = _runtimeMetrics.GetHistory().TakeLast(240).Select(x => $"{x.At:HH:mm:ss} | {x.ToDisplayText()}");
+            if (tab.IsDisposed || !ReferenceEquals(_tabs.SelectedTab, tab)) return;
+            var sample = _runtimeMetrics.GetLatestSample();
+            if (sample is null)
+            {
+                if (force)
+                {
+                    current.Text = "Waiting for the first CPU/RAM measurement...";
+                    history.Text = "No measurements recorded yet.";
+                }
+                return;
+            }
+            if (!force && lastRenderedAt == sample.At) return;
+
+            lastRenderedAt = sample.At;
+            current.Text = $"Measured {sample.At:HH:mm:ss} | {sample.ToDisplayText()}";
+            var lines = _runtimeMetrics.GetHistory().TakeLast(240)
+                .Select(x => $"{x.At:HH:mm:ss} | {x.ToDisplayText()}");
             history.Text = string.Join(Environment.NewLine, lines);
             history.SelectionStart = history.TextLength;
             history.ScrollToCaret();
         }
-        _metricsTimer.Tick += (_, _) => { if (!tab.IsDisposed) Refresh(); };
-        _metricsTimer.Start();
-        Refresh();
+
+        _runtimeResourcesTab = tab;
+        _refreshRuntimeResources = () => Refresh(force: true);
+        _metricsTimer.Tick += (_, _) =>
+        {
+            if (!tab.IsDisposed && ReferenceEquals(_tabs.SelectedTab, tab))
+                Refresh();
+        };
+        tab.Disposed += (_, _) =>
+        {
+            if (!ReferenceEquals(_runtimeResourcesTab, tab)) return;
+            _metricsTimer.Stop();
+            _runtimeResourcesTab = null;
+            _refreshRuntimeResources = null;
+        };
         tab.Controls.Add(root);
         return tab;
     }

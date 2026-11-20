@@ -112,9 +112,55 @@ try {
         catch { Write-Warning "Previous latest retained at '$previousLatest': $($_.Exception.Message)" }
     }
 
+    # Preserve both root entry points before replacing either; restore on partial failure.
     $gui = Join-Path $latest 'GenericWeb.DeploymentManager.exe'
-    Copy-Item -LiteralPath $gui -Destination (Join-Path $DestinationRoot "DeploymentManager-V$major.exe") -Force
-    Copy-Item -LiteralPath $gui -Destination (Join-Path $DestinationRoot 'DeploymentManager.exe') -Force
+    $rootStage = Join-Path $DestinationRoot ('.root-exe-stage-' + [Guid]::NewGuid().ToString('N'))
+    $rootNames = @("DeploymentManager-V$major.exe", 'DeploymentManager.exe')
+    $rootExisted = @{}
+    $rootTouched = @()
+    $rollbackIncomplete = $false
+    try {
+        New-Item -ItemType Directory -Path $rootStage -ErrorAction Stop | Out-Null
+        foreach ($name in $rootNames) {
+            Copy-Item -LiteralPath $gui -Destination (Join-Path $rootStage $name) -ErrorAction Stop
+            $target = Join-Path $DestinationRoot $name
+            $rootExisted[$name] = Test-Path -LiteralPath $target -PathType Leaf
+            if ($rootExisted[$name]) {
+                Copy-Item -LiteralPath $target -Destination (Join-Path $rootStage ($name + '.previous')) -ErrorAction Stop
+            } elseif (Test-Path -LiteralPath $target) {
+                throw "Root executable target is not a file: '$target'."
+            }
+        }
+        foreach ($name in $rootNames) {
+            $rootTouched += $name
+            Copy-Item -LiteralPath (Join-Path $rootStage $name) -Destination (Join-Path $DestinationRoot $name) -Force -ErrorAction Stop
+        }
+    } catch {
+        $originalFailure = $_
+        $rollbackErrors = @()
+        foreach ($name in $rootTouched) {
+            $target = Join-Path $DestinationRoot $name
+            try {
+                if ($rootExisted[$name]) {
+                    Copy-Item -LiteralPath (Join-Path $rootStage ($name + '.previous')) -Destination $target -Force -ErrorAction Stop
+                } elseif (Test-Path -LiteralPath $target) {
+                    Remove-Item -LiteralPath $target -Force -ErrorAction Stop
+                }
+            } catch {
+                $rollbackErrors += ($name + ': ' + $_.Exception.Message)
+            }
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            $rollbackIncomplete = $true
+            throw "Root executable publication failed: $($originalFailure.Exception.Message). Rollback incomplete; backups retained at '$rootStage': $($rollbackErrors -join '; ')."
+        }
+        throw $originalFailure
+    } finally {
+        if ((-not $rollbackIncomplete) -and (Test-Path -LiteralPath $rootStage)) {
+            try { Remove-Item -LiteralPath $rootStage -Recurse -Force -ErrorAction Stop }
+            catch { Write-Warning "Root executable staging retained at '$rootStage': $($_.Exception.Message)" }
+        }
+    }
 
     Write-Host "Deployment Manager $version published successfully."
     Write-Host "Latest EXE: $(Join-Path $DestinationRoot 'DeploymentManager.exe')"

@@ -15,6 +15,8 @@ public sealed partial class DiagnosticsCenterForm : Form
     private readonly System.Windows.Forms.Timer _metricsTimer = new() { Interval = 2000 };
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
     private readonly Dictionary<TabPage, DiagnosticExportSection> _sectionByTab = new();
+    private readonly Dictionary<TabPage, Func<TabPage>> _lazyTabs = new();
+    private bool _materializingTab;
     private readonly List<Button> _exportButtons = new();
     private readonly Button _cancelExport = new() { Text = "Cancel Export", Width = 126, Height = 34, Enabled = false };
     private readonly Label _exportStatus = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 0, 0), Text = "Export idle." };
@@ -73,14 +75,17 @@ public sealed partial class DiagnosticsCenterForm : Form
         });
         root.Controls.Add(toolbar, 0, 0);
 
+        // The initial History tab only constructs controls. Its disk scan starts
+        // after Shown; other tabs do not touch logs/diagnostics until selected.
         AddTab(CreateHistoryTab(), DiagnosticExportSection.DeploymentHistory);
-        AddTab(CreateLogTab(), DiagnosticExportSection.CurrentLog);
-        AddTab(CreateFilesTab("Crash Reports", _appData.CrashReports, "*.txt"), DiagnosticExportSection.CrashReports);
-        AddTab(CreateFilesTab("Error Reports", _appData.ErrorReports, "*.txt"), DiagnosticExportSection.ErrorReports);
-        AddTab(CreateCodeQualityTab(), DiagnosticExportSection.CodeQuality);
-        AddTab(CreatePerformanceTab(), DiagnosticExportSection.BuildPerformance);
-        AddTab(CreateRuntimeResourcesTab(), DiagnosticExportSection.RuntimeResources);
-        AddTab(CreateFilesTab("Internal Diagnostics", _appData.InternalDiagnosticsFolder, "*.log"), DiagnosticExportSection.InternalDiagnostics);
+        AddLazyTab("Current Log", CreateLogTab, DiagnosticExportSection.CurrentLog);
+        AddLazyTab("Crash Reports", () => CreateFilesTab("Crash Reports", _appData.CrashReports, "*.txt"), DiagnosticExportSection.CrashReports);
+        AddLazyTab("Error Reports", () => CreateFilesTab("Error Reports", _appData.ErrorReports, "*.txt"), DiagnosticExportSection.ErrorReports);
+        AddLazyTab("Code Quality", CreateCodeQualityTab, DiagnosticExportSection.CodeQuality);
+        AddLazyTab("Build Performance", CreatePerformanceTab, DiagnosticExportSection.BuildPerformance);
+        AddLazyTab("CPU / Memory", CreateRuntimeResourcesTab, DiagnosticExportSection.RuntimeResources);
+        AddLazyTab("Internal Diagnostics", () => CreateFilesTab("Internal Diagnostics", _appData.InternalDiagnosticsFolder, "*.log"), DiagnosticExportSection.InternalDiagnostics);
+        _tabs.SelectedIndexChanged += (_, _) => MaterializeSelectedTab();
 
         root.Controls.Add(_tabs, 0, 1);
         Controls.Add(root);
@@ -96,20 +101,76 @@ public sealed partial class DiagnosticsCenterForm : Form
         _sectionByTab[tab] = section;
     }
 
+    private void AddLazyTab(string title, Func<TabPage> factory, DiagnosticExportSection section)
+    {
+        var placeholder = new TabPage(title);
+        _tabs.TabPages.Add(placeholder);
+        _sectionByTab[placeholder] = section;
+        _lazyTabs[placeholder] = factory;
+    }
+
+    private void MaterializeSelectedTab()
+    {
+        if (_materializingTab) return;
+        var placeholder = _tabs.SelectedTab;
+        if (placeholder is null || !_lazyTabs.TryGetValue(placeholder, out var factory)) return;
+        TabPage? created = null;
+        var inserted = false;
+        try
+        {
+            _materializingTab = true;
+            created = factory();
+            var index = _tabs.TabPages.IndexOf(placeholder);
+            var section = _sectionByTab[placeholder];
+            // Keep the actual tab alive: its event handlers, metrics timer and
+            // asynchronous Code Quality loader reference this TabPage lifetime.
+            // Moving only its controls and disposing it would cancel that loader.
+            _tabs.TabPages.RemoveAt(index);
+            _tabs.TabPages.Insert(index, created);
+            inserted = true;
+            _sectionByTab.Remove(placeholder);
+            _sectionByTab[created] = section;
+            _lazyTabs.Remove(placeholder);
+            _tabs.SelectedTab = created;
+            placeholder.Dispose();
+        }
+        catch (Exception ex)
+        {
+            InternalDiagnostics.Record(ex, "Load diagnostics tab: " + placeholder.Text);
+            if (!inserted)
+                created?.Dispose();
+            // Retry remains available if construction failed before insertion.
+            if (!placeholder.IsDisposed)
+            {
+                placeholder.Controls.Clear();
+                placeholder.Controls.Add(new Label
+                {
+                    Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter,
+                    Text = "Unable to load this tab. Select another tab, then retry.\r\n" +
+                        SecretRedactor.Redact(ex.Message)
+                });
+            }
+        }
+        finally { _materializingTab = false; }
+    }
+
     private TabPage CreateHistoryTab()
     {
         var tab = new TabPage("Deployment History & Timeline");
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, Padding = new Padding(8) };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4, Padding = new Padding(8) };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 42));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         var projects = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 520 };
+        var refresh = new Button { Text = "Refresh", AutoSize = true };
         var header = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
         header.Controls.Add(new Label { Text = "Project", AutoSize = true, Padding = new Padding(0, 7, 8, 0) });
         header.Controls.Add(projects);
+        header.Controls.Add(refresh);
         root.Controls.Add(header, 0, 0);
 
-        var summary = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill, Font = new Font("Consolas", 9F) };
+        var summary = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill, Font = new Font("Consolas", 9F), Text = "Loading deployment history..." };
         var grid = new DataGridView
         {
             Dock = DockStyle.Fill,
@@ -129,32 +190,132 @@ public sealed partial class DiagnosticsCenterForm : Form
         root.Controls.Add(summary, 0, 1);
         root.Controls.Add(grid, 0, 2);
 
-        var summaries = _history.GetProjectSummaries();
-        foreach (var item in summaries) projects.Items.Add(new ProjectChoice(item.ProjectId, DisplayProjectName(item)));
-        if (projects.Items.Count > 0)
+        const int pageSize = 200;
+        var records = Array.Empty<DeploymentHistoryRecord>();
+        var page = 0;
+        var generation = 0;
+        var selectingProjects = false;
+        var previous = new Button { Text = "Previous", AutoSize = true, Enabled = false };
+        var next = new Button { Text = "Next", AutoSize = true, Enabled = false };
+        var pageInfo = new Label { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 7, 0, 0), Text = "Loading..." };
+        var navigation = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
+        navigation.Controls.Add(previous);
+        navigation.Controls.Add(next);
+        navigation.Controls.Add(pageInfo);
+        root.Controls.Add(navigation, 0, 3);
+
+        void RenderPage()
         {
-            var preferred = _history.GetProjectId(_profile);
-            var selected = Enumerable.Range(0, projects.Items.Count)
-                .FirstOrDefault(i => (projects.Items[i] as ProjectChoice)?.ProjectId == preferred);
-            projects.SelectedIndex = selected;
+            if (tab.IsDisposed) return;
+            var pages = Math.Max(1, (records.Length + pageSize - 1) / pageSize);
+            page = Math.Clamp(page, 0, pages - 1);
+            grid.SuspendLayout();
+            try
+            {
+                grid.Rows.Clear();
+                foreach (var a in records.Skip(page * pageSize).Take(pageSize))
+                {
+                    var duration = a.EndedAtUtc.HasValue ? TimeSpan.FromSeconds(Math.Max(0, a.ElapsedSeconds)).ToString(@"hh\:mm\:ss") : "—";
+                    grid.Rows.Add(a.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), a.EndedAtUtc.HasValue ? a.Result : "Interrupted", duration, a.BuildMode,
+                        string.IsNullOrWhiteSpace(a.ApplicationVersion) ? "—" : a.ApplicationVersion, a.DeploymentTargetPath);
+                }
+            }
+            finally { grid.ResumeLayout(); }
+            previous.Enabled = page > 0;
+            next.Enabled = page < pages - 1;
+            pageInfo.Text = $"Page {page + 1}/{pages} — {records.Length} deployment(s)";
         }
 
-        void LoadProject()
+        async Task LoadProjectAsync()
         {
-            if (projects.SelectedItem is not ProjectChoice choice) { summary.Text = "No deployment history has been recorded yet."; return; }
-            var s = _history.GetSummary(choice.ProjectId);
-            if (s is null) return;
-            summary.Text = BuildSummaryText(s);
-            grid.Rows.Clear();
-            foreach (var a in s.Attempts.OrderByDescending(x => x.StartedAtUtc))
+            if (projects.SelectedItem is not ProjectChoice choice)
             {
-                var duration = a.EndedAtUtc.HasValue ? TimeSpan.FromSeconds(Math.Max(0, a.ElapsedSeconds)).ToString(@"hh\:mm\:ss") : "—";
-                grid.Rows.Add(a.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), a.EndedAtUtc.HasValue ? a.Result : "Interrupted", duration, a.BuildMode,
-                    string.IsNullOrWhiteSpace(a.ApplicationVersion) ? "—" : a.ApplicationVersion, a.DeploymentTargetPath);
+                records = Array.Empty<DeploymentHistoryRecord>();
+                summary.Text = "No deployment history has been recorded yet.";
+                RenderPage();
+                return;
+            }
+            var requested = ++generation;
+            var id = choice.ProjectId;
+            summary.Text = "Loading project history...";
+            pageInfo.Text = "Loading...";
+            try
+            {
+                var result = await Task.Run(() =>
+                {
+                    var s = _history.GetSummary(id);
+                    return (Text: s is null ? string.Empty : BuildSummaryText(s),
+                        Records: s?.Attempts.OrderByDescending(x => x.StartedAtUtc).ToArray() ?? Array.Empty<DeploymentHistoryRecord>());
+                });
+                if (requested != generation || IsDisposed || Disposing || tab.IsDisposed ||
+                    (projects.SelectedItem as ProjectChoice)?.ProjectId != id) return;
+                records = result.Records;
+                summary.Text = records.Length == 0 ? "No deployment history has been recorded yet." : result.Text;
+                page = 0;
+                RenderPage();
+            }
+            catch (Exception ex)
+            {
+                InternalDiagnostics.Record(ex, "Load diagnostic project history");
+                if (requested != generation || IsDisposed || Disposing || tab.IsDisposed) return;
+                records = Array.Empty<DeploymentHistoryRecord>();
+                summary.Text = "Deployment history unavailable: " + SecretRedactor.Redact(ex.Message);
+                RenderPage();
             }
         }
-        projects.SelectedIndexChanged += (_, _) => LoadProject();
-        LoadProject();
+
+        async Task LoadProjectsAsync()
+        {
+            var requested = ++generation;
+            refresh.Enabled = false;
+            pageInfo.Text = "Loading projects...";
+            var selectedId = (projects.SelectedItem as ProjectChoice)?.ProjectId;
+            try
+            {
+                var preferred = selectedId ?? _history.GetProjectId(_profile);
+                var summaries = await Task.Run(() => _history.GetProjectSummaries());
+                if (requested != generation || IsDisposed || Disposing || tab.IsDisposed) return;
+                selectingProjects = true;
+                projects.BeginUpdate();
+                try
+                {
+                    projects.Items.Clear();
+                    foreach (var item in summaries)
+                        projects.Items.Add(new ProjectChoice(item.ProjectId, DisplayProjectName(item)));
+                    if (projects.Items.Count > 0)
+                    {
+                        var chosen = Enumerable.Range(0, projects.Items.Count)
+                            .FirstOrDefault(i => (projects.Items[i] as ProjectChoice)?.ProjectId == preferred);
+                        projects.SelectedIndex = chosen;
+                    }
+                }
+                finally { projects.EndUpdate(); selectingProjects = false; }
+                await LoadProjectAsync();
+            }
+            catch (Exception ex)
+            {
+                InternalDiagnostics.Record(ex, "Load diagnostics project list");
+                if (requested == generation && !IsDisposed && !Disposing && !tab.IsDisposed)
+                {
+                    summary.Text = "Project list unavailable: " + SecretRedactor.Redact(ex.Message);
+                    pageInfo.Text = "Unable to load projects";
+                }
+            }
+            finally
+            {
+                if (!IsDisposed && !Disposing && !tab.IsDisposed) refresh.Enabled = true;
+            }
+        }
+
+        projects.SelectedIndexChanged += async (_, _) =>
+        {
+            if (!selectingProjects) await LoadProjectAsync();
+        };
+        refresh.Click += async (_, _) => await LoadProjectsAsync();
+        previous.Click += (_, _) => { if (page > 0) { page--; RenderPage(); } };
+        next.Click += (_, _) => { if ((page + 1) * pageSize < records.Length) { page++; RenderPage(); } };
+        tab.Disposed += (_, _) => generation++;
+        Shown += async (_, _) => { if (!tab.IsDisposed) await LoadProjectsAsync(); };
         tab.Controls.Add(root);
         return tab;
     }

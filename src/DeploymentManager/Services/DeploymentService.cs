@@ -132,7 +132,13 @@ public sealed class DeploymentService
         string BackendDependencyHash = "",
         string FrontendOutputHash = "",
         string SourceVersion = "",
-        bool DependenciesValidated = false);
+        bool DependenciesValidated = false,
+        int FingerprintSchemaVersion = 0,
+        string ConfigurationHash = "");
+
+    // V259: never interpret pre-F3 fingerprint records as complete evidence.
+    // JSON records without this field deserialize as schema 0, not version 3.
+    private const int CurrentFingerprintSchemaVersion = 3;
 
     private sealed record WorkspaceSyncResult(DeploymentProfile Profile, string Workspace, int Added, int Updated, int Unchanged, int Removed, int Verified);
 
@@ -234,7 +240,7 @@ public sealed class DeploymentService
         return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).Where(f =>
         {
             var rel = Path.GetRelativePath(root, f).Replace('\\','/');
-            if (IsGeneratedPath(rel)) return false;
+            if (IsGeneratedPath(rel) || WorkspaceSynchronizer.IsExcluded(rel)) return false;
             return include(rel);
         });
     }
@@ -243,7 +249,11 @@ public sealed class DeploymentService
     {
         if (!Directory.Exists(profile.SourceFolder)) return Array.Empty<string>();
         return Directory.EnumerateFiles(profile.SourceFolder, "package.json", SearchOption.AllDirectories)
-            .Where(x => !IsGeneratedPath(Path.GetRelativePath(profile.SourceFolder, x)))
+            .Where(x =>
+            {
+                var relative = Path.GetRelativePath(profile.SourceFolder, x);
+                return !IsGeneratedPath(relative) && !WorkspaceSynchronizer.IsExcluded(relative);
+            })
             .Select(Path.GetDirectoryName)
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(x => Path.GetFullPath(x!))
@@ -255,6 +265,64 @@ public sealed class DeploymentService
     {
         var full = Path.GetFullPath(file).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         return roots.Any(root => full.StartsWith(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // Enumerate exactly the non-cache workspace inputs, including unknown file
+    // extensions and authored build/SQL/scripts. Unlike IsGeneratedPath this
+    // does not silently omit a legitimate project's build/ or publish/ folder.
+    // Skip only files/trees explicitly excluded by WorkspaceSynchronizer.
+    private static IEnumerable<string> EnumerateFingerprintInputs(string root)
+    {
+        if (!Directory.Exists(root))
+            throw new DirectoryNotFoundException("FINGERPRINT_INCOMPLETE: synchronized source root is unavailable: " + root);
+        IEnumerable<string> Visit(string directory)
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            {
+                var relative = Path.GetRelativePath(root, entry).Replace('\\', '/');
+                var attributes = File.GetAttributes(entry);
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    // IsExcluded evaluates a file-relative path, so append a
+                    // synthetic child when deciding whether to recurse.
+                    if (WorkspaceSynchronizer.IsExcluded(relative + "/.fingerprint-input")) continue;
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                        throw new IOException("FINGERPRINT_INCOMPLETE: source contains a linked directory: " + relative);
+                    foreach (var nested in Visit(entry)) yield return nested;
+                }
+                else
+                {
+                    if (WorkspaceSynchronizer.IsExcluded(relative)) continue;
+                    if ((attributes & FileAttributes.ReparsePoint) != 0)
+                        throw new IOException("FINGERPRINT_INCOMPLETE: source contains a linked file: " + relative);
+                    yield return entry;
+                }
+            }
+        }
+        return Visit(root);
+    }
+
+    // Only nonsecret configuration is committed to the state manifest.
+    // Credentials are intentionally excluded; changing them cannot be treated
+    // as proof of a matching live database or API process.
+    private static string HashDeploymentInputs(DeploymentProfile profile)
+    {
+        var identity = JsonSerializer.Serialize(new
+        {
+            FingerprintSchemaVersion = CurrentFingerprintSchemaVersion,
+            profile.ApplicationName, profile.ApiProjectPath,
+            profile.SourceFolder, profile.TargetFrameworkMajor, profile.RequiresNode,
+            profile.BuildMode, profile.TargetMode, profile.TargetHost,
+            profile.SiteName, profile.AppPoolName, profile.HostingRoot, profile.DeploymentLayout,
+            profile.HttpPort, profile.HostHeader, profile.HealthPath,
+            profile.UseDefaultIisWebsite, profile.SqlInstance, profile.DatabaseName,
+            profile.UseWindowsAuthentication, profile.SqlUserName,
+            profile.DependencyResolutionMode, profile.OfflineBuild,
+            profile.UiVersionContractMode, profile.ApiVersionContractMode,
+            profile.GitSourceVerificationMode, profile.PreserveProductionFiles,
+            profile.DeploymentRoot, profile.WorkspaceRoot, profile.DeploymentRepositoryFolder
+        });
+        return Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(identity)));
     }
 
     private SmartDeployState ComputeSmartState(DeploymentProfile profile, string frontendOutputHash = "")
@@ -281,26 +349,59 @@ public sealed class DeploymentService
 
         var frontendHash = frontendRoots.Count == 0 ? "NONE" : HashFiles(frontendFiles, root);
         var dependencyHash = frontendRoots.Count == 0 ? "NONE" : HashFiles(dependencyFiles, root);
-        var backendHash = HashFiles(EnumerateSourceFiles(root, rel =>
+        // F3: fingerprint every synchronized non-frontend input, not just a
+        // selected set of .cs/.csproj/.json extensions. This includes .razor,
+        // .cshtml, .resx, .proto, .sql, custom MSBuild scripts/config and files
+        // with unknown extensions. Extra rebuilds are safer than stale binaries.
+        var backendInputs = EnumerateFingerprintInputs(root)
+            .Where(file => !IsUnderAnyRoot(file, frontendExcludeRoots))
+            .ToArray();
+        var backendHash = HashFiles(backendInputs, root);
+        bool MigrationInput(string file)
         {
-            var full = Path.Combine(root, rel.Replace('/', Path.DirectorySeparatorChar));
-            if (IsUnderAnyRoot(full, frontendExcludeRoots)) return false;
-            if (rel.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase)) return false;
-            if (rel.Contains("/wwwroot/", StringComparison.OrdinalIgnoreCase)) return false;
-            return rel.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)
-                || rel.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
+            var rel = Path.GetRelativePath(root, file).Replace('\\', '/');
+            var path = "/" + rel;
+            return path.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("/Database/", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("/Schema/", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("/Seeds/", StringComparison.OrdinalIgnoreCase)
+                || path.Contains("/Seed/", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".sql", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith("DbInitializer.cs", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith("DbContext.cs", StringComparison.OrdinalIgnoreCase);
+        }
+        bool BackendDependencyInput(string file)
+        {
+            var rel = Path.GetRelativePath(root, file).Replace('\\', '/');
+            var name = Path.GetFileName(rel);
+            // Include MSBuild/NuGet policies, custom targets and command scripts.
+            // When in doubt, require dependency revalidation on a changed input.
+            return rel.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".fsproj", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".vbproj", StringComparison.OrdinalIgnoreCase)
                 || rel.EndsWith(".props", StringComparison.OrdinalIgnoreCase)
                 || rel.EndsWith(".targets", StringComparison.OrdinalIgnoreCase)
-                || rel.EndsWith(".json", StringComparison.OrdinalIgnoreCase);
-        }), root);
-        var migrationHash = HashFiles(EnumerateSourceFiles(root, rel => rel.Contains("/Migrations/", StringComparison.OrdinalIgnoreCase) || rel.EndsWith("DbInitializer.cs", StringComparison.OrdinalIgnoreCase)), root);
-        var backendDependencyHash = HashFiles(EnumerateSourceFiles(root, rel =>
-            rel.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
-            rel.EndsWith(".props", StringComparison.OrdinalIgnoreCase) ||
-            rel.EndsWith(".targets", StringComparison.OrdinalIgnoreCase) ||
-            rel.EndsWith("packages.lock.json", StringComparison.OrdinalIgnoreCase) ||
-            rel.EndsWith("nuget.config", StringComparison.OrdinalIgnoreCase)), root);
-        return new SmartDeployState(frontendHash, backendHash, dependencyHash, migrationHash, DateTime.UtcNow, backendDependencyHash, frontendOutputHash, TryReadSourceVersion(profile));
+                || rel.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".nuspec", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".lock.json", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".config", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".yml", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".toml", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".ps1", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)
+                || rel.EndsWith(".sh", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "global.json", StringComparison.OrdinalIgnoreCase);
+        }
+        var migrationHash = HashFiles(backendInputs.Where(MigrationInput), root);
+        var backendDependencyHash = HashFiles(backendInputs.Where(BackendDependencyInput), root);
+        return new SmartDeployState(frontendHash, backendHash, dependencyHash, migrationHash, DateTime.UtcNow,
+            backendDependencyHash, frontendOutputHash, TryReadSourceVersion(profile),
+            FingerprintSchemaVersion: CurrentFingerprintSchemaVersion,
+            ConfigurationHash: HashDeploymentInputs(profile));
     }
 
     private string GetPersistentSmartStatePath(DeploymentProfile profile)
@@ -334,6 +435,9 @@ public sealed class DeploymentService
         DeploymentProfile profile, SmartDeployState previousState, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
+        if (previousState.FingerprintSchemaVersion != CurrentFingerprintSchemaVersion
+            || string.IsNullOrWhiteSpace(previousState.ConfigurationHash))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: legacy or incomplete fingerprint policy; full publish required.");
         if (!string.Equals(profile.BuildMode, "Fast IIS Update", StringComparison.OrdinalIgnoreCase)
             || !string.Equals(profile.TargetMode, "Local Server", StringComparison.OrdinalIgnoreCase)
             || !string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase))
@@ -642,6 +746,12 @@ public sealed class DeploymentService
         {
             var currentState = trace.Measure("Fast fingerprint scan", () => ComputeSmartState(profile), "Hashes frontend/backend/dependency/migration source state.");
             var previousState = trace.Measure("Read previous build state", () => ReadSmartState(profile), "Loads the persistent successful Fast Build state.");
+            if (previousState is not null && (previousState.FingerprintSchemaVersion != CurrentFingerprintSchemaVersion
+                || string.IsNullOrWhiteSpace(previousState.ConfigurationHash)))
+            {
+                _runner.Report("[FAST][FINGERPRINT] Legacy/incomplete fingerprint policy: hosted reuse blocked; full publish required.");
+                previousState = null;
+            }
             fastCurrentState = currentState;
             fastPreviousState = previousState;
             if (previousState is not null)
@@ -653,13 +763,15 @@ public sealed class DeploymentService
                 var backendChanged = !string.Equals(currentState.BackendHash, previousState.BackendHash, StringComparison.Ordinal);
                 var dependenciesChanged = !string.Equals(currentState.DependencyHash, previousState.DependencyHash, StringComparison.Ordinal);
                 var migrationsChanged = !string.Equals(currentState.MigrationHash, previousState.MigrationHash, StringComparison.Ordinal);
-                fastBackendDependenciesChanged = string.IsNullOrWhiteSpace(previousState.BackendDependencyHash) ||
+                var configurationChanged = !string.Equals(currentState.ConfigurationHash, previousState.ConfigurationHash, StringComparison.Ordinal);
+                fastBackendDependenciesChanged = configurationChanged || string.IsNullOrWhiteSpace(previousState.BackendDependencyHash) ||
                     !string.Equals(currentState.BackendDependencyHash, previousState.BackendDependencyHash, StringComparison.Ordinal);
                 fastDependenciesValidated = previousState.DependenciesValidated && !dependenciesChanged && !fastBackendDependenciesChanged;
-                fastSkipFrontendBuild = !frontendChanged && !dependenciesChanged;
+                fastSkipFrontendBuild = !frontendChanged && !dependenciesChanged
+                    && !backendChanged && !migrationsChanged && !configurationChanged;
                 _runner.Report($"[FAST] Frontend changed: {frontendChanged}; Backend changed: {backendChanged}; Frontend dependencies changed: {dependenciesChanged}; Backend dependencies changed: {fastBackendDependenciesChanged}; DB/init changed: {migrationsChanged}");
 
-                if (!backendChanged && !migrationsChanged)
+                if (!backendChanged && !migrationsChanged && !configurationChanged)
                 {
                     _runner.Report("[FAST] Backend/database are unchanged. Using the last successful hosted deployment as the staging baseline.");
                     trace.Measure("Hosted baseline copy", () => CopyDirectory(profile.HostingRoot, output, ct), "Copies the last successful hosted deployment into staging.");
@@ -1142,11 +1254,26 @@ public sealed class DeploymentService
         _runner.Report("[LOCAL] Fast Local Test: no dotnet publish, IIS staging/activation, file deployment, or rollback preparation will run.");
         var current = trace.Measure("Fast fingerprint scan", () => ComputeSmartState(profile), "Hashes frontend/backend/dependency/migration source state.");
         var previous = trace.Measure("Read previous build state", () => ReadSmartState(profile), "Loads the last successful change-aware state.");
+        if (previous is not null && (previous.FingerprintSchemaVersion != CurrentFingerprintSchemaVersion
+            || string.IsNullOrWhiteSpace(previous.ConfigurationHash)))
+        {
+            _runner.Report("[LOCAL][FINGERPRINT] Old/incomplete input coverage cannot justify build skips; validate and rebuild with policy V3.");
+            previous = null;
+        }
+        var configurationChanged = previous is null
+            || !string.Equals(current.ConfigurationHash, previous.ConfigurationHash, StringComparison.Ordinal);
         var frontendChanged = previous is null || !string.Equals(current.FrontendHash, previous.FrontendHash, StringComparison.Ordinal);
-        var backendChanged = previous is null || !string.Equals(current.BackendHash, previous.BackendHash, StringComparison.Ordinal) || !string.Equals(current.MigrationHash, previous.MigrationHash, StringComparison.Ordinal);
-        var dependenciesChanged = previous is null || !string.Equals(current.DependencyHash, previous.DependencyHash, StringComparison.Ordinal) || !string.Equals(current.BackendDependencyHash, previous.BackendDependencyHash, StringComparison.Ordinal);
+        var backendChanged = previous is null || configurationChanged
+            || !string.Equals(current.BackendHash, previous.BackendHash, StringComparison.Ordinal)
+            || !string.Equals(current.MigrationHash, previous.MigrationHash, StringComparison.Ordinal);
+        var dependenciesChanged = previous is null || configurationChanged
+            || !string.Equals(current.DependencyHash, previous.DependencyHash, StringComparison.Ordinal)
+            || !string.Equals(current.BackendDependencyHash, previous.BackendDependencyHash, StringComparison.Ordinal);
         var dependenciesReady = previous?.DependenciesValidated == true && !dependenciesChanged;
-        var frontendWorkRequired = frontendChanged || dependenciesChanged;
+        // Unknown backend-side scripts/config may also feed the frontend build.
+        // Rebuild both components on any such input change instead of silently
+        // trusting an unchanged ClientApp-only hash.
+        var frontendWorkRequired = frontendChanged || dependenciesChanged || backendChanged;
         _runner.Report($"[LOCAL] Frontend changed: {frontendChanged}; Backend changed: {backendChanged}; Dependencies changed: {dependenciesChanged}");
 
         if (profile.OfflineBuild && !dependenciesReady)

@@ -427,6 +427,49 @@ public sealed class DeploymentService
         catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Read persistent smart deploy state"); } catch { } return null; }
     }
 
+    // F4: these checks protect the dormant hosted-reuse branch only. A GWD
+    // lease coordinates cooperating deployments, NOT arbitrary external writers.
+    // Do not weaken normal deployment policy or assume a selected Backup checkbox
+    // proves a completed/recoverable backup; activation must still verify one.
+    private void RequireFastHostedReusePreMutationLease(DeploymentProfile profile)
+    {
+        var attempt = _iisAttempt;
+        if (attempt is null || attempt.IsDisposed || attempt.MutationStarted
+            || attempt.Resolved || attempt.FilesChanged || _filesChanged)
+            throw new IOException("FAST_BASELINE_UNVERIFIED: an unresolved, unmodified IIS attempt is required.");
+        attempt.AssertOwnership();
+        if (!string.Equals(profile.TargetMode, "Local Server", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase)
+            || !profile.CreateBackupBeforeDeployment || !profile.KeepPreviousDeploymentForRollback)
+            throw new IOException("FAST_BASELINE_UNVERIFIED: local Single Folder deployment with backup and rollback retention explicitly enabled is required.");
+        if (_activeRollbackFolder is not null || _activeDisplacedFolder is not null
+            || _activeDisplacedTarget is not null)
+            throw new IOException("FAST_BASELINE_UNVERIFIED: a prior/in-progress rollback or displaced release is still owned by the engine.");
+    }
+
+    // F4: compare a stable, per-file SHA256+directory inventory across source
+    // and copied staging before the staging payload is modified by F2 overlay.
+    // The destination already contains its own .deployment-incomplete marker:
+    // retain it, but exclude exactly that marker from the copied-payload check.
+    // All other extra/missing/changed files or directories must fail closed.
+    private static void VerifyHostedBaselineStagingSnapshot(
+        string hostedRoot, string stagingRoot, Dictionary<string, string> expected, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        DeploymentPathSafety.RequireSeparate(hostedRoot, stagingRoot);
+        DeploymentPathSafety.RequirePlainTree(hostedRoot);
+        DeploymentPathSafety.RequirePlainTree(stagingRoot);
+        VerifyRecoveryInventory(hostedRoot, expected, ct);
+        var staged = CaptureRecoveryInventory(stagingRoot, ct);
+        if (!staged.Remove("F:.deployment-incomplete"))
+            throw new IOException("FAST_SNAPSHOT_UNVERIFIED: staging incomplete marker is missing; deployment ownership evidence was not preserved.");
+        if (staged.Count != expected.Count
+            || expected.Any(pair => !staged.TryGetValue(pair.Key, out var hash)
+                || !string.Equals(hash, pair.Value, StringComparison.Ordinal)))
+            throw new IOException("FAST_SNAPSHOT_UNVERIFIED: staged copy differs from the hosted SHA256/directory snapshot; hosted files or copy may have changed.");
+        ct.ThrowIfCancellationRequested();
+    }
+
     // F1: read-only, fail-closed evidence gate for the dormant hosted-baseline
     // optimization. This is NOT permission to enable any Fast IIS skip path:
     // F2-F5 (fresh release/API manifests, migrations, TOCTOU and rollback tests)
@@ -756,8 +799,9 @@ public sealed class DeploymentService
             fastPreviousState = previousState;
             if (previousState is not null)
             {
-                // F1 guard remains inside the disabled Fast IIS branch: no
-                // hosted bytes may be reused on fingerprint evidence alone.
+                // F1: all uses of the persistent hosted build state must first
+                // satisfy live IIS and release-identity provenance, even if this
+                // invocation later falls back to a full publish.
                 await RequireHostedBaselineProvenanceAsync(profile, previousState, ct);
                 var frontendChanged = !string.Equals(currentState.FrontendHash, previousState.FrontendHash, StringComparison.Ordinal);
                 var backendChanged = !string.Equals(currentState.BackendHash, previousState.BackendHash, StringComparison.Ordinal);
@@ -774,7 +818,26 @@ public sealed class DeploymentService
                 if (!backendChanged && !migrationsChanged && !configurationChanged)
                 {
                     _runner.Report("[FAST] Backend/database are unchanged. Using the last successful hosted deployment as the staging baseline.");
-                    trace.Measure("Hosted baseline copy", () => CopyDirectory(profile.HostingRoot, output, ct), "Copies the last successful hosted deployment into staging.");
+                    // Only the actual reuse branch requires backup/rollback
+                    // opt-in and a full hosted-file inventory. Backend/migration
+                    // changes can still fall back to full publish.
+                    RequireFastHostedReusePreMutationLease(profile);
+                    var hostedBaselineInventory = trace.Measure<Dictionary<string, string>>(
+                        "Hosted baseline SHA256 inventory",
+                        () => CaptureRecoveryInventory(profile.HostingRoot, ct),
+                        "Captures hosted bytes and directories before rechecking their live release provenance.");
+                    await RequireHostedBaselineProvenanceAsync(profile, previousState, ct);
+                    trace.Measure("Hosted baseline pre-copy recheck",
+                        () => VerifyRecoveryInventory(profile.HostingRoot, hostedBaselineInventory, ct),
+                        "Fails closed when any hosted file/directory changed since the reuse snapshot.");
+                    var baselineApiHash = HashPublishedApiPayload(profile.HostingRoot);
+                    trace.Measure("Hosted baseline copy", () => CopyDirectory(profile.HostingRoot, output, ct),
+                        "Copies hosted bytes into an isolated, still-incomplete staging directory.");
+                    trace.Measure("Hosted staged snapshot compare",
+                        () => VerifyHostedBaselineStagingSnapshot(profile.HostingRoot, output, hostedBaselineInventory, ct),
+                        "Compares every copied file/directory with the source snapshot, retaining the staging incomplete marker.");
+                    await RequireHostedBaselineProvenanceAsync(profile, previousState, ct);
+                    RequireFastHostedReusePreMutationLease(profile);
                     if (fastDependenciesValidated)
                     {
                         trace.AddSkipped("Offline dependency validation", "Dependency fingerprints unchanged and the previous successful state is dependency-ready.");
@@ -810,6 +873,16 @@ public sealed class DeploymentService
                     // F2: copied hosted release metadata is never published unchanged.
                     // The branch containing this call is still disabled by false &&.
                     ReissueReusedReleaseEvidence(profile, output, ct);
+                    // F2 seals staging after overlay. F4 additionally binds
+                    // staged executable bytes to the PRE-copy hosted API hash,
+                    // rather than simply trusting a newly reissued manifest.
+                    if (!string.Equals(HashPublishedApiPayload(output), baselineApiHash, StringComparison.Ordinal))
+                        throw new IOException("FAST_SNAPSHOT_UNVERIFIED: staged API executable payload differs from the trusted pre-copy hosted release.");
+                    trace.Measure("Hosted baseline final source recheck",
+                        () => VerifyRecoveryInventory(profile.HostingRoot, hostedBaselineInventory, ct),
+                        "Fails closed on changes to the live hosted source while staging was built.");
+                    await RequireHostedBaselineProvenanceAsync(profile, previousState, ct);
+                    RequireFastHostedReusePreMutationLease(profile);
                     var outputHash = trace.Measure("Frontend output hash", () => HashDirectory(Path.Combine(output, "wwwroot")), "Hashes staged wwwroot for stale-UI protection.");
                     trace.Measure("Write build state", () => WriteSmartState(output, currentState with { FrontendOutputHash = outputHash, DependenciesValidated = fastDependenciesValidated || previousState.DependenciesValidated }), "Writes staging Fast Build state manifest.");
                     return output;

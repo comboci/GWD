@@ -2036,6 +2036,14 @@ public sealed class DeploymentService
 
     public void CleanupCommittedAttempt(DeploymentProfile profile)
     {
+        // Journal resolution alone is not evidence that every recovery marker was
+        // removed: Resolve can retain a marker after a cleanup I/O failure.
+        // Fail closed and keep the previous payload and backup for manual review.
+        if (_iisAttempt is null || !_iisAttempt.RecoveryMarkersClearedForCleanup())
+        {
+            _runner.Report("[CLEANUP] Recovery markers not fully cleared/verified; previous release and backup retained for manual review.");
+            return;
+        }
         // Called only after successful health, release verification and IIS attempt resolution.
         // Do not enumerate or delete unrelated historical artifacts.
         var displaced = _activeDisplacedFolder;

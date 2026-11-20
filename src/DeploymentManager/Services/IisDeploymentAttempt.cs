@@ -14,6 +14,9 @@ public sealed class IisDeploymentAttempt : IDisposable
     private readonly Dictionary<string, DateTime> _starts = new();
     private readonly Dictionary<string, double> _durations = new();
     private readonly List<string> _observations = new();
+    // A resolved journal is not sufficient permission to discard recovery copies:
+    // marker deletion can fail or be interrupted after resolution is committed.
+    private bool _recoveryMarkersCleared;
     public bool IsDisposed { get; private set; }
     public string Recovery { get; private set; } = "NOT_ATTEMPTED";
     public void Observe(string text) { if (IsDisposed) return; _observations.Add(text); Save(); }
@@ -182,6 +185,8 @@ public sealed class IisDeploymentAttempt : IDisposable
         // deployment failure: rolling back a healthy release would be unsafe.
         // Retain any undeleted marker to block subsequent deployments until reviewed.
         // Locks stay open until Dispose. Never delete lock files or expire another lease.
+        _recoveryMarkersCleared = false;
+        var markerCleanupFailed = false;
         foreach (var path in _unresolved)
         {
             try
@@ -191,12 +196,46 @@ public sealed class IisDeploymentAttempt : IDisposable
             }
             catch (IOException ex)
             {
+                markerCleanupFailed = true;
                 RecordMarkerCleanupWarning(path, ex);
             }
             catch (UnauthorizedAccessException ex)
             {
+                markerCleanupFailed = true;
                 RecordMarkerCleanupWarning(path, ex);
             }
+        }
+        // Never authorize backup deletion based solely on Resolved=true.
+        _recoveryMarkersCleared = !markerCleanupFailed;
+    }
+    public bool RecoveryMarkersClearedForCleanup()
+    {
+        if (IsDisposed || !Resolved || !_recoveryMarkersCleared) return false;
+        try
+        {
+            AssertOwnership();
+            foreach (var path in _unresolved)
+            {
+                // A vanished parent is not proof that a recovery marker was cleared.
+                var parent = Path.GetDirectoryName(path);
+                if (string.IsNullOrWhiteSpace(parent) || !Directory.Exists(parent))
+                    return false;
+                try
+                {
+                    _ = File.GetAttributes(path);
+                    return false; // A marker still exists.
+                }
+                catch (FileNotFoundException) { } // Verified absent.
+                catch (DirectoryNotFoundException) { return false; }
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // Cleanup is optional; journal/marker inspection errors retain backups.
+            try { InternalDiagnostics.Record(ex, "Verify recovery marker removal before backup cleanup"); }
+            catch { }
+            return false;
         }
     }
     private void RecordMarkerCleanupWarning(string path, Exception error)

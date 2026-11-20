@@ -15,6 +15,12 @@ public sealed partial class DiagnosticsCenterForm : Form
     private readonly System.Windows.Forms.Timer _metricsTimer = new() { Interval = 2000 };
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
     private readonly Dictionary<TabPage, DiagnosticExportSection> _sectionByTab = new();
+    private readonly List<Button> _exportButtons = new();
+    private readonly Button _cancelExport = new() { Text = "Cancel Export", Width = 126, Height = 34, Enabled = false };
+    private readonly Label _exportStatus = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 0, 0), Text = "Export idle." };
+    private CancellationTokenSource? _exportCts;
+    private int _exportGeneration;
+    private bool _exportBusy;
 
     public DiagnosticsCenterForm(AppDataService appData, DeploymentHistoryService history, DeploymentProfile profile, DeploymentService deployment, string currentLog, RuntimeMetricsService runtimeMetrics)
     {
@@ -40,14 +46,24 @@ public sealed partial class DiagnosticsCenterForm : Form
         var exportTabOther = new Button { Text = "Current Tab → Other...", Width = 170, Height = 34 };
         var exportAll = new Button { Text = "All Diagnostics → Desktop", Width = 180, Height = 34 };
         var exportAllOther = new Button { Text = "All Diagnostics → Other...", Width = 185, Height = 34 };
-        exportTab.Click += (_, _) => ExportCurrentTab(toDesktop: true);
-        exportTabOther.Click += (_, _) => ExportCurrentTab(toDesktop: false);
-        exportAll.Click += (_, _) => ExportSection(DiagnosticExportSection.All, toDesktop: true);
-        exportAllOther.Click += (_, _) => ExportSection(DiagnosticExportSection.All, toDesktop: false);
+        exportTab.Click += async (_, _) => await ExportCurrentTabAsync(toDesktop: true);
+        exportTabOther.Click += async (_, _) => await ExportCurrentTabAsync(toDesktop: false);
+        exportAll.Click += async (_, _) => await ExportSectionAsync(DiagnosticExportSection.All, toDesktop: true);
+        exportAllOther.Click += async (_, _) => await ExportSectionAsync(DiagnosticExportSection.All, toDesktop: false);
+        _exportButtons.AddRange(new[] { exportTab, exportTabOther, exportAll, exportAllOther });
+        _cancelExport.Click += (_, _) =>
+        {
+            if (!_exportBusy || _exportCts is null || _exportCts.IsCancellationRequested) return;
+            _exportCts.Cancel();
+            _cancelExport.Enabled = false;
+            _exportStatus.Text = "Cancelling export; previous ZIP remains unchanged...";
+        };
         toolbar.Controls.Add(exportTab);
         toolbar.Controls.Add(exportTabOther);
         toolbar.Controls.Add(exportAll);
         toolbar.Controls.Add(exportAllOther);
+        toolbar.Controls.Add(_cancelExport);
+        toolbar.Controls.Add(_exportStatus);
         toolbar.Controls.Add(new Label
         {
             Text = "Exports are actual ZIP files. Desktop is the one-click default; Other Location opens a file-save dialog.",
@@ -68,6 +84,9 @@ public sealed partial class DiagnosticsCenterForm : Form
 
         root.Controls.Add(_tabs, 0, 1);
         Controls.Add(root);
+        // Closing the dialog stops further progress callbacks and requests
+        // cancellation; the worker disposes its temporary ZIP in its own finally.
+        FormClosing += (_, _) => { _exportGeneration++; _exportCts?.Cancel(); };
         FormClosed += (_, _) => { _metricsTimer.Stop(); _metricsTimer.Dispose(); };
     }
 
@@ -222,17 +241,30 @@ public sealed partial class DiagnosticsCenterForm : Form
         return tab;
     }
 
-    private void ExportCurrentTab(bool toDesktop)
+    private Task ExportCurrentTabAsync(bool toDesktop)
     {
-        if (_tabs.SelectedTab is null || !_sectionByTab.TryGetValue(_tabs.SelectedTab, out var section)) return;
-        ExportSection(section, toDesktop);
+        if (_exportBusy || _tabs.SelectedTab is null ||
+            !_sectionByTab.TryGetValue(_tabs.SelectedTab, out var section))
+            return Task.CompletedTask;
+        return ExportSectionAsync(section, toDesktop);
     }
 
-    private void ExportSection(DiagnosticExportSection section, bool toDesktop)
+    private void SetExportBusy(bool busy)
     {
+        _exportBusy = busy;
+        foreach (var button in _exportButtons)
+            if (!button.IsDisposed) button.Enabled = !busy;
+        if (!_cancelExport.IsDisposed) _cancelExport.Enabled = busy;
+    }
+
+    private async Task ExportSectionAsync(DiagnosticExportSection section, bool toDesktop)
+    {
+        if (_exportBusy || IsDisposed || Disposing) return;
+        string destinationFile;
         try
         {
-            string destinationFile;
+            // Path selection stays on the UI thread. No WinForms control is
+            // accessed from the worker that creates and publishes the archive.
             if (toDesktop)
             {
                 var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
@@ -257,14 +289,55 @@ public sealed partial class DiagnosticsCenterForm : Form
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 destinationFile = dialog.FileName;
             }
+        }
+        catch (Exception ex)
+        {
+            InternalDiagnostics.Record(ex, "Select diagnostic export destination");
+            MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Diagnostic export failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
 
-            var path = _bundle.ExportSectionToFile(destinationFile, section, _profile, _history, _currentLog, _deployment.LastPerformanceSnapshot, _runtimeMetrics);
-            ShowExportComplete(path);
+        using var request = new CancellationTokenSource();
+        var operation = ++_exportGeneration;
+        _exportCts = request;
+        SetExportBusy(true);
+        _exportStatus.Text = "Preparing ZIP...";
+        try
+        {
+            var performance = _deployment.LastPerformanceSnapshot;
+            var progress = new Progress<string>(message =>
+            {
+                if (_exportBusy && operation == _exportGeneration && !IsDisposed && !Disposing)
+                    _exportStatus.Text = message;
+            });
+            var path = await Task.Run(
+                () => _bundle.ExportSectionToFile(destinationFile, section, _profile, _history, _currentLog,
+                    performance, _runtimeMetrics, request.Token, progress), request.Token);
+            if (operation == _exportGeneration && !IsDisposed && !Disposing)
+            {
+                _exportStatus.Text = "Diagnostic export completed.";
+                ShowExportComplete(path);
+            }
+        }
+        catch (OperationCanceledException) when (request.IsCancellationRequested)
+        {
+            if (operation == _exportGeneration && !IsDisposed && !Disposing)
+                _exportStatus.Text = "Export cancelled. Previous ZIP was preserved.";
         }
         catch (Exception ex)
         {
             InternalDiagnostics.Record(ex, "Diagnostic export: " + section);
-            MessageBox.Show(this, GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message), "Diagnostic export failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            if (operation == _exportGeneration && !IsDisposed && !Disposing)
+            {
+                _exportStatus.Text = "Export failed. Previous ZIP was preserved.";
+                MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Diagnostic export failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_exportCts, request)) _exportCts = null;
+            if (operation == _exportGeneration && !IsDisposed && !Disposing)
+                SetExportBusy(false);
         }
     }
 

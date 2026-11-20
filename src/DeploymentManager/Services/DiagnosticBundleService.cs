@@ -36,8 +36,10 @@ public sealed class DiagnosticBundleService
         return ExportSectionToFile(Path.Combine(destinationFolder, GetSuggestedFileName(section)), section, profile, history, currentLog, performance, runtimeMetrics);
     }
 
-    public string ExportSectionToFile(string destinationFile, DiagnosticExportSection section, DeploymentProfile profile, DeploymentHistoryService history, string currentLog, BuildPerformanceTrace? performance, RuntimeMetricsService? runtimeMetrics)
+    public string ExportSectionToFile(string destinationFile, DiagnosticExportSection section, DeploymentProfile profile, DeploymentHistoryService history, string currentLog, BuildPerformanceTrace? performance, RuntimeMetricsService? runtimeMetrics, CancellationToken ct = default, IProgress<string>? progress = null)
     {
+        ct.ThrowIfCancellationRequested();
+        progress?.Report("Preparing diagnostics ZIP...");
         if (string.IsNullOrWhiteSpace(destinationFile)) throw new ArgumentException("A destination file is required.", nameof(destinationFile));
         if (!destinationFile.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)) destinationFile += ".zip";
         var destinationFolder = Path.GetDirectoryName(destinationFile);
@@ -49,10 +51,13 @@ public sealed class DiagnosticBundleService
         {
             using (var archive = ZipFile.Open(temporaryFile, ZipArchiveMode.Create))
             {
+                ct.ThrowIfCancellationRequested();
                 var appData = new AppDataService();
 
         if (section is DiagnosticExportSection.All)
         {
+            progress?.Report("Collecting runtime information...");
+            ct.ThrowIfCancellationRequested();
             AddText(archive, "runtime.json", JsonSerializer.Serialize(new
             {
                 Product = "Generic Web Deployment Manager",
@@ -73,42 +78,73 @@ public sealed class DiagnosticBundleService
         }
 
         if (section is DiagnosticExportSection.All or DiagnosticExportSection.DeploymentHistory)
-            AddDirectoryTextFiles(archive, Path.Combine(appData.Root, "IisAttempts"), "iis-attempts", "*.json");
+        {
+            progress?.Report("Collecting IIS attempt journals...");
+            AddDirectoryTextFiles(archive, Path.Combine(appData.Root, "IisAttempts"), "iis-attempts", "*.json", ct);
+        }
 
         if (section is DiagnosticExportSection.All or DiagnosticExportSection.CodeQuality)
         {
+            progress?.Report("Collecting Code Quality reports...");
+            ct.ThrowIfCancellationRequested();
             var qualityRoot = CodeQualitySession.Store(appData).Root;
             foreach (var build in CodeQualitySession.Store(appData).Read())
+            {
+                ct.ThrowIfCancellationRequested();
                 AddText(archive, "code-quality/" + build.BuildId + ".json", GenericWeb.DeploymentManager.CodeQuality.DiagnosticExport.Json(build));
+            }
             if (Directory.Exists(qualityRoot))
                 foreach (var file in Directory.EnumerateFiles(qualityRoot, "*.log", SearchOption.AllDirectories))
                 {
+                    ct.ThrowIfCancellationRequested();
                     var entry = archive.CreateEntry("code-quality/" + Path.GetRelativePath(qualityRoot, file).Replace('\\', '/'), CompressionLevel.Optimal);
                     using var writer = new StreamWriter(entry.Open(), new UTF8Encoding(false));
                     using var source = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                     using var reader = new StreamReader(source);
                     string? line;
-                    while ((line = reader.ReadLine()) is not null) writer.WriteLine(SecretRedactor.Redact(line));
+                    while ((line = reader.ReadLine()) is not null)
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        writer.WriteLine(SecretRedactor.Redact(line));
+                    }
                 }
         }
 
         if (section is DiagnosticExportSection.All or DiagnosticExportSection.DeploymentHistory)
-            AddDirectoryTextFiles(archive, history.Root, "history", "*.jsonl");
+        {
+            progress?.Report("Collecting deployment history...");
+            AddDirectoryTextFiles(archive, history.Root, "history", "*.jsonl", ct);
+        }
 
         if (section is DiagnosticExportSection.All or DiagnosticExportSection.CurrentLog)
-            if (File.Exists(currentLog)) AddSanitizedFile(archive, currentLog, "logs/current-session.log");
+        {
+            progress?.Report("Collecting current session log...");
+            ct.ThrowIfCancellationRequested();
+            if (File.Exists(currentLog)) AddSanitizedFile(archive, currentLog, "logs/current-session.log", ct);
+        }
 
         if (section is DiagnosticExportSection.All or DiagnosticExportSection.CrashReports)
-            AddDirectoryTextFiles(archive, appData.CrashReports, "crash-reports", "*.txt");
+        {
+            progress?.Report("Collecting crash reports...");
+            AddDirectoryTextFiles(archive, appData.CrashReports, "crash-reports", "*.txt", ct);
+        }
 
         if (section is DiagnosticExportSection.All or DiagnosticExportSection.ErrorReports)
-            AddDirectoryTextFiles(archive, appData.ErrorReports, "error-reports", "*.txt");
+        {
+            progress?.Report("Collecting error reports...");
+            AddDirectoryTextFiles(archive, appData.ErrorReports, "error-reports", "*.txt", ct);
+        }
 
         if (section is DiagnosticExportSection.All or DiagnosticExportSection.InternalDiagnostics)
-            AddDirectoryTextFiles(archive, appData.InternalDiagnosticsFolder, "internal-diagnostics", "*.log");
+        {
+            progress?.Report("Collecting internal diagnostics...");
+            AddDirectoryTextFiles(archive, appData.InternalDiagnosticsFolder, "internal-diagnostics", "*.log", ct);
+        }
 
         if (section is DiagnosticExportSection.All or DiagnosticExportSection.BuildPerformance)
         {
+            progress?.Report("Collecting build performance...");
+            ct.ThrowIfCancellationRequested();
             if (performance is not null)
                 AddText(archive, "performance/latest-build-performance.json", JsonSerializer.Serialize(performance, new JsonSerializerOptions { WriteIndented = true }));
             else
@@ -117,6 +153,8 @@ public sealed class DiagnosticBundleService
 
         if (section is DiagnosticExportSection.All or DiagnosticExportSection.RuntimeResources)
         {
+            progress?.Report("Collecting CPU and memory metrics...");
+            ct.ThrowIfCancellationRequested();
             if (runtimeMetrics is not null)
             {
                 AddText(archive, "runtime-resources/history.json", runtimeMetrics.ToJson());
@@ -127,17 +165,23 @@ public sealed class DiagnosticBundleService
 
         if (section is DiagnosticExportSection.All)
         {
+            progress?.Report("Collecting dependency and workspace state...");
+            ct.ThrowIfCancellationRequested();
             var repository = string.IsNullOrWhiteSpace(profile.DeploymentRepositoryFolder) ? profile.InstallerCacheFolder : profile.DeploymentRepositoryFolder;
             var buildState = Path.Combine(repository, "BuildState");
-            AddDirectoryTextFiles(archive, buildState, "fingerprints", "*.json");
+            AddDirectoryTextFiles(archive, buildState, "fingerprints", "*.json", ct);
             if (Directory.Exists(profile.WorkspaceRoot))
-                AddDirectoryTextFiles(archive, profile.WorkspaceRoot, "workspace", ".gwd-workspace-manifest.json");
+                AddDirectoryTextFiles(archive, profile.WorkspaceRoot, "workspace", ".gwd-workspace-manifest.json", ct);
             AddText(archive, "dependency-state.txt", BuildDependencyState(repository));
         }
 
+        ct.ThrowIfCancellationRequested();
         AddText(archive, "README.txt", $"Diagnostic export generated by {GenericWeb.DeploymentManager.ProductInfo.DisplayVersion}. Scope: {section}. Passwords, tokens, connection strings, and credentials are redacted.");
             }
-            // The archive is fully closed before replacing the previous destination.
+            // Publish only a completed and still-authorized archive; cancellation
+            // never replaces an existing destination or leaves a partial ZIP there.
+            progress?.Report("Finalizing diagnostics ZIP...");
+            ct.ThrowIfCancellationRequested();
             File.Move(temporaryFile, destinationFile, overwrite: true);
             return destinationFile;
         }
@@ -162,20 +206,33 @@ public sealed class DiagnosticBundleService
         return string.Join(Environment.NewLine, paths.Select(x => $"{x.Item1}: {(Directory.Exists(x.Item2) ? "PRESENT" : "MISSING")} | {x.Item2}"));
     }
 
-    private static void AddDirectoryTextFiles(ZipArchive archive, string root, string targetRoot, string pattern)
+    private static void AddDirectoryTextFiles(ZipArchive archive, string root, string targetRoot, string pattern, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         if (!Directory.Exists(root)) return;
         foreach (var file in Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
         {
+            ct.ThrowIfCancellationRequested();
             var relative = Path.GetRelativePath(root, file).Replace('\\', '/');
-            AddSanitizedFile(archive, file, targetRoot + "/" + relative);
+            AddSanitizedFile(archive, file, targetRoot + "/" + relative, ct);
         }
     }
 
-    private static void AddSanitizedFile(ZipArchive archive, string source, string name)
+    private static void AddSanitizedFile(ZipArchive archive, string source, string name, CancellationToken ct = default)
     {
-        try { AddText(archive, name, Redact(File.ReadAllText(source))); }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Diagnostic export file: " + source); AddText(archive, name + ".unavailable.txt", ex.Message); }
+        ct.ThrowIfCancellationRequested();
+        try
+        {
+            var contents = File.ReadAllText(source);
+            ct.ThrowIfCancellationRequested();
+            AddText(archive, name, Redact(contents));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
+        {
+            InternalDiagnostics.Record(ex, "Diagnostic export file: " + source);
+            AddText(archive, name + ".unavailable.txt", ex.Message);
+        }
     }
 
     private static void AddText(ZipArchive archive, string name, string text)

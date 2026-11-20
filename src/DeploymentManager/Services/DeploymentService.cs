@@ -46,6 +46,15 @@ public sealed class DeploymentService
     public void RecordDeploymentHealth(string detail) => ReportIis("[HEALTH] " + detail);
     public void IisStage(string stage, string state) => _iisAttempt?.Stage(stage, state);
     public void ResolveIisAttempt() { _iisAttempt?.Resolve(); _filesChanged = false; }
+    public void RecordExternallyManagedFileMutation()
+    {
+        if (_iisAttempt is null || _iisAttempt.IsDisposed || !_iisAttempt.MutationStarted || _iisAttempt.Resolved)
+            throw new IOException("An active, unresolved IIS attempt is required before externally managed file changes.");
+        // CLI rollback owns its folder-swap compensation. Persist a conservative
+        // write-ahead signal in the durable attempt journal, but do not set this
+        // engine's _filesChanged flag (which selects the deploy-specific rollback).
+        _iisAttempt.FilesChanged = true;
+    }
 
     private IisSafety Iis()
     {

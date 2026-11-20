@@ -280,6 +280,10 @@ internal static class CliApplication
             BackupIntegrity.Require(backup, profile.ApplicationName, profile.HostingRoot);
             await deployment.StopSiteForDeploymentAsync(profile);
             BackupIntegrity.Require(backup, profile.ApplicationName, profile.HostingRoot);
+            // Write-ahead recovery evidence before the first folder move/copy.
+            // If journal persistence fails, abort before changing hosted files;
+            // the CLI's existing pre-swap catch path restores original IIS states.
+            deployment.RecordExternallyManagedFileMutation();
             if (Directory.Exists(profile.HostingRoot)) { Directory.Move(profile.HostingRoot, failed); displacedOriginal = true; }
             replacementStarted = true;
             var restoreManifest = BackupIntegrity.Require(backup, profile.ApplicationName, profile.HostingRoot);

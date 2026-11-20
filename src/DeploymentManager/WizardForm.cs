@@ -90,6 +90,13 @@ public sealed class WizardForm : Form
     private Label? _deploymentElapsedLabel;
     private LogViewMode _logViewMode = LogViewMode.Normal;
     private readonly List<(DateTime At, string Line)> _uiLogLines = new();
+    private const int MaxPendingUiLogLines = 8_192;
+    private const int MaxUiLogLinesPerFlush = 512;
+    private readonly object _pendingUiLogSync = new();
+    private readonly Queue<(DateTime At, string Line)> _pendingUiLogLines = new();
+    private readonly System.Windows.Forms.Timer _uiLogFlushTimer = new() { Interval = 100 };
+    private int _droppedUiLogLines;
+    private volatile bool _acceptUiLogLines = true;
     private ComboBox? _logModeCombo;
     private Label? _reviewActivity;
     private CancellationTokenSource? _deploymentCts;
@@ -155,6 +162,8 @@ public sealed class WizardForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
 
         BuildShell();
+        _uiLogFlushTimer.Tick += (_, _) => FlushPendingUiLogLines();
+        _uiLogFlushTimer.Start();
         _trayIcon.Icon = Icon ?? SystemIcons.Application;
         _trayIcon.Text = "GWD — Ready";
         _trayIcon.Visible = true;
@@ -516,6 +525,13 @@ public sealed class WizardForm : Form
         _progress.Value = 0;
 
         _uiLogLines.Clear();
+        // Start Over clears only the on-screen backlog. Every line was already
+        // committed to its session log before being queued for display.
+        lock (_pendingUiLogSync)
+        {
+            _pendingUiLogLines.Clear();
+            _droppedUiLogLines = 0;
+        }
         _log.Clear();
         if (clearLog)
         {
@@ -3472,36 +3488,71 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
     private DateTime _lastLogStateSaveUtc = DateTime.MinValue;
     private void AppendLog(string message)
     {
-        message = SecretRedactor.Redact(message);
-        if (IsDisposed || Disposing || _log.IsDisposed)
+        // Write to disk on the producer thread, before any WinForms scheduling.
+        // An overloaded message pump must not delay or drop deployment evidence.
+        _logService.Write(message, (at, clean) =>
         {
-            // Preserve the diagnostic trail even if a late process callback arrives
-            // while the window or its reusable log control is being torn down.
-            _logService.Write(message);
-            return;
+            if (!_acceptUiLogLines) return;
+            lock (_pendingUiLogSync)
+            {
+                if (!_acceptUiLogLines) return;
+                if (_pendingUiLogLines.Count >= MaxPendingUiLogLines)
+                {
+                    _pendingUiLogLines.Dequeue();
+                    _droppedUiLogLines++;
+                }
+                _pendingUiLogLines.Enqueue((at, clean));
+            }
+        });
+    }
+
+    private void FlushPendingUiLogLines()
+    {
+        // This method runs only on the WinForms UI thread (timer / log-mode change).
+        if (IsDisposed || Disposing || _log.IsDisposed) return;
+        var pending = new List<(DateTime At, string Line)>(MaxUiLogLinesPerFlush);
+        int dropped;
+        lock (_pendingUiLogSync)
+        {
+            dropped = _droppedUiLogLines;
+            _droppedUiLogLines = 0;
+            while (pending.Count < MaxUiLogLinesPerFlush && _pendingUiLogLines.Count > 0)
+                pending.Add(_pendingUiLogLines.Dequeue());
         }
-        if (InvokeRequired) { BeginInvoke(() => AppendLog(message)); return; }
-        var clean = message.Trim();
-        _logService.Write(message); // disk log is always complete, regardless of UI log level
-        var display = NormalizeLogForDisplay(clean);
-        var at = DateTime.Now;
-        _uiLogLines.Add((at, display));
-        if (_uiLogLines.Count > 5000) _uiLogLines.RemoveRange(0, _uiLogLines.Count - 4000);
-        var showInUi = ShouldShowLogLine(display);
-        if (showInUi)
-            _log.AppendText($"[{at:HH:mm:ss}] {display}\r\n");
+        if (pending.Count == 0 && dropped == 0) return;
+
+        var batch = new StringBuilder();
+        string? latestActivity = null;
+        void AddToUi(DateTime at, string text)
+        {
+            var display = NormalizeLogForDisplay(text);
+            _uiLogLines.Add((at, display));
+            if (!ShouldShowLogLine(display)) return;
+            batch.Append('[').Append(at.ToString("HH:mm:ss")).Append("] ").Append(display).Append("\r\n");
+            if (!string.IsNullOrWhiteSpace(display))
+                latestActivity = display.Replace('\r', ' ').Replace('\n', ' ');
+        }
+        if (dropped > 0)
+            AddToUi(DateTime.Now,
+                $"[DEPLOYMENT LOG] {dropped} older UI-only lines skipped under load; complete session log remains on disk.");
+        foreach (var (at, line) in pending) AddToUi(at, line);
+        if (_uiLogLines.Count > 5_000)
+            _uiLogLines.RemoveRange(0, _uiLogLines.Count - 4_000);
+        if (batch.Length > 0)
+            _log.AppendText(batch.ToString());
         if (_log.TextLength > 300_000)
         {
             _log.Select(0, _log.TextLength - 150_000);
             _log.SelectedText = "[... older lines hidden here; full log remains on disk ...]\r\n";
         }
-        if (showInUi && !string.IsNullOrWhiteSpace(display))
+        if (latestActivity is not null)
         {
-            var oneLine = display.Replace("\r", " ").Replace("\n", " ");
-            _activity.Text = oneLine;
+            _activity.Text = latestActivity;
             _activity.AutoEllipsis = true;
-            if (_reviewActivity is not null && !_reviewActivity.IsDisposed) _reviewActivity.Text = oneLine;
+            if (_reviewActivity is not null && !_reviewActivity.IsDisposed)
+                _reviewActivity.Text = latestActivity;
         }
+        // Persist the wizard's latest state no more than once every 5 seconds.
         if ((DateTime.UtcNow - _lastLogStateSaveUtc).TotalSeconds >= 5)
         {
             _lastLogStateSaveUtc = DateTime.UtcNow;
@@ -3513,10 +3564,10 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         }
     }
 
-
     private void RenderVisibleLog()
     {
         if (InvokeRequired) { BeginInvoke(RenderVisibleLog); return; }
+        FlushPendingUiLogLines();
         var sb = new StringBuilder();
         foreach (var item in _uiLogLines)
             if (ShouldShowLogLine(item.Line)) sb.Append('[').Append(item.At.ToString("HH:mm:ss")).Append("] ").AppendLine(item.Line);
@@ -3619,6 +3670,9 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             : "Do you want to close Deployment Manager?";
         if (MessageBox.Show(this, warning, "Confirm exit", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
         { e.Cancel = true; return; }
+        _acceptUiLogLines = false;
+        _uiLogFlushTimer.Stop();
+        _uiLogFlushTimer.Dispose();
         _trayBlinkTimer.Stop();
         _trayBlinkTimer.Dispose();
         _trayIcon.Visible = false;
@@ -3635,6 +3689,8 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         _persistentState.LastSiteName = _profile.SiteName;
         _persistentState.UpdatedAt = DateTime.Now;
         _appData.SaveState(_persistentState);
+        try { _logService.CloseSession(); }
+        catch (Exception ex) { InternalDiagnostics.Record(ex, "Close active log session"); }
     }
     private static string SanitizeFileName(string value)
     {

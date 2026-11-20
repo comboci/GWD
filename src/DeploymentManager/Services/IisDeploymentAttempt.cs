@@ -96,11 +96,27 @@ public sealed class IisDeploymentAttempt : IDisposable
                 DeploymentPathSafety.RequirePlainTree(target);
                 // Pre-volume-lease attempts left sibling markers. A parent or child
                 // target must not bypass that historical recovery protection.
+                // File.Exists silently treats some access errors as "not found":
+                // GetAttributes fails closed instead, retaining earlier lock evidence.
                 for (var ancestor = target; !string.IsNullOrEmpty(Path.GetDirectoryName(ancestor)); ancestor = Path.GetDirectoryName(ancestor)!)
-                    if (File.Exists(ancestor + ".gwd.unresolved"))
-                        throw new IOException("Ancestor recovery marker blocks deployment: " + ancestor);
-                if (Directory.Exists(target) && Directory.EnumerateFiles(target, "*.gwd.unresolved", SearchOption.AllDirectories).Any())
-                    throw new IOException("Nested recovery marker blocks deployment: " + target);
+                    RequireNoHistoricalMarker(ancestor + ".gwd.unresolved", journalRoot, "Ancestor", wasEnumerated: false);
+                bool targetExists;
+                try
+                {
+                    var targetAttributes = File.GetAttributes(target);
+                    if ((targetAttributes & FileAttributes.Directory) == 0)
+                        throw new IOException("IIS recovery scan blocked: hosted target is not a directory: " + target);
+                    targetExists = true;
+                }
+                catch (FileNotFoundException) { targetExists = false; }
+                catch (DirectoryNotFoundException) { targetExists = false; }
+                if (targetExists)
+                {
+                    // Enumerate files AND directories: a malformed folder with a
+                    // recovery-marker name must not escape the historical scan.
+                    foreach (var path in Directory.EnumerateFileSystemEntries(target, "*.gwd.unresolved", SearchOption.AllDirectories))
+                        RequireNoHistoricalMarker(path, journalRoot, "Nested", wasEnumerated: true);
+                }
             }
             // Publish this attempt's lock identity only after all recovery
             // markers have been checked. Existing lock contents are otherwise
@@ -118,6 +134,25 @@ public sealed class IisDeploymentAttempt : IDisposable
         }
         catch { foreach (var item in _locks) item.Dispose(); throw; }
     }
+    // Historical ancestor/nested marker inspection is strictly read-only.
+    // Missing is accepted only when the path was not returned by enumeration;
+    // unreadable, replaced, directory or reparse-point markers block deployment.
+    private static void RequireNoHistoricalMarker(string markerPath, string journalRoot, string scope, bool wasEnumerated)
+    {
+        DeploymentPathSafety.Normalize(markerPath);
+        FileAttributes attributes;
+        try { attributes = File.GetAttributes(markerPath); }
+        catch (FileNotFoundException) when (!wasEnumerated) { return; }
+        catch (FileNotFoundException ex)
+        {
+            throw new IOException(scope + " recovery marker disappeared during inspection; manual review required: " + markerPath, ex);
+        }
+        if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+            throw new IOException(scope + " recovery marker is a directory or reparse point; manual review required: " + markerPath);
+        throw new IOException(scope + " recovery marker blocks deployment: " + markerPath + "; "
+            + DescribeUnresolvedMarker(markerPath, journalRoot));
+    }
+
     // Diagnostic-only inspection: marker text is untrusted and never used to
     // authorize deletion, rollback or any IIS mutation.
     private static string DescribeUnresolvedMarker(string markerPath, string journalRoot)

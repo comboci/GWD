@@ -165,6 +165,53 @@ public sealed class DeploymentService
         return HashFiles(Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories), folder);
     }
 
+    // Release F2: hash the published executable payload, not mutable database
+    // connection strings or frontend files. Include nested runtime dependencies.
+    // A filename-only or project-name-only digest cannot bind the deployed API.
+    private static string HashPublishedApiPayload(string publishFolder)
+    {
+        if (!Directory.Exists(publishFolder))
+            throw new IOException("API_PAYLOAD_UNVERIFIED: release directory is missing.");
+        var files = Directory.EnumerateFiles(publishFolder, "*", SearchOption.AllDirectories)
+            .Where(file =>
+            {
+                var relative = Path.GetRelativePath(publishFolder, file).Replace('\\', '/');
+                if (relative.StartsWith("wwwroot/", StringComparison.OrdinalIgnoreCase)) return false;
+                return relative.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+                    || relative.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                    || relative.EndsWith(".deps.json", StringComparison.OrdinalIgnoreCase)
+                    || relative.EndsWith(".runtimeconfig.json", StringComparison.OrdinalIgnoreCase)
+                    || relative.EndsWith(".so", StringComparison.OrdinalIgnoreCase)
+                    || relative.EndsWith(".dylib", StringComparison.OrdinalIgnoreCase);
+            }).ToArray();
+        if (!files.Any(file => file.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)
+            || file.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)))
+            throw new IOException("API_PAYLOAD_UNVERIFIED: published API has no executable assembly.");
+        foreach (var file in files)
+        {
+            var attributes = File.GetAttributes(file);
+            if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+                throw new IOException("API_PAYLOAD_UNVERIFIED: unsafe executable path: " + file);
+        }
+        return HashFiles(files, publishFolder);
+    }
+
+    // SHA of frontend output before GWD writes its own identity marker.
+    // Excluding that marker avoids a self-referential release digest.
+    private static string HashFrontendWithoutReleaseMarker(string root)
+    {
+        if (!Directory.Exists(root))
+            throw new IOException("FRONTEND_PAYLOAD_UNVERIFIED: wwwroot is missing.");
+        var files = Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
+            .Where(file => !string.Equals(
+                Path.GetRelativePath(root, file).Replace('\\', '/'),
+                "gwd-frontend-release.json", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (files.Length == 0)
+            throw new IOException("FRONTEND_PAYLOAD_UNVERIFIED: wwwroot has no application files.");
+        return HashFiles(files, root);
+    }
+
     private static bool IsGeneratedPath(string rel)
     {
         var p = "/" + rel.Replace('\\','/').Trim('/') + "/";
@@ -364,6 +411,15 @@ public sealed class DeploymentService
             throw new IOException("FAST_BASELINE_UNVERIFIED: verified frontend version contract is required for reuse.");
         if (!string.Equals(HashDirectory(Path.Combine(hostedRoot, "wwwroot")), expectedHash, StringComparison.Ordinal))
             throw new IOException("FAST_BASELINE_UNVERIFIED: hosted frontend bytes differ from recorded SHA256.");
+        if (!string.Equals(
+                HashFrontendWithoutReleaseMarker(Path.Combine(hostedRoot, "wwwroot")),
+                RequiredString(marker, "frontendBuildSha256"), StringComparison.Ordinal))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: pre-marker frontend build payload differs from published marker.");
+        // Legacy manifests without API payload evidence cannot be Fast Reuse baselines.
+        var recordedApiHash = RequiredString(manifest, "apiPayloadSha256");
+        if (!Regex.IsMatch(recordedApiHash, @"\A[0-9A-F]{64}\z", RegexOptions.CultureInvariant)
+            || !string.Equals(HashPublishedApiPayload(hostedRoot), recordedApiHash, StringComparison.Ordinal))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: hosted API executable payload differs from release manifest.");
 
         // A folder/manifest match alone cannot prove what IIS is actually
         // serving. Demand a matching release ID over HTTP, not just HTTP 200.
@@ -380,6 +436,69 @@ public sealed class DeploymentService
             throw new IOException("FAST_BASELINE_UNVERIFIED: " + liveApi.Detail);
         ct.ThrowIfCancellationRequested();
         _runner.Report("[FAST][PROVENANCE] Read-only IIS site/pool/path, hosted build-state, frontend SHA256 and live release markers verified. Fast Skip remains disabled pending F2–F5.");
+    }
+
+    // F2: reissue identity only in a NEW staging directory after the hosted
+    // baseline passed the F1 read-only gate. This method is deliberately
+    // reachable only from the currently DISABLED Fast IIS shortcut.
+    private void ReissueReusedReleaseEvidence(
+        DeploymentProfile profile, string stagedPublish, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!profile.RequiresNode || _iisAttempt is not
+            { IsDisposed: false, Resolved: false, MutationStarted: false })
+            throw new IOException("FAST_REUSE_BLOCKED: a locked, unmodified attempt and frontend contract are required.");
+        DeploymentPathSafety.RequirePlainTree(stagedPublish);
+        var frontendRoot = Path.Combine(stagedPublish, "wwwroot");
+        var sourceVersion = TryReadSourceVersion(profile);
+        if (string.IsNullOrWhiteSpace(sourceVersion) ||
+            string.Equals(sourceVersion, "unknown", StringComparison.OrdinalIgnoreCase))
+            throw new IOException("FAST_REUSE_BLOCKED: source release version is unknown.");
+        var versionFile = Path.Combine(frontendRoot, "gwd-ui-version.json");
+        if (!File.Exists(versionFile))
+            throw new IOException("FAST_REUSE_BLOCKED: an app-owned UI version contract is required.");
+        using (var versionDoc = JsonDocument.Parse(File.ReadAllText(versionFile)))
+        {
+            if (!versionDoc.RootElement.TryGetProperty("version", out var uiVersion) ||
+                uiVersion.ValueKind != JsonValueKind.String ||
+                !ReleaseVersionContract.Matches(sourceVersion, uiVersion.GetString()))
+                throw new IOException("FAST_REUSE_BLOCKED: frontend version does not match current source release.");
+        }
+
+        var client = FindClientFolder(profile)
+            ?? throw new IOException("FAST_REUSE_BLOCKED: frontend source cannot be located.");
+        var markerPath = Path.Combine(frontendRoot, "gwd-frontend-release.json");
+        // Remove ONLY the copied staging marker. Never mutate the hosted root.
+        // If the marker is unreadable/linked, the plain-tree check fails first.
+        if (File.Exists(markerPath)) File.Delete(markerPath);
+        ct.ThrowIfCancellationRequested();
+        var frontendBuildHash = HashFrontendWithoutReleaseMarker(frontendRoot);
+        var releaseId = Guid.NewGuid().ToString("N");
+        File.WriteAllText(markerPath, JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1, releaseId, sourceVersion,
+            frontendBuildSha256 = frontendBuildHash
+        }));
+        var finalFrontendHash = HashDirectory(frontendRoot);
+        var apiHash = HashPublishedApiPayload(stagedPublish);
+        File.WriteAllText(Path.Combine(stagedPublish, "gwd-release-integrity.json"),
+            JsonSerializer.Serialize(new
+            {
+                releaseId, schemaVersion = 1,
+                sourceRoot = Path.GetFullPath(profile.SourceFolder),
+                apiProject = Path.GetRelativePath(profile.SourceFolder, profile.ApiProjectPath),
+                frontend = Path.GetRelativePath(profile.SourceFolder, client),
+                sourceVersion, frontendSha256 = finalFrontendHash,
+                apiPayloadSha256 = apiHash, uiVersionVerified = true,
+                verifiedAtUtc = DateTime.UtcNow
+            }, new JsonSerializerOptions { WriteIndented = true }));
+        // Verify the newly written staging evidence before it can become a
+        // candidate for activation. This is not an HTTP/API process attestation.
+        ct.ThrowIfCancellationRequested();
+        if (!string.Equals(HashDirectory(frontendRoot), finalFrontendHash, StringComparison.Ordinal)
+            || !string.Equals(HashPublishedApiPayload(stagedPublish), apiHash, StringComparison.Ordinal))
+            throw new IOException("FAST_REUSE_BLOCKED: staged frontend/API payload changed during release sealing.");
+        _runner.Report("[FAST][RELEASE-EVIDENCE] New staging releaseId, frontend marker, manifest and API payload SHA256 issued. Fast Skip remains disabled pending F3–F5.");
     }
 
     private void WriteSmartState(string output, SmartDeployState state)
@@ -576,6 +695,9 @@ public sealed class DeploymentService
                         trace.AddSkipped("dotnet publish", "Backend/database unchanged; last successful binaries reused.");
                     }
                     WriteConnectionString(output, profile);
+                    // F2: copied hosted release metadata is never published unchanged.
+                    // The branch containing this call is still disabled by false &&.
+                    ReissueReusedReleaseEvidence(profile, output, ct);
                     var outputHash = trace.Measure("Frontend output hash", () => HashDirectory(Path.Combine(output, "wwwroot")), "Hashes staged wwwroot for stale-UI protection.");
                     trace.Measure("Write build state", () => WriteSmartState(output, currentState with { FrontendOutputHash = outputHash, DependenciesValidated = fastDependenciesValidated || previousState.DependenciesValidated }), "Writes staging Fast Build state manifest.");
                     return output;
@@ -872,6 +994,7 @@ public sealed class DeploymentService
                 frontend = Path.GetRelativePath(profile.SourceFolder, client),
                 sourceVersion = TryReadSourceVersion(profile),
                 frontendSha256 = stagedHash,
+                apiPayloadSha256 = HashPublishedApiPayload(output),
                 uiVersionVerified,
                 verifiedAtUtc = DateTime.UtcNow
             };
@@ -1994,6 +2117,19 @@ public sealed class DeploymentService
             var deployedOutputHash = HashDirectory(deployedWwwroot);
             if (!string.Equals(hashProperty.GetString(), deployedOutputHash, StringComparison.Ordinal))
                 return (false, "RELEASE_INTEGRITY: Activated frontend differs from staged release SHA256.");
+            if (integrity.TryGetProperty("apiPayloadSha256", out var apiPayloadValue))
+            {
+                // New releases carry this digest. Older manifests remain readable,
+                // but are NOT eligible for Fast Reuse (F1 requires the field).
+                if (apiPayloadValue.ValueKind != JsonValueKind.String ||
+                    string.IsNullOrWhiteSpace(apiPayloadValue.GetString()) ||
+                    !Regex.IsMatch(apiPayloadValue.GetString()!, @"\A[0-9A-F]{64}\z", RegexOptions.CultureInvariant) ||
+                    !string.Equals(apiPayloadValue.GetString(), HashPublishedApiPayload(publishFolder), StringComparison.Ordinal))
+                    return (false, "RELEASE_INTEGRITY: Activated API executable payload differs from staged SHA256.");
+                _runner.Report("[API-PAYLOAD] Activated API binary/dependency SHA256 matches the release manifest (disk evidence only).");
+            }
+            else
+                _runner.Report("[API-PAYLOAD] UNVERIFIED (legacy manifest): no API executable digest; Fast Reuse is prohibited.");
             if (integrity.TryGetProperty("sourceVersion", out var manifestVersion) &&
                 manifestVersion.ValueKind == JsonValueKind.String &&
                 !string.IsNullOrWhiteSpace(state.SourceVersion) &&

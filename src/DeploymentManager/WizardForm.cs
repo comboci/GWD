@@ -38,6 +38,10 @@ public sealed class WizardForm : Form
     private readonly Label _healthChecked = new() { AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(6, 8, 8, 0), Text = "Checked: —" };
     private readonly System.Windows.Forms.Timer _runtimeMetricsTimer = new() { Interval = 5000 };
     private readonly Label _resourceUsage = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 8, 0), Text = "CPU/RAM: sampling..." };
+    // Persistent settings are coalesced on the UI thread, not written for each
+    // TextChanged character. Flush before a page's controls are disposed.
+    private readonly System.Windows.Forms.Timer _settingsSaveTimer = new() { Interval = 650 };
+    private readonly Dictionary<string, Action> _deferredSettingsSaves = new(StringComparer.Ordinal);
 
     private readonly string[] _steps =
     {
@@ -162,6 +166,7 @@ public sealed class WizardForm : Form
         AutoScaleMode = AutoScaleMode.Dpi;
 
         BuildShell();
+        _settingsSaveTimer.Tick += (_, _) => FlushDeferredSettingsSaves();
         _uiLogFlushTimer.Tick += (_, _) => FlushPendingUiLogLines();
         _uiLogFlushTimer.Start();
         _trayIcon.Icon = Icon ?? SystemIcons.Application;
@@ -584,8 +589,42 @@ public sealed class WizardForm : Form
         UpdateNavigationState();
     }
 
+    private void QueueDeferredSettingsSave(string key, Action save)
+    {
+        _deferredSettingsSaves[key] = save;
+        _settingsSaveTimer.Stop();
+        _settingsSaveTimer.Start();
+    }
+
+    private void CancelDeferredSettingsSave(string key)
+    {
+        _deferredSettingsSaves.Remove(key);
+        if (_deferredSettingsSaves.Count == 0) _settingsSaveTimer.Stop();
+    }
+
+    private void FlushDeferredSettingsSaves()
+    {
+        _settingsSaveTimer.Stop();
+        if (_deferredSettingsSaves.Count == 0) return;
+        var saves = _deferredSettingsSaves.ToArray();
+        _deferredSettingsSaves.Clear();
+        foreach (var (key, save) in saves)
+        {
+            try { save(); }
+            catch (Exception ex)
+            {
+                // Settings failures must not block closing the window or
+                // unexpectedly trigger deployment; preserve diagnostic detail.
+                InternalDiagnostics.Record(ex, "Persist deferred setting: " + key);
+            }
+        }
+    }
+
     private void DisposeContentControls()
     {
+        // Source/target controls may own the latest unsaved edit. Their queued
+        // actions must execute while controls are still alive.
+        FlushDeferredSettingsSaves();
         if (_content.Controls.Count == 0) return;
 
         // The live log textbox is reused across wizard pages and is hosted inside
@@ -1421,17 +1460,21 @@ public sealed class WizardForm : Form
         {
             _profile.DeploymentRepositoryFolder = repository.Text.Trim();
             _profile.InstallerCacheFolder = Path.Combine(_profile.DeploymentRepositoryFolder, "Installers");
-            if (!string.IsNullOrWhiteSpace(_profile.DeploymentRepositoryFolder)) _appData.SaveDeploymentRepositoryFolder(_profile.DeploymentRepositoryFolder);
+            if (!string.IsNullOrWhiteSpace(_profile.DeploymentRepositoryFolder))
+                QueueDeferredSettingsSave("repository", () => _appData.SaveDeploymentRepositoryFolder(_profile.DeploymentRepositoryFolder));
             _offlineDependenciesReady = false;
             UpdateNavigationState();
         };
         workspace.TextChanged += (_, _) =>
         {
             _profile.WorkspaceRoot = workspace.Text.Trim();
-            if (!string.IsNullOrWhiteSpace(_profile.WorkspaceRoot)) _appData.SaveWorkspaceRoot(_profile.WorkspaceRoot);
+            if (!string.IsNullOrWhiteSpace(_profile.WorkspaceRoot))
+                QueueDeferredSettingsSave("workspace", () => _appData.SaveWorkspaceRoot(_profile.WorkspaceRoot));
             UpdateNavigationState();
         };
         app.TextChanged += (_, _) => { _profile.ApplicationName = app.Text.Trim(); UpdateNavigationState(); };
+        repository.Leave += (_, _) => FlushDeferredSettingsSaves();
+        workspace.Leave += (_, _) => FlushDeferredSettingsSaves();
         site.TextChanged += (_, _) => { _profile.SiteName = site.Text.Trim(); _profile.AppPoolName = _profile.SiteName; UpdateNavigationState(); };
         database.TextChanged += (_, _) => { _profile.DatabaseName = database.Text.Trim(); UpdateNavigationState(); };
         void RefreshModeMeaning() => modeMeaning.Text = _profile.BuildMode switch
@@ -1641,13 +1684,38 @@ public sealed class WizardForm : Form
             remoteState.ForeColor = Color.DimGray;
             if (!remoteSelected) { _profile.TargetHost = Environment.MachineName; host.Text = string.Empty; }
         }
-        targetMode.SelectedIndexChanged += (_, _) => { ApplyTargetModeState(); UpdateNavigationState(); };
+        targetMode.SelectedIndexChanged += (_, _) =>
+        {
+            // The remote host control is cleared in Local mode. Commit any
+            // pending remote credentials while their original host is visible.
+            FlushDeferredSettingsSaves();
+            ApplyTargetModeState();
+            UpdateNavigationState();
+        };
         ApplyTargetModeState();
-        remoteUser.TextChanged += (_, _) => { _profile.RemoteUserName = remoteUser.Text.Trim(); if (rememberRemote.Checked) _appData.SaveRemoteCredential(host.Text.Trim(), remoteUser.Text.Trim(), remotePassword.Text, true); UpdateNavigationState(); };
-        remotePassword.TextChanged += (_, _) => { _profile.RemotePassword = remotePassword.Text; if (rememberRemote.Checked) _appData.SaveRemoteCredential(host.Text.Trim(), remoteUser.Text.Trim(), remotePassword.Text, true); UpdateNavigationState(); };
+        void QueueRememberedRemoteCredential()
+        {
+            // Host is not a credential when the Local Server mode is selected.
+            // Do not overwrite a stored remote host with the cleared local UI.
+            if (rememberRemote.Checked &&
+                string.Equals(targetMode.SelectedItem?.ToString(), "Remote IIS Server", StringComparison.OrdinalIgnoreCase))
+                QueueDeferredSettingsSave("remote-credential",
+                    () => _appData.SaveRemoteCredential(host.Text.Trim(), remoteUser.Text.Trim(), remotePassword.Text, true));
+        }
+        remoteUser.TextChanged += (_, _) => { _profile.RemoteUserName = remoteUser.Text.Trim(); QueueRememberedRemoteCredential(); UpdateNavigationState(); };
+        remotePassword.TextChanged += (_, _) => { _profile.RemotePassword = remotePassword.Text; QueueRememberedRemoteCredential(); UpdateNavigationState(); };
         remotePort.ValueChanged += (_, _) => _profile.RemoteWinRmPort = (int)remotePort.Value;
         remoteSsl.CheckedChanged += (_, _) => _profile.RemoteUseSsl = remoteSsl.Checked;
-        rememberRemote.CheckedChanged += (_, _) => _appData.SaveRemoteCredential(host.Text.Trim(), remoteUser.Text.Trim(), remotePassword.Text, rememberRemote.Checked);
+        rememberRemote.CheckedChanged += (_, _) =>
+        {
+            // Opting out must revoke the persisted secret immediately; do not
+            // allow a queued Save(true) to re-create it after the checkbox is off.
+            CancelDeferredSettingsSave("remote-credential");
+            _appData.SaveRemoteCredential(host.Text.Trim(), remoteUser.Text.Trim(), remotePassword.Text, rememberRemote.Checked);
+        };
+        remoteUser.Leave += (_, _) => FlushDeferredSettingsSaves();
+        remotePassword.Leave += (_, _) => FlushDeferredSettingsSaves();
+        host.Leave += (_, _) => FlushDeferredSettingsSaves();
         testRemote.Click += async (_, _) =>
         {
             if (!ValidateRemoteInputs(showMessage: true)) return;
@@ -1676,11 +1744,14 @@ public sealed class WizardForm : Form
         {
             var previousApplicationName = _profile.ApplicationName; _profile.ApplicationName = appName.Text.Trim();
             _profile.HostingRoot = UpdateAutoHostingRootForApplicationName(_profile.HostingRoot, previousApplicationName, _profile.ApplicationName);
-            _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName);
-            _appData.SaveHostingSettings(_profile.HostingRoot, _profile.DeploymentLayout, _profile.CleanupPreviousDeployments, _profile.UseDefaultIisWebsite);
+            QueueDeferredSettingsSave("identity", () => _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName));
+            QueueDeferredSettingsSave("hosting", () => _appData.SaveHostingSettings(_profile.HostingRoot, _profile.DeploymentLayout, _profile.CleanupPreviousDeployments, _profile.UseDefaultIisWebsite));
         };
-        siteName.TextChanged += (_, _) => { _profile.SiteName = siteName.Text.Trim(); _profile.AppPoolName = _profile.SiteName; _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName); UpdateNavigationState(); };
-        databaseName.TextChanged += (_, _) => { _profile.DatabaseName = databaseName.Text.Trim(); _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName); UpdateNavigationState(); };
+        siteName.TextChanged += (_, _) => { _profile.SiteName = siteName.Text.Trim(); _profile.AppPoolName = _profile.SiteName; QueueDeferredSettingsSave("identity", () => _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName)); UpdateNavigationState(); };
+        databaseName.TextChanged += (_, _) => { _profile.DatabaseName = databaseName.Text.Trim(); QueueDeferredSettingsSave("identity", () => _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName)); UpdateNavigationState(); };
+        appName.Leave += (_, _) => FlushDeferredSettingsSaves();
+        siteName.Leave += (_, _) => FlushDeferredSettingsSaves();
+        databaseName.Leave += (_, _) => FlushDeferredSettingsSaves();
         host.TextChanged += (_, _) =>
         {
             _profile.TargetHost = host.Text.Trim();
@@ -1689,6 +1760,7 @@ public sealed class WizardForm : Form
                 var valid = IsValidIpv4(host.Text); remoteState.Text = valid ? "IPv4 format valid. Remote readiness not tested." : "Enter IPv4 only, for example 192.168.1.50.";
                 remoteState.ForeColor = valid ? Color.DimGray : Color.Firebrick;
             }
+            QueueRememberedRemoteCredential();
             UpdateNavigationState();
         };
         publish.TextChanged += (_, _) => { _profile.ReadyPublishFolder = publish.Text.Trim(); UpdateNavigationState(); };
@@ -2699,11 +2771,12 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             _profile.CleanupPreviousDeployments = cleanup.Checked;
             if (_profile.UseDefaultIisWebsite) { _profile.HttpPort = 80; _profile.HostHeader = string.Empty; }
             cleanup.Enabled = !useDefault.Checked && versioned.Checked;
-            _appData.SaveHostingSettings(_profile.HostingRoot, _profile.DeploymentLayout, _profile.CleanupPreviousDeployments, _profile.UseDefaultIisWebsite);
+            QueueDeferredSettingsSave("hosting", () => _appData.SaveHostingSettings(_profile.HostingRoot, _profile.DeploymentLayout, _profile.CleanupPreviousDeployments, _profile.UseDefaultIisWebsite));
             UpdateNavigationState();
         }
 
         hostingRoot.TextChanged += (_, _) => Save();
+        hostingRoot.Leave += (_, _) => FlushDeferredSettingsSaves();
         single.CheckedChanged += (_, _) => Save();
         versioned.CheckedChanged += (_, _) => Save();
         cleanup.CheckedChanged += (_, _) => Save();
@@ -3684,6 +3757,10 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         _runtimeMetrics.Dispose();
         _healthMonitor.Updated -= OnHealthUpdated;
         _healthMonitor.Dispose();
+        // Commit pending edits before closing and before any later state I/O
+        // can fail, then tear down the idle-save timer.
+        FlushDeferredSettingsSaves();
+        _settingsSaveTimer.Dispose();
         _persistentState.LastStage = _steps[Math.Clamp(_pageIndex,0,_steps.Length-1)];
         _persistentState.LastSourceFolder = _profile.SourceFolder;
         _persistentState.LastSiteName = _profile.SiteName;

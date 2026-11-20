@@ -279,6 +279,109 @@ public sealed class DeploymentService
         catch (Exception ex) { try { InternalDiagnostics.Record(ex, "Read persistent smart deploy state"); } catch { } return null; }
     }
 
+    // F1: read-only, fail-closed evidence gate for the dormant hosted-baseline
+    // optimization. This is NOT permission to enable any Fast IIS skip path:
+    // F2-F5 (fresh release/API manifests, migrations, TOCTOU and rollback tests)
+    // remain required. Never trust the persistent source hash by itself.
+    private async Task RequireHostedBaselineProvenanceAsync(
+        DeploymentProfile profile, SmartDeployState previousState, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (!string.Equals(profile.BuildMode, "Fast IIS Update", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(profile.TargetMode, "Local Server", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: only a locked local Single Folder IIS target can supply hosted baseline evidence.");
+        if (_iisAttempt is not { IsDisposed: false, Resolved: false, MutationStarted: false })
+            throw new IOException("FAST_BASELINE_UNVERIFIED: an owned, unmodified IIS attempt lock is required.");
+
+        var hostedRoot = DeploymentPathSafety.RequireExclusiveLocalTarget(profile.HostingRoot);
+        if (!Directory.Exists(hostedRoot))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: hosted directory is missing.");
+        DeploymentPathSafety.RequirePlainTree(hostedRoot);
+        // File.Exists can silently return false on access-denied paths. Attribute
+        // probing rejects unreadable or present incomplete markers instead.
+        try
+        {
+            _ = File.GetAttributes(Path.Combine(hostedRoot, ".deployment-incomplete"));
+            throw new IOException("FAST_BASELINE_UNVERIFIED: hosted deployment is incomplete.");
+        }
+        catch (FileNotFoundException) { }
+
+        var iis = Iis();
+        var states = await iis.ValidateAsync(profile.SiteName, profile.AppPoolName, ct);
+        if (states.Site != "Started" || states.Pool != "Started")
+            throw new IOException("FAST_BASELINE_UNVERIFIED: active site and application pool must both be running.");
+        var physicalPath = await GetSitePhysicalPathAsync(profile, ct);
+        if (string.IsNullOrWhiteSpace(physicalPath)
+            || !string.Equals(DeploymentPathSafety.Normalize(physicalPath), hostedRoot, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: IIS root physical path does not equal the locked hosting root.");
+        var poolResult = await iis.CheckedAsync(
+            $"list app /app.name:\"{profile.SiteName}/\" /text:applicationPool", ct);
+        if (!string.Equals(poolResult.Output.Trim().Trim('"'), profile.AppPoolName, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: active root application uses another app pool.");
+        await iis.RequireExclusivePoolAsync(profile.SiteName, profile.AppPoolName, ct);
+        ct.ThrowIfCancellationRequested();
+
+        var hostedStatePath = Path.Combine(hostedRoot, ".smart-deploy-state.json");
+        var manifestPath = Path.Combine(hostedRoot, "gwd-release-integrity.json");
+        var markerPath = Path.Combine(hostedRoot, "wwwroot", "gwd-frontend-release.json");
+        if (!File.Exists(hostedStatePath) || !File.Exists(manifestPath) || !File.Exists(markerPath))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: hosted state, release manifest or frontend marker is missing.");
+
+        var hostedState = JsonSerializer.Deserialize<SmartDeployState>(File.ReadAllText(hostedStatePath));
+        if (hostedState is null || hostedState != previousState)
+            throw new IOException("FAST_BASELINE_UNVERIFIED: repository fingerprint differs from the hosted build-state snapshot.");
+        using var manifestDocument = JsonDocument.Parse(File.ReadAllText(manifestPath));
+        using var markerDocument = JsonDocument.Parse(File.ReadAllText(markerPath));
+        static string RequiredString(JsonElement obj, string property)
+        {
+            if (obj.ValueKind != JsonValueKind.Object ||
+                !obj.TryGetProperty(property, out var value) ||
+                value.ValueKind != JsonValueKind.String ||
+                string.IsNullOrWhiteSpace(value.GetString()))
+                throw new IOException("FAST_BASELINE_UNVERIFIED: required release evidence missing: " + property);
+            return value.GetString()!.Trim();
+        }
+
+        var manifest = manifestDocument.RootElement;
+        var marker = markerDocument.RootElement;
+        var releaseId = RequiredString(manifest, "releaseId");
+        if (!string.Equals(releaseId, RequiredString(marker, "releaseId"), StringComparison.Ordinal)
+            || !Guid.TryParseExact(releaseId, "N", out _))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: frontend and hosted manifest release identifiers disagree.");
+        var expectedHash = RequiredString(manifest, "frontendSha256");
+        if (!Regex.IsMatch(expectedHash, @"\A[0-9A-F]{64}\z", RegexOptions.CultureInvariant)
+            || !Regex.IsMatch(RequiredString(marker, "frontendBuildSha256"), @"\A[0-9A-F]{64}\z", RegexOptions.CultureInvariant)
+            || !string.Equals(previousState.FrontendOutputHash, expectedHash, StringComparison.Ordinal))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: hosted frontend SHA256 evidence is missing or inconsistent.");
+        var sourceVersion = RequiredString(manifest, "sourceVersion");
+        if (string.Equals(sourceVersion, "unknown", StringComparison.OrdinalIgnoreCase)
+            || !string.Equals(sourceVersion, previousState.SourceVersion, StringComparison.Ordinal)
+            || !string.Equals(sourceVersion, RequiredString(marker, "sourceVersion"), StringComparison.Ordinal))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: hosted release version evidence does not match persistent state.");
+        if (!manifest.TryGetProperty("uiVersionVerified", out var versionEvidence)
+            || versionEvidence.ValueKind != JsonValueKind.True)
+            throw new IOException("FAST_BASELINE_UNVERIFIED: verified frontend version contract is required for reuse.");
+        if (!string.Equals(HashDirectory(Path.Combine(hostedRoot, "wwwroot")), expectedHash, StringComparison.Ordinal))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: hosted frontend bytes differ from recorded SHA256.");
+
+        // A folder/manifest match alone cannot prove what IIS is actually
+        // serving. Demand a matching release ID over HTTP, not just HTTP 200.
+        var liveFrontend = await VerifyRunningFrontendReleaseAsync(profile, hostedRoot, ct);
+        if (!liveFrontend.Ok)
+            throw new IOException("FAST_BASELINE_UNVERIFIED: " + liveFrontend.Detail);
+        // Compatible API mode can report HTTP success while release identity is
+        // UNVERIFIED. Refuse baseline reuse unless strict API version evidence
+        // is explicitly required and the live strict check also passes.
+        if (!string.Equals(profile.ApiVersionContractMode, "Strict", StringComparison.OrdinalIgnoreCase))
+            throw new IOException("FAST_BASELINE_UNVERIFIED: strict live API version evidence is required.");
+        var liveApi = await VerifyRunningApiReleaseAsync(profile, hostedRoot, ct);
+        if (!liveApi.Ok)
+            throw new IOException("FAST_BASELINE_UNVERIFIED: " + liveApi.Detail);
+        ct.ThrowIfCancellationRequested();
+        _runner.Report("[FAST][PROVENANCE] Read-only IIS site/pool/path, hosted build-state, frontend SHA256 and live release markers verified. Fast Skip remains disabled pending F2–F5.");
+    }
+
     private void WriteSmartState(string output, SmartDeployState state)
     {
         File.WriteAllText(Path.Combine(output,".smart-deploy-state.json"), JsonSerializer.Serialize(state, new JsonSerializerOptions{WriteIndented=true}));
@@ -424,6 +527,9 @@ public sealed class DeploymentService
             fastPreviousState = previousState;
             if (previousState is not null)
             {
+                // F1 guard remains inside the disabled Fast IIS branch: no
+                // hosted bytes may be reused on fingerprint evidence alone.
+                await RequireHostedBaselineProvenanceAsync(profile, previousState, ct);
                 var frontendChanged = !string.Equals(currentState.FrontendHash, previousState.FrontendHash, StringComparison.Ordinal);
                 var backendChanged = !string.Equals(currentState.BackendHash, previousState.BackendHash, StringComparison.Ordinal);
                 var dependenciesChanged = !string.Equals(currentState.DependencyHash, previousState.DependencyHash, StringComparison.Ordinal);

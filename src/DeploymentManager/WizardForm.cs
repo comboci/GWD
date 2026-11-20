@@ -36,6 +36,8 @@ public sealed class WizardForm : Form
     private readonly Label _sqlHealth = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(4, 8, 2, 0), Text = "○ SQL" };
     private readonly Label _httpHealth = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(4, 8, 2, 0), Text = "○ HTTP" };
     private readonly Label _healthChecked = new() { AutoSize = true, ForeColor = Color.Gray, Padding = new Padding(6, 8, 8, 0), Text = "Checked: —" };
+    private readonly Label _deploymentIndicator = new() { Dock = DockStyle.Fill, AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(8, 2, 6, 2), ForeColor = Color.DimGray, Text = "Recorded deployment result: Not started" };
+    private readonly ToolTip _healthTip = new() { AutoPopDelay = 20000, InitialDelay = 350, ReshowDelay = 100 };
     private readonly System.Windows.Forms.Timer _runtimeMetricsTimer = new() { Interval = 5000 };
     private readonly Label _resourceUsage = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 8, 0), Text = "CPU/RAM: sampling..." };
     // Persistent settings are coalesced on the UI thread, not written for each
@@ -203,34 +205,68 @@ public sealed class WizardForm : Form
 
     private void OnHealthUpdated(HealthSnapshot snapshot)
     {
-        if (IsDisposed || Disposing) return;
-        BeginInvoke(() =>
+        if (IsDisposed || Disposing || !IsHandleCreated) return;
+        try
         {
-            _iisHealth.Text = snapshot.IisInstalled ? "✓ IIS" : "✕ IIS";
-            _iisHealth.ForeColor = snapshot.IisInstalled ? Color.ForestGreen : Color.Firebrick;
-            _iisHealth.Tag = snapshot.IisInstalled ? $"IIS installed — {snapshot.SiteCount} site(s), {snapshot.AppPoolCount} app pool(s); target health not verified" : "IIS missing/unavailable";
+            BeginInvoke((Action)(() =>
+            {
+                // A scheduled health callback can arrive after the form closes.
+                if (IsDisposed || Disposing) return;
+                _iisHealth.Text = snapshot.IisInstalled ? "✓ IIS installed" : "○ IIS unverified";
+                _iisHealth.ForeColor = snapshot.IisInstalled ? Color.ForestGreen : Color.DarkOrange;
+                var iisDetail = snapshot.IisInstalled
+                    ? $"IIS installed; {snapshot.SiteCount} site(s), {snapshot.AppPoolCount} app pool(s). Target site and release identity NOT verified."
+                    : "IIS not verified/available. A SQL-only update is not an IIS health check.";
+                _healthTip.SetToolTip(_iisHealth, iisDetail);
 
-            var sqlState = _sql.Connections.State(_profile);
-            _sqlHealth.Text = sqlState.Verified ? "✓ SQL Server" : "○ SQL Server";
-            _sqlHealth.ForeColor = sqlState.Verified ? Color.ForestGreen : Color.Firebrick;
-            _sqlHealth.Tag = sqlState.Detail;
+                var sqlState = _sql.Connections.State(_profile);
+                var sqlConnected = snapshot.SqlOk == true && sqlState.Verified;
+                _sqlHealth.Text = sqlConnected ? "✓ SQL connected" : snapshot.SqlOk == false ? "✕ SQL unavailable" : "○ SQL unchecked";
+                _sqlHealth.ForeColor = sqlConnected ? Color.ForestGreen : snapshot.SqlOk == false ? Color.Firebrick : Color.DimGray;
+                _healthTip.SetToolTip(_sqlHealth, SecretRedactor.Redact(sqlState.Detail) + " — SQL connection is not proof of database/schema health.");
 
-            var httpHealthy = snapshot.HttpStatus is >= 200 and < 400;
-            _httpHealth.Text = snapshot.HttpStatus is null ? "○ HTTP" : httpHealthy ? $"✓ HTTP {snapshot.HttpStatus}" : $"✕ HTTP {snapshot.HttpStatus}";
-            _httpHealth.ForeColor = snapshot.HttpStatus is null ? Color.Gray : httpHealthy ? Color.ForestGreen : Color.Firebrick;
-            _httpHealth.Tag = snapshot.HttpDetail;
-            _healthChecked.Text = $"Checked: {snapshot.CheckedAt:HH:mm:ss}";
+                var httpResponded = snapshot.HttpStatus is >= 200 and < 400;
+                _httpHealth.Text = snapshot.HttpStatus is null ? "○ HTTP unchecked" : $"HTTP {snapshot.HttpStatus} (probe)";
+                _httpHealth.ForeColor = snapshot.HttpStatus is null ? Color.Gray : httpResponded ? Color.DarkGreen : Color.Firebrick;
+                _healthTip.SetToolTip(_httpHealth, SecretRedactor.Redact(snapshot.HttpDetail) +
+                    " — A localhost HTTP response does NOT verify IIS site ownership, API/frontend version, or release identity.");
+                _healthChecked.Text = $"Checked: {snapshot.CheckedAt:HH:mm:ss}";
+                _healthTip.SetToolTip(_healthChecked, "Timestamp of last health snapshot; results may be stale and are not proof of a successful deployment.");
+                UpdateStepIndicator();
+            }));
+        }
+        catch (InvalidOperationException) when (IsDisposed || Disposing || !IsHandleCreated) { }
+        catch (ObjectDisposedException) when (IsDisposed || Disposing) { }
+    }
 
-            UpdateStepIndicator();
-        });
+    private void UpdateDeploymentIndicator()
+    {
+        if (_deploymentIndicator.IsDisposed) return;
+        var needsReview = _deploymentStatus.Contains("INTERRUPTED", StringComparison.OrdinalIgnoreCase)
+            || _deploymentStatus.Contains("RECOVERY FAILED", StringComparison.OrdinalIgnoreCase)
+            || _deploymentStatus.Contains("UNSUCCESSFUL", StringComparison.OrdinalIgnoreCase)
+            || _deploymentStatus.Contains("FAILED", StringComparison.OrdinalIgnoreCase)
+            || _deploymentStatus.Contains("CANCELLED", StringComparison.OrdinalIgnoreCase);
+        _deploymentIndicator.Text = needsReview
+            ? "⚠ RECOVERY REVIEW REQUIRED — " + _deploymentStatus + " (inspect IIS, markers and backups)"
+            : "Recorded result: " + _deploymentStatus + " — live release identity not verified here";
+        _deploymentIndicator.ForeColor = needsReview ? Color.Firebrick
+            : _deploymentStatus.Contains("SUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.DarkGreen
+            : _deploymentStatus.Contains("IN PROGRESS", StringComparison.OrdinalIgnoreCase) ? Color.RoyalBlue : Color.DimGray;
+        _healthTip.SetToolTip(_deploymentIndicator, needsReview
+            ? "Do not infer successful recovery from IIS status or HTTP response. Review the attempt Journal, recovery markers, backups and actual site/API/frontend state before retrying."
+            : "Recorded process outcome only; check actual IIS target, HTTP endpoint and running release identity independently.");
     }
 
     private void BuildShell()
     {
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2 };
+        // Independent health/status row and full-width action footer avoid the
+        // old competition for horizontal space at 125%/150% DPI.
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3 };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
 
         _stepPanel.Dock = DockStyle.Fill;
@@ -283,14 +319,31 @@ public sealed class WizardForm : Form
         right.Controls.Add(_content, 0, 2);
         root.Controls.Add(right, 1, 0);
 
+        // These health labels were updated by OnHealthUpdated but were never
+        // parented to a visible control. Keep the recovery warning in the top
+        // line, with horizontally scrollable status details below it.
+        var healthBar = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, Padding = new Padding(12, 0, 12, 0), Margin = new Padding(0) };
+        healthBar.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        healthBar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        healthBar.Controls.Add(_deploymentIndicator, 0, 0);
+        var healthDetails = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false, AutoScroll = true, Margin = new Padding(0), Padding = new Padding(3, 0, 3, 0)
+        };
+        healthDetails.Controls.Add(_iisHealth);
+        healthDetails.Controls.Add(_sqlHealth);
+        healthDetails.Controls.Add(_httpHealth);
+        healthDetails.Controls.Add(_healthChecked);
+        healthBar.Controls.Add(healthDetails, 0, 1);
+        root.Controls.Add(healthBar, 1, 1);
+        UpdateDeploymentIndicator();
+
         var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(10, 8, 14, 8) };
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var statusPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
-        var healthTip = new ToolTip { AutoPopDelay = 12000, InitialDelay = 350, ReshowDelay = 100 };
-        healthTip.SetToolTip(_iisHealth, "IIS health status");
-        healthTip.SetToolTip(_sqlHealth, "SQL Server health status");
-        healthTip.SetToolTip(_httpHealth, "HTTP application health status");
+        var statusPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, WrapContents = false };
+        _activity.AutoEllipsis = true;
         statusPanel.Controls.Add(_activity);
         statusPanel.Controls.Add(_resourceUsage);
         footer.Controls.Add(statusPanel, 0, 0);
@@ -314,7 +367,8 @@ public sealed class WizardForm : Form
         };
         // Diagnostics Center is accessed from the Actions menu, not the wizard footer.
         footer.Controls.Add(footerButtons, 1, 0);
-        root.Controls.Add(footer, 1, 1);
+        root.Controls.Add(footer, 0, 2);
+        root.SetColumnSpan(footer, 2);
 
         Controls.Add(root);
         Controls.Add(_progress);
@@ -567,6 +621,7 @@ public sealed class WizardForm : Form
             _lastLoggedPageIndex = _pageIndex;
         }
         _activity.Visible = _pageIndex != _steps.Length - 1;
+        UpdateDeploymentIndicator();
         UpdateStepIndicator();
         DisposeContentControls();
         _stepIndicator.Text = $"Step {_pageIndex + 1} of {_steps.Length}";
@@ -3136,6 +3191,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         _next.Text = "Cancel Deploy";
         _deploymentStatus = "DEPLOYMENT IN PROGRESS";
         _persistentState.LastResult = "InProgress";
+        UpdateDeploymentIndicator();
         _appData.SaveState(_persistentState);
         string? stagedPublish = null;
         string? publish = null;
@@ -3233,8 +3289,9 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 try { _deployment.CleanupCommittedAttempt(_profile); } catch (Exception cleanupEx) { AppendLog("[CLEANUP] Current-attempt cleanup warning: " + cleanupEx.Message); }
                 _lastSuccessfulPublishPath = publish;
             }
-            _deploymentStatus = "DEPLOYMENT SUCCESSFUL";
+            _deploymentStatus = isFastLocalTest ? "FAST LOCAL TEST PASSED — HOSTED IIS UNCHANGED" : "DEPLOYMENT SUCCESSFUL";
             _persistentState.LastResult = "Successful";
+            UpdateDeploymentIndicator();
             if (!isFastLocalTest) ShowTrayDeploymentResult(true);
             _progress.Value = 100;
             var host = string.IsNullOrWhiteSpace(_profile.HostHeader) ? "localhost" : _profile.HostHeader;
@@ -3342,6 +3399,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             if (_logModeCombo is not null && !_logModeCombo.IsDisposed) _logModeCombo.Enabled = true;
             _persistentState.UpdatedAt = DateTime.Now;
             _appData.SaveState(_persistentState);
+            UpdateDeploymentIndicator();
             if (_pageIndex == _steps.Length - 1)
             {
                 _next.Text = (_persistentState.LastResult == "Failed" || _persistentState.LastResult == "RecoveryFailed") ? "Retry Deploy" : (_persistentState.LastResult == "Successful" ? "Deploy Again" : (_persistentState.LastResult == "Cancelled" ? "Deploy" : "Deploy"));
@@ -3757,6 +3815,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         _runtimeMetrics.Dispose();
         _healthMonitor.Updated -= OnHealthUpdated;
         _healthMonitor.Dispose();
+        _healthTip.Dispose();
         // Commit pending edits before closing and before any later state I/O
         // can fail, then tear down the idle-save timer.
         FlushDeferredSettingsSaves();

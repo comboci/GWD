@@ -146,7 +146,7 @@ internal static class CliApplication
             ["dryRun"] = dryRun,
             ["administrator"] = IsAdministrator(),
             ["readyForActualDeploy"] = validation.Success && IsAdministrator(),
-            ["plannedActions"] = new[] { "validate", "build/publish to staging", "validate artifacts", "backup", "preserve production settings", "stop application pool", "activate files", "start IIS", "health check with retry", "automatic rollback on failure" },
+            ["plannedActions"] = new[] { "validate", "build/publish to staging", "validate artifacts", "stop IIS site and application pool", "backup", "preserve production settings", "activate files", "start IIS", "health check with retry", "automatic rollback on failure" },
             ["previousVersion"] = previousVersion
         };
         if (dryRun)
@@ -169,10 +169,39 @@ internal static class CliApplication
         deployment.IisStage("BUILD", "PASS");
 
         string backup;
-        try { backup = CreateBackup(profile); }
-        catch (Exception ex) { throw new CliFailure(4, "Backup failed: " + ex.Message); }
-        PreserveProductionSettings(profile, stage);
-        var previousSitePath = await deployment.GetSitePhysicalPathAsync(profile);
+        string? previousSitePath = null;
+        var preparationPhase = "IIS STOP";
+        try
+        {
+            previousSitePath = await deployment.GetSitePhysicalPathAsync(profile);
+            // CLI backups must use a stopped-site snapshot, just like the shared
+            // activation engine. The target lease was acquired before publishing.
+            deployment.IisStage("STOP", "RUNNING");
+            await deployment.StopSiteForDeploymentAsync(profile);
+            deployment.IisStage("STOP", "PASS");
+
+            preparationPhase = "backup";
+            deployment.IisStage("BACKUP", "RUNNING");
+            backup = CreateBackup(profile);
+            preparationPhase = "preserve production settings";
+            PreserveProductionSettings(profile, stage);
+            deployment.IisStage("BACKUP", "PASS");
+        }
+        catch (Exception ex)
+        {
+            // A partial IIS STOP may already have changed service state.
+            // Recover with an uncancelled token; never leave IIS offline just
+            // because backup/copy failed before the hosted files were replaced.
+            try { await deployment.CleanupFailedDeploymentAsync(profile, null, previousSitePath, CancellationToken.None); }
+            catch (Exception recoveryEx)
+            {
+                throw new CliFailure(7, "Pre-activation " + preparationPhase + " failed: " + ex.Message
+                    + "; original IIS state recovery failed: " + recoveryEx.Message);
+            }
+            throw new CliFailure(preparationPhase == "backup" ? 4 : 5,
+                "Pre-activation " + preparationPhase + " failed: " + ex.Message
+                + "; original IIS states restored if mutated (HTTP health not verified).");
+        }
         string target = "";
         try
         {

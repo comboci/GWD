@@ -17,8 +17,14 @@ public sealed partial class DiagnosticsCenterForm : Form
     private readonly Dictionary<TabPage, DiagnosticExportSection> _sectionByTab = new();
     private readonly Dictionary<TabPage, Func<TabPage>> _lazyTabs = new();
     private bool _materializingTab;
-    private readonly List<Button> _exportButtons = new();
-    private readonly Button _cancelExport = new() { Text = "Cancel Export", Width = 126, Height = 34, Enabled = false };
+    private readonly List<ToolStripMenuItem> _exportCommands = new();
+    private readonly ToolStripMenuItem _cancelExport = new("Cancel Export") { Enabled = false };
+    private readonly ToolStripMenuItem _qualityExportMenu = new("Code Quality") { Enabled = false };
+    private readonly ToolStripMenuItem _refreshSelectedMenu = new("Refresh Selected Tab") { Enabled = false };
+    private readonly Dictionary<TabPage, Func<Task>> _tabRefreshActions = new();
+    private readonly Dictionary<TabPage, Func<bool>> _tabRefreshAvailable = new();
+    private readonly Dictionary<TabPage, Action<string>> _qualityExportActions = new();
+    private readonly Dictionary<TabPage, Func<bool>> _qualityExportAvailable = new();
     private readonly Label _exportStatus = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 0, 0), Text = "Export idle." };
     private CancellationTokenSource? _exportCts;
     private int _exportGeneration;
@@ -40,19 +46,38 @@ public sealed partial class DiagnosticsCenterForm : Form
         KeyPreview = true;
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); } };
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2 };
+        // Executable operations live in the categorized top menu; the body
+        // displays status, history, filters and navigation without duplicate buttons.
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3 };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(10, 8, 10, 6), WrapContents = true };
-        var exportTab = new Button { Text = "Current Tab → Desktop", Width = 165, Height = 34 };
-        var exportTabOther = new Button { Text = "Current Tab → Other...", Width = 170, Height = 34 };
-        var exportAll = new Button { Text = "All Diagnostics → Desktop", Width = 180, Height = 34 };
-        var exportAllOther = new Button { Text = "All Diagnostics → Other...", Width = 185, Height = 34 };
+        var menu = new MenuStrip { Dock = DockStyle.Fill };
+        var fileMenu = new ToolStripMenuItem("&File");
+        var exportMenu = new ToolStripMenuItem("&Export");
+        var currentTabMenu = new ToolStripMenuItem("Current Tab");
+        var allDiagnosticsMenu = new ToolStripMenuItem("All Diagnostics");
+        var exportTab = new ToolStripMenuItem("To Desktop");
+        var exportTabOther = new ToolStripMenuItem("Choose Location...");
+        var exportAll = new ToolStripMenuItem("To Desktop");
+        var exportAllOther = new ToolStripMenuItem("Choose Location...");
         exportTab.Click += async (_, _) => await ExportCurrentTabAsync(toDesktop: true);
         exportTabOther.Click += async (_, _) => await ExportCurrentTabAsync(toDesktop: false);
         exportAll.Click += async (_, _) => await ExportSectionAsync(DiagnosticExportSection.All, toDesktop: true);
         exportAllOther.Click += async (_, _) => await ExportSectionAsync(DiagnosticExportSection.All, toDesktop: false);
-        _exportButtons.AddRange(new[] { exportTab, exportTabOther, exportAll, exportAllOther });
+        exportTab.ShortcutKeys = Keys.Control | Keys.Shift | Keys.E;
+        _exportCommands.AddRange(new[] { exportTab, exportTabOther, exportAll, exportAllOther });
+        currentTabMenu.DropDownItems.AddRange(new ToolStripItem[] { exportTab, exportTabOther });
+        allDiagnosticsMenu.DropDownItems.AddRange(new ToolStripItem[] { exportAll, exportAllOther });
+
+        var qualityJson = new ToolStripMenuItem("Export Selected Build as JSON");
+        var qualityMarkdown = new ToolStripMenuItem("Export Selected Build as Markdown");
+        var qualityHandoff = new ToolStripMenuItem("Copy Development Handoff");
+        qualityJson.Click += (_, _) => ExportSelectedCodeQuality("JSON");
+        qualityMarkdown.Click += (_, _) => ExportSelectedCodeQuality("Markdown");
+        qualityHandoff.Click += (_, _) => ExportSelectedCodeQuality("Copy Development Handoff");
+        _qualityExportMenu.DropDownItems.AddRange(new ToolStripItem[] { qualityJson, qualityMarkdown, qualityHandoff });
+
         _cancelExport.Click += (_, _) =>
         {
             if (!_exportBusy || _exportCts is null || _exportCts.IsCancellationRequested) return;
@@ -60,20 +85,32 @@ public sealed partial class DiagnosticsCenterForm : Form
             _cancelExport.Enabled = false;
             _exportStatus.Text = "Cancelling export; previous ZIP remains unchanged...";
         };
-        toolbar.Controls.Add(exportTab);
-        toolbar.Controls.Add(exportTabOther);
-        toolbar.Controls.Add(exportAll);
-        toolbar.Controls.Add(exportAllOther);
-        toolbar.Controls.Add(_cancelExport);
-        toolbar.Controls.Add(_exportStatus);
-        toolbar.Controls.Add(new Label
+        exportMenu.DropDownItems.AddRange(new ToolStripItem[]
         {
-            Text = "Exports are actual ZIP files. Desktop is the one-click default; Other Location opens a file-save dialog.",
-            AutoSize = true,
-            ForeColor = Color.DimGray,
-            Padding = new Padding(12, 8, 0, 0)
+            currentTabMenu, allDiagnosticsMenu, _qualityExportMenu,
+            new ToolStripSeparator(), _cancelExport
         });
-        root.Controls.Add(toolbar, 0, 0);
+        fileMenu.DropDownItems.Add(exportMenu);
+        fileMenu.DropDownItems.Add(new ToolStripSeparator());
+        fileMenu.DropDownItems.Add(new ToolStripMenuItem("Close", null, (_, _) => Close()));
+        menu.Items.Add(fileMenu);
+
+        var viewMenu = new ToolStripMenuItem("&View");
+        _refreshSelectedMenu.ShortcutKeys = Keys.Control | Keys.R;
+        _refreshSelectedMenu.Click += async (_, _) => await RefreshSelectedTabAsync();
+        viewMenu.DropDownItems.Add(_refreshSelectedMenu);
+        menu.Items.Add(viewMenu);
+        MainMenuStrip = menu;
+        root.Controls.Add(menu, 0, 0);
+
+        var statusBar = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(12, 4, 8, 5), WrapContents = false };
+        statusBar.Controls.Add(_exportStatus);
+        statusBar.Controls.Add(new Label
+        {
+            Text = "Use File → Export for ZIP and Code Quality outputs; View → Refresh for the selected tab.",
+            AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 0, 0)
+        });
+        root.Controls.Add(statusBar, 0, 1);
 
         // The initial History tab only constructs controls. Its disk scan starts
         // after Shown; other tabs do not touch logs/diagnostics until selected.
@@ -85,14 +122,51 @@ public sealed partial class DiagnosticsCenterForm : Form
         AddLazyTab("Build Performance", CreatePerformanceTab, DiagnosticExportSection.BuildPerformance);
         AddLazyTab("CPU / Memory", CreateRuntimeResourcesTab, DiagnosticExportSection.RuntimeResources);
         AddLazyTab("Internal Diagnostics", () => CreateFilesTab("Internal Diagnostics", _appData.InternalDiagnosticsFolder, "*.log"), DiagnosticExportSection.InternalDiagnostics);
-        _tabs.SelectedIndexChanged += (_, _) => MaterializeSelectedTab();
+        _tabs.SelectedIndexChanged += (_, _) =>
+        {
+            MaterializeSelectedTab();
+            UpdateActionMenuState();
+        };
 
-        root.Controls.Add(_tabs, 0, 1);
+        root.Controls.Add(_tabs, 0, 2);
         Controls.Add(root);
+        UpdateActionMenuState();
         // Closing the dialog stops further progress callbacks and requests
         // cancellation; the worker disposes its temporary ZIP in its own finally.
         FormClosing += (_, _) => { _exportGeneration++; _exportCts?.Cancel(); };
         FormClosed += (_, _) => { _metricsTimer.Stop(); _metricsTimer.Dispose(); };
+    }
+
+    private void UpdateActionMenuState()
+    {
+        if (IsDisposed || Disposing) return;
+        var selected = _tabs.SelectedTab;
+        _refreshSelectedMenu.Enabled = !_exportBusy && selected is not null &&
+            _tabRefreshActions.ContainsKey(selected) &&
+            (!_tabRefreshAvailable.TryGetValue(selected, out var ready) || ready());
+        _qualityExportMenu.Enabled = !_exportBusy && selected is not null &&
+            _qualityExportActions.ContainsKey(selected) &&
+            _qualityExportAvailable.TryGetValue(selected, out var canExport) && canExport();
+    }
+
+    private async Task RefreshSelectedTabAsync()
+    {
+        var selected = _tabs.SelectedTab;
+        if (_exportBusy || selected is null ||
+            !_tabRefreshActions.TryGetValue(selected, out var refresh) ||
+            (_tabRefreshAvailable.TryGetValue(selected, out var ready) && !ready()))
+            return;
+        await refresh();
+    }
+
+    private void ExportSelectedCodeQuality(string format)
+    {
+        var selected = _tabs.SelectedTab;
+        if (_exportBusy || selected is null ||
+            !_qualityExportActions.TryGetValue(selected, out var export) ||
+            !_qualityExportAvailable.TryGetValue(selected, out var allowed) || !allowed())
+            return;
+        export(format);
     }
 
     private void AddTab(TabPage tab, DiagnosticExportSection section)
@@ -163,11 +237,9 @@ public sealed partial class DiagnosticsCenterForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 58));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         var projects = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 520 };
-        var refresh = new Button { Text = "Refresh", AutoSize = true };
         var header = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
         header.Controls.Add(new Label { Text = "Project", AutoSize = true, Padding = new Padding(0, 7, 8, 0) });
         header.Controls.Add(projects);
-        header.Controls.Add(refresh);
         root.Controls.Add(header, 0, 0);
 
         var summary = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill, Font = new Font("Consolas", 9F), Text = "Loading deployment history..." };
@@ -195,6 +267,7 @@ public sealed partial class DiagnosticsCenterForm : Form
         var page = 0;
         var generation = 0;
         var selectingProjects = false;
+        var loadingProjects = false;
         var previous = new Button { Text = "Previous", AutoSize = true, Enabled = false };
         var next = new Button { Text = "Next", AutoSize = true, Enabled = false };
         var pageInfo = new Label { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 7, 0, 0), Text = "Loading..." };
@@ -266,8 +339,10 @@ public sealed partial class DiagnosticsCenterForm : Form
 
         async Task LoadProjectsAsync()
         {
+            if (loadingProjects) return;
+            loadingProjects = true;
+            UpdateActionMenuState();
             var requested = ++generation;
-            refresh.Enabled = false;
             pageInfo.Text = "Loading projects...";
             var selectedId = (projects.SelectedItem as ProjectChoice)?.ProjectId;
             try
@@ -303,7 +378,8 @@ public sealed partial class DiagnosticsCenterForm : Form
             }
             finally
             {
-                if (!IsDisposed && !Disposing && !tab.IsDisposed) refresh.Enabled = true;
+                loadingProjects = false;
+                if (!IsDisposed && !Disposing && !tab.IsDisposed) UpdateActionMenuState();
             }
         }
 
@@ -311,10 +387,16 @@ public sealed partial class DiagnosticsCenterForm : Form
         {
             if (!selectingProjects) await LoadProjectAsync();
         };
-        refresh.Click += async (_, _) => await LoadProjectsAsync();
+        _tabRefreshActions[tab] = LoadProjectsAsync;
+        _tabRefreshAvailable[tab] = () => !loadingProjects;
         previous.Click += (_, _) => { if (page > 0) { page--; RenderPage(); } };
         next.Click += (_, _) => { if ((page + 1) * pageSize < records.Length) { page++; RenderPage(); } };
-        tab.Disposed += (_, _) => generation++;
+        tab.Disposed += (_, _) =>
+        {
+            generation++;
+            _tabRefreshActions.Remove(tab);
+            _tabRefreshAvailable.Remove(tab);
+        };
         Shown += async (_, _) => { if (!tab.IsDisposed) await LoadProjectsAsync(); };
         tab.Controls.Add(root);
         return tab;
@@ -413,9 +495,10 @@ public sealed partial class DiagnosticsCenterForm : Form
     private void SetExportBusy(bool busy)
     {
         _exportBusy = busy;
-        foreach (var button in _exportButtons)
-            if (!button.IsDisposed) button.Enabled = !busy;
+        foreach (var command in _exportCommands)
+            if (!command.IsDisposed) command.Enabled = !busy;
         if (!_cancelExport.IsDisposed) _cancelExport.Enabled = busy;
+        UpdateActionMenuState();
     }
 
     private async Task ExportSectionAsync(DiagnosticExportSection section, bool toDesktop)

@@ -17,8 +17,7 @@ public sealed partial class DiagnosticsCenterForm
         var builds = new ComboBox { Width = 440, DropDownStyle = ComboBoxStyle.DropDownList };
         var counters = new Label { AutoSize = true, Padding = new Padding(4, 6, 4, 0) };
         bar.Controls.Add(counters);
-        var refresh = new Button { Text = "Refresh", AutoSize = true };
-        bar.Controls.Add(builds); bar.Controls.Add(refresh);
+        bar.Controls.Add(builds);
         var filters = new[] { "Project", "Tool", "Severity", "Code" }.Select(name => new TextBox { Width = 120, PlaceholderText = name + " filter" }).ToArray();
         foreach (var filter in filters) bar.Controls.Add(filter);
         var previous = new Button { Text = "Previous", AutoSize = true, Enabled = false };
@@ -36,6 +35,7 @@ public sealed partial class DiagnosticsCenterForm
         var generation = 0;
         var filtered = Array.Empty<Issue>();
         var selectingBuild = false;
+        var loadingBuilds = false;
         var filterDelay = new System.Windows.Forms.Timer { Interval = 250 };
 
         void RenderPage()
@@ -79,9 +79,11 @@ public sealed partial class DiagnosticsCenterForm
 
         async Task LoadBuildsAsync()
         {
+            if (loadingBuilds) return;
+            loadingBuilds = true;
+            UpdateActionMenuState();
             var requested = ++generation;
             var selectedId = Selected()?.BuildId;
-            refresh.Enabled = false;
             summary.Text = "Loading Code Quality records...";
             try
             {
@@ -117,7 +119,8 @@ public sealed partial class DiagnosticsCenterForm
             }
             finally
             {
-                if (!IsDisposed && !Disposing && !tab.IsDisposed) refresh.Enabled = true;
+                loadingBuilds = false;
+                if (!IsDisposed && !Disposing && !tab.IsDisposed) UpdateActionMenuState();
             }
         }
 
@@ -138,30 +141,43 @@ public sealed partial class DiagnosticsCenterForm
             detail.Text = $"{d.Code} | Risk: {d.Risk} | {d.File}:{d.Line}\r\n{d.Message}\r\n\r\nSuggested fix: {d.Remedy}\r\n\r\n" +
                 string.Join("\r\n", issue.Occurrences.Select(o => $"{o.At:u} | stage {o.StageId} | {o.Tool} | {o.Stream}\r\n" + string.Join("\r\n", o.Context)));
         };
-        builds.SelectedIndexChanged += (_, _) => { if (!selectingBuild) UpdateSelectedBuild(); };
+        builds.SelectedIndexChanged += (_, _) =>
+        {
+            if (!selectingBuild) UpdateSelectedBuild();
+            UpdateActionMenuState();
+        };
         foreach (var filter in filters)
             filter.TextChanged += (_, _) => { filterDelay.Stop(); filterDelay.Start(); };
         filterDelay.Tick += (_, _) => { filterDelay.Stop(); Filter(); };
         previous.Click += (_, _) => { if (page > 0) { page--; RenderPage(); } };
         next.Click += (_, _) => { if ((page + 1) * pageSize < filtered.Length) { page++; RenderPage(); } };
-        refresh.Click += async (_, _) => await LoadBuildsAsync();
-        foreach (var format in new[] { "JSON", "Markdown", "Copy Development Handoff" })
+        void ExportSelectedBuild(string format)
         {
-            var button = new Button { Text = format, AutoSize = true };
-            button.Click += (_, _) =>
+            if (Selected() is not { } build) return;
+            try
             {
-                if (Selected() is not { } build) return;
-                try
-                {
-                    if (format.StartsWith("Copy")) { Clipboard.SetText(SecretRedactor.Redact(DiagnosticExport.Handoff(build))); return; }
-                    using var dialog = new SaveFileDialog { Filter = format == "JSON" ? "JSON|*.json" : "Markdown|*.md", FileName = "code-quality-" + build.BuildId, AddExtension = true };
-                    if (dialog.ShowDialog(this) == DialogResult.OK) File.WriteAllText(dialog.FileName, SecretRedactor.Redact(format == "JSON" ? DiagnosticExport.Json(build) : DiagnosticExport.Markdown(build)));
-                }
-                catch (Exception ex) { InternalDiagnostics.Record(ex, "Code Quality export"); MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Export failed"); }
-            };
-            bar.Controls.Add(button);
+                if (format.StartsWith("Copy")) { Clipboard.SetText(SecretRedactor.Redact(DiagnosticExport.Handoff(build))); return; }
+                using var dialog = new SaveFileDialog { Filter = format == "JSON" ? "JSON|*.json" : "Markdown|*.md", FileName = "code-quality-" + build.BuildId, AddExtension = true };
+                if (dialog.ShowDialog(this) == DialogResult.OK) File.WriteAllText(dialog.FileName, SecretRedactor.Redact(format == "JSON" ? DiagnosticExport.Json(build) : DiagnosticExport.Markdown(build)));
+            }
+            catch (Exception ex) { InternalDiagnostics.Record(ex, "Code Quality export"); MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Export failed"); }
         }
-        tab.Disposed += (_, _) => { generation++; filterDelay.Stop(); filterDelay.Dispose(); };
+        // Register contextual actions only after this tab is materialized.
+        // All exports still use the selected Build and their original handlers.
+        _tabRefreshActions[tab] = LoadBuildsAsync;
+        _tabRefreshAvailable[tab] = () => !loadingBuilds;
+        _qualityExportActions[tab] = ExportSelectedBuild;
+        _qualityExportAvailable[tab] = () => !loadingBuilds && Selected() is not null;
+        tab.Disposed += (_, _) =>
+        {
+            generation++;
+            filterDelay.Stop();
+            filterDelay.Dispose();
+            _tabRefreshActions.Remove(tab);
+            _tabRefreshAvailable.Remove(tab);
+            _qualityExportActions.Remove(tab);
+            _qualityExportAvailable.Remove(tab);
+        };
         root.Controls.Add(bar, 0, 0); root.Controls.Add(summary, 0, 1); root.Controls.Add(grid, 0, 2); root.Controls.Add(detail, 0, 3);
         tab.Controls.Add(root);
         _ = LoadBuildsAsync(); // Starts asynchronously after selection, not in the Diagnostics constructor.

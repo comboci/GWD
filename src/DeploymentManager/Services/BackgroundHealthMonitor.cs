@@ -13,6 +13,7 @@ public sealed class BackgroundHealthMonitor : IDisposable
     private readonly CancellationTokenSource _cts = new();
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(8) };
     private Task? _loop;
+    private readonly HashSet<Task> _refreshes = new();
     private readonly object _lifecycleLock = new();
     private bool _disposed;
     public HealthSnapshot? Latest { get; private set; }
@@ -26,7 +27,22 @@ public sealed class BackgroundHealthMonitor : IDisposable
             _loop ??= Task.Run(LoopAsync);
         }
     }
-    public async Task RefreshNowAsync(CancellationToken ct=default) => await CheckAsync(ct);
+    public Task RefreshNowAsync(CancellationToken ct = default)
+    {
+        lock (_lifecycleLock)
+        {
+            if (_disposed) return Task.CompletedTask;
+            // Register before releasing the lock so Dispose cannot free HTTP
+            // resources while an on-demand refresh is still running.
+            var refresh = Task.Run(() => CheckAsync(ct), ct);
+            _refreshes.Add(refresh);
+            _ = refresh.ContinueWith(completed =>
+            {
+                lock (_lifecycleLock) _refreshes.Remove(completed);
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            return refresh;
+        }
+    }
     public bool HasRecentSuccessfulSql(TimeSpan maxAge) => _sql.Connections.HasRecentSuccessfulSql(_profile, maxAge);
     public void ReportSqlSuccess(string detail)
     {
@@ -100,7 +116,7 @@ public sealed class BackgroundHealthMonitor : IDisposable
             if (_disposed) return;
             _disposed = true;
             _cts.Cancel();
-            running = _loop;
+            running = Task.WhenAll(_refreshes.Append(_loop ?? Task.CompletedTask));
         }
 
         // Do not release the cancellation source or HTTP client while the loop uses them.

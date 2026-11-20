@@ -1166,56 +1166,129 @@ public sealed class WizardForm : Form
             return excluded.Any(x => rel.Contains(x, StringComparison.OrdinalIgnoreCase));
         }
 
+        // Only one source preflight may publish results for the current page.
+        // Cancellation does not interrupt every filesystem API, but it prevents stale
+        // results from being applied after a source/mode change or page disposal.
+        CancellationTokenSource? sourcePreflightCts = null;
+        var sourcePreflightGeneration = 0;
+
+        void CancelSourcePreflight()
+        {
+            sourcePreflightGeneration++;
+            sourcePreflightCts?.Cancel();
+        }
+
+        sourceTestResult.Disposed += (_, _) => CancelSourcePreflight();
+
         void RunSourceTests()
         {
+            CancelSourcePreflight();
+            var request = new CancellationTokenSource();
+            sourcePreflightCts = request;
+            var generation = sourcePreflightGeneration;
+            var selectedMode = _profile.BuildMode;
+            var selectedSource = source.Text.Trim();
+            var selectedPrepared = preparedPublish.Text.Trim();
             sourceTestResult.Text = "Running source preflight tests...";
             sourceTestResult.ForeColor = Color.RoyalBlue;
-            Application.DoEvents();
+            _ = RunSourceTestsAsync(request, generation, selectedMode, selectedSource, selectedPrepared);
+        }
+
+        async Task RunSourceTestsAsync(CancellationTokenSource request, int generation, string mode, string selectedSource, string selectedPrepared)
+        {
+            try
+            {
+                // Coalesce consecutive programmatic TextChanged events and large-folder selections.
+                await Task.Delay(200, request.Token);
+                // Worker code never reads or writes WinForms controls or mutable profile fields.
+                var result = await Task.Run(
+                    () => InspectSourcePreflight(_environment, mode, selectedSource, selectedPrepared, request.Token),
+                    request.Token);
+                if (request.IsCancellationRequested || generation != sourcePreflightGeneration ||
+                    IsDisposed || Disposing || sourceTestResult.IsDisposed || _pageIndex != 0 ||
+                    !string.Equals(mode, _profile.BuildMode, StringComparison.Ordinal) ||
+                    !string.Equals(selectedSource, source.Text.Trim(), StringComparison.Ordinal) ||
+                    (string.Equals(mode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase) &&
+                     !string.Equals(selectedPrepared, preparedPublish.Text.Trim(), StringComparison.Ordinal)))
+                    return;
+
+                sourceTestResult.Text = string.Join(Environment.NewLine, result.Lines);
+                sourceTestResult.ForeColor = result.Failures == 0 ? Color.ForestGreen : Color.Firebrick;
+                if (string.Equals(mode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
+                    RefreshPreparedPublishValidation();
+                else
+                    AppendLog($"Source preflight completed: {Math.Max(0, result.Lines.Length - result.Failures)} passed, {result.Failures} failed.");
+            }
+            catch (OperationCanceledException) when (request.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                InternalDiagnostics.Record(ex, "Source preflight background task");
+                if (!request.IsCancellationRequested && generation == sourcePreflightGeneration &&
+                    !IsDisposed && !Disposing && !sourceTestResult.IsDisposed && _pageIndex == 0)
+                {
+                    sourceTestResult.Text = "FAIL — " + SecretRedactor.Redact(ex.Message);
+                    sourceTestResult.ForeColor = Color.Firebrick;
+                }
+            }
+            finally
+            {
+                if (ReferenceEquals(sourcePreflightCts, request)) sourcePreflightCts = null;
+                request.Dispose();
+            }
+        }
+
+        static (string[] Lines, int Failures) InspectSourcePreflight(
+            EnvironmentService environment, string mode, string selectedSource, string selectedPrepared, CancellationToken ct)
+        {
             var lines = new List<string>();
             var failures = 0;
             try
             {
-                if (string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
+                ct.ThrowIfCancellationRequested();
+                if (string.Equals(mode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
                 {
-                    var validation = DeploymentService.ValidatePreparedPublish(preparedPublish.Text.Trim());
+                    var validation = DeploymentService.ValidatePreparedPublish(selectedPrepared);
+                    ct.ThrowIfCancellationRequested();
                     lines.Add(validation.Ok ? "PASS — " + validation.Detail : "FAIL — " + validation.Detail);
                     if (!validation.Ok) failures++;
-                    sourceTestResult.Text = string.Join(Environment.NewLine, lines);
-                    sourceTestResult.ForeColor = failures == 0 ? Color.ForestGreen : Color.Firebrick;
-                    RefreshPreparedPublishValidation();
-                    return;
+                    return (lines.ToArray(), failures);
                 }
-                var selectedSource = source.Text.Trim();
-                if (!Directory.Exists(selectedSource)) throw new DirectoryNotFoundException("Select an existing source folder first.");
-                var api = _environment.DetectApiProject(selectedSource);
+                if (!Directory.Exists(selectedSource))
+                    throw new DirectoryNotFoundException("Select an existing source folder first.");
+                var api = environment.DetectApiProject(selectedSource);
+                ct.ThrowIfCancellationRequested();
                 var structureOk = !string.IsNullOrWhiteSpace(api);
                 lines.Add($"{(structureOk ? "PASS" : "FAIL")} — Web project structure: {(structureOk ? api : "ASP.NET Core Web .csproj not found")}");
                 if (!structureOk) failures++;
                 var frameworkOk = structureOk && File.Exists(api);
-                var major = frameworkOk ? _environment.DetectTargetFrameworkMajor(api!) : 0;
+                var major = frameworkOk ? environment.DetectTargetFrameworkMajor(api!) : 0;
                 lines.Add($"{(frameworkOk ? "PASS" : "FAIL")} — Target framework: {(frameworkOk ? ".NET " + major : "cannot detect without Web project")}");
                 if (!frameworkOk) failures++;
-                var required = _environment.DetectNodeRequirement(selectedSource, api ?? string.Empty);
+                ct.ThrowIfCancellationRequested();
+                var required = environment.DetectNodeRequirement(selectedSource, api ?? string.Empty);
                 var packages = Directory.EnumerateFiles(selectedSource, "package.json", SearchOption.AllDirectories)
-                    .Where(p => !IsGeneratedFrontendCandidate(selectedSource, p)).Take(10).ToArray();
+                    .Where(p => { ct.ThrowIfCancellationRequested(); return !IsGeneratedFrontendCandidate(selectedSource, p); })
+                    .Take(10).ToArray();
                 var viteRoots = packages.Select(Path.GetDirectoryName).Where(p => !string.IsNullOrWhiteSpace(p))
-                    .Where(p => File.Exists(Path.Combine(p!, "index.html")) && Directory.EnumerateFiles(p!, "vite.config.*", SearchOption.TopDirectoryOnly).Any())
+                    .Where(p => File.Exists(Path.Combine(p!, "index.html")) &&
+                        Directory.EnumerateFiles(p!, "vite.config.*", SearchOption.TopDirectoryOnly).Any())
                     .ToArray();
+                ct.ThrowIfCancellationRequested();
                 lines.Add($"PASS — Frontend / Node assets: {(required ? "detected" : "not required")} ({packages.Length} source package.json candidate(s))");
                 if (required && viteRoots.Length > 0) lines.Add($"PASS — Frontend root: {viteRoots[0]}");
                 else if (required) { lines.Add("FAIL — Frontend detected but no complete source frontend root (index.html + vite.config.*) was found."); failures++; }
                 _ = Directory.EnumerateFileSystemEntries(selectedSource, "*", SearchOption.TopDirectoryOnly).Take(1).ToArray();
+                ct.ThrowIfCancellationRequested();
                 lines.Add("PASS — Source access/readability");
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception ex)
             {
                 failures++;
                 InternalDiagnostics.Record(ex, "Source preflight tests");
-                lines.Add("FAIL — " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message));
+                lines.Add("FAIL — " + SecretRedactor.Redact(ex.Message));
             }
-            sourceTestResult.Text = string.Join(Environment.NewLine, lines);
-            sourceTestResult.ForeColor = failures == 0 ? Color.ForestGreen : Color.Firebrick;
-            AppendLog($"Source preflight completed: {Math.Max(0, lines.Count - failures)} passed, {failures} failed.");
+            return (lines.ToArray(), failures);
         }
 
         void ApplyDependencyMode()
@@ -1326,7 +1399,7 @@ public sealed class WizardForm : Form
                 try { await Task.Delay(250, token); if (!token.IsCancellationRequested) await RunBackgroundAutoVerificationAsync(token); }
                 catch (OperationCanceledException) { }
             }
-            else { sourceTestResult.Text = "Waiting for a valid source folder..."; sourceTestResult.ForeColor = Color.DimGray; }
+            else { CancelSourcePreflight(); sourceTestResult.Text = "Waiting for a valid source folder..."; sourceTestResult.ForeColor = Color.DimGray; }
         };
         repository.TextChanged += (_, _) =>
         {
@@ -1353,7 +1426,7 @@ public sealed class WizardForm : Form
             "Prepared IIS Publish" => "Direct deploy of an already-built IIS publish. npm, frontend build, dotnet restore/build/publish and dependency sync are bypassed.",
             _ => "Uses the selected prepared-source/publish workflow."
         };
-        buildMode.SelectedIndexChanged += (_, _) => { _profile.BuildMode = buildMode.SelectedItem?.ToString() ?? "Fast Local Test"; RefreshModeMeaning(); ApplyDependencyMode(); if (_profile.BuildMode == "Prepared IIS Publish") CommitAndValidatePreparedPublish(); else { RefreshPreparedPublishValidation(); UpdateNavigationState(); } };
+        buildMode.SelectedIndexChanged += (_, _) => { _profile.BuildMode = buildMode.SelectedItem?.ToString() ?? "Fast Local Test"; RefreshModeMeaning(); ApplyDependencyMode(); if (_profile.BuildMode == "Prepared IIS Publish") CommitAndValidatePreparedPublish(); else { RefreshPreparedPublishValidation(); UpdateNavigationState(); RunSourceTests(); } };
         dependencyMode.SelectedIndexChanged += (_, _) => ApplyDependencyMode();
         RefreshModeMeaning();
         RefreshPreparedPublishValidation();
@@ -1427,7 +1500,13 @@ public sealed class WizardForm : Form
         RefreshModeMeaning();
         ApplyDependencyMode();
         Detect();
-        if (Directory.Exists(source.Text.Trim())) RunSourceTests();
+        if (Directory.Exists(source.Text.Trim()) || string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
+        {
+            // Defer the first asynchronous preflight until the form has a UI
+            // message pump; later page visits already have a window handle.
+            if (IsHandleCreated) RunSourceTests();
+            else Shown += (_, _) => { if (!sourceTestResult.IsDisposed) RunSourceTests(); };
+        }
     }
 
     private void BuildTargetPage()

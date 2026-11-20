@@ -24,6 +24,7 @@ public sealed class DeploymentHistoryForm : Form
     private readonly Label _status = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 8, 0) };
     private IReadOnlyList<DeploymentHistoryRecord> _currentAttempts = Array.Empty<DeploymentHistoryRecord>();
     private readonly HashSet<string> _expandedAttemptIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Font _boldAttemptFont;
 
     public DeploymentHistoryForm(DeploymentHistoryService history, string? preferredProjectId = null, DeploymentProfile? profile = null, string? currentLog = null)
     {
@@ -42,6 +43,8 @@ public sealed class DeploymentHistoryForm : Form
         Font = new Font("Segoe UI", 9.5F);
 
         BuildUi();
+        // The grid is parented now and has inherited the form's DPI-aware font.
+        _boldAttemptFont = new Font(_grid.Font, FontStyle.Bold);
         LoadProjects();
     }
 
@@ -179,7 +182,7 @@ public sealed class DeploymentHistoryForm : Form
                 performance?.DependencyMode ?? (attempt.OfflineBuild ? "Offline Only" : "—"), attempt.DeploymentTargetPath);
             var parent = _grid.Rows[index];
             parent.Tag = attempt;
-            parent.DefaultCellStyle.Font = new Font(_grid.Font, FontStyle.Bold);
+            parent.DefaultCellStyle.Font = _boldAttemptFont;
             if (!expanded || performance is null) continue;
 
             foreach (var stage in performance.Stages)
@@ -259,7 +262,19 @@ public sealed class DeploymentHistoryForm : Form
             MessageBox.Show(this, "The session log no longer exists at:\r\n" + row.SessionLog, "Session log not found", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        new LogForm(row.SessionLog).ShowDialog(this);
+        // Modal WinForms dialogs are not automatically disposed by ShowDialog.
+        using var viewer = new LogForm(row.SessionLog);
+        viewer.ShowDialog(this);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        try { base.Dispose(disposing); }
+        finally
+        {
+            // Grid rows share this font; dispose after the grid itself.
+            if (disposing) _boldAttemptFont?.Dispose();
+        }
     }
 
     private static void OpenTarget(string target)

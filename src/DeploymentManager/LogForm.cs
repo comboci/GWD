@@ -6,6 +6,9 @@ public sealed class LogForm : Form
 {
     private const int MaxUiChars = 1_000_000;
     private readonly RichTextBox _box = new() { ReadOnly=true, ScrollBars=RichTextBoxScrollBars.Both, WordWrap=false, Dock=DockStyle.Fill, Font=new Font("Consolas",9.5F), BackColor=Color.White };
+    // Reuse one bold font for all appended lines, rather than allocating a
+    // native GDI font per line (and again on each log refresh).
+    private readonly Font _boldLogFont;
     private readonly string _logFile;
     private long _offset;
     private bool _followLatest = true;
@@ -13,6 +16,7 @@ public sealed class LogForm : Form
     public LogForm(string logFile)
     {
         _logFile = logFile;
+        _boldLogFont = new Font(_box.Font, FontStyle.Bold);
         Text="Deployment Manager — View Log"; Width=1100; Height=720; StartPosition=FormStartPosition.CenterParent;
         KeyPreview = true;
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); } };
@@ -53,7 +57,7 @@ public sealed class LogForm : Form
             else if (low.Contains("[cancel]")) color = Color.DarkOrange;
             _box.SelectionStart = _box.TextLength;
             _box.SelectionColor = color;
-            _box.SelectionFont = new Font(_box.Font, fontStyle);
+            _box.SelectionFont = fontStyle == FontStyle.Bold ? _boldLogFont : _box.Font;
             _box.AppendText(raw + Environment.NewLine);
         }
         _box.SelectionColor = _box.ForeColor;
@@ -90,6 +94,16 @@ public sealed class LogForm : Form
             if (_followLatest || initial) { _box.SelectionStart=_box.TextLength; _box.ScrollToCaret(); }
         }
         catch(Exception ex) { AppendColorized($"[Log viewer error] {ex.Message}"); }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        try { base.Dispose(disposing); }
+        finally
+        {
+            // Release the cached native resource after its RichTextBox is gone.
+            if (disposing) _boldLogFont?.Dispose();
+        }
     }
 
     private void DumpCurrentLog()

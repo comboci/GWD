@@ -2619,24 +2619,23 @@ public sealed class DeploymentService
         var marker = Path.Combine(publishFolder, ".deployment-incomplete");
         var success = Path.Combine(publishFolder, ".deployment-success");
         var pending = success + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        // Prepare the success record before removing the incomplete marker.
-        // Otherwise a failed write leaves neither marker and loses recovery state.
+        // Never clear the incomplete marker before the success record has been
+        // published. A crash between the two operations must leave at least the
+        // incomplete marker for manual recovery review.
         try
         {
-            File.WriteAllText(pending, DateTime.Now.ToString("O"));
+            using (var stream = new FileStream(pending, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                stream.Write(System.Text.Encoding.UTF8.GetBytes(DateTime.Now.ToString("O")));
+                stream.Flush(flushToDisk: true);
+            }
+            // Same-directory rename: publication precedes incomplete-marker cleanup.
+            File.Move(pending, success, overwrite: true);
             if (File.Exists(marker))
             {
                 File.Delete(marker);
                 if (File.Exists(marker))
                     throw new IOException("Deployment completion marker could not be cleared: " + marker);
-            }
-            try { File.Move(pending, success, overwrite: true); }
-            catch
-            {
-                // If publishing the success record fails, restore the unresolved state.
-                try { File.WriteAllText(marker, DateTime.Now.ToString("O")); }
-                catch (Exception recoveryEx) { try { InternalDiagnostics.Record(recoveryEx, "Restore incomplete marker after failed success record"); } catch { } }
-                throw;
             }
         }
         finally

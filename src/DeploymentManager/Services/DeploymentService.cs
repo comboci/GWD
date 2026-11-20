@@ -392,6 +392,8 @@ public sealed class DeploymentService
         }, "Creates a unique publish staging folder; other attempts and retained staging are preserved.");
         _runner.Report($"[DEPLOY] Building into staging folder: {output}");
         _runner.Report($"[BUILD] Build mode: {profile.BuildMode}");
+        if (string.Equals(profile.BuildMode, "Fast IIS Update", StringComparison.OrdinalIgnoreCase))
+            _runner.Report("[FAST][SAFETY] Hosted-release reuse and fingerprint-based build skips are DISABLED. Fresh frontend build (when required) and dotnet publish run before the normal IIS activation and recovery checks; persistent dependency caches remain available.");
         _runner.Report($"[BUILD] Dependency mode: {profile.DependencyResolutionMode}");
         _runner.Report($"[BUILD] Offline build: {(profile.OfflineBuild ? "ENABLED" : "DISABLED")}");
         ReportDependencyCheck(profile);
@@ -404,8 +406,10 @@ public sealed class DeploymentService
             return output;
         }
 
-        // Fast Build is the default deployment path. It uses the last successful hosted state as a trusted
-        // incremental baseline and keeps reusable package caches outside the source tree in Deployment Repository.
+        // Fast IIS Update currently uses the safe fresh-publish path. The hosted
+        // baseline/fingerprint skip optimizations below remain disabled until their
+        // release provenance and recovery behavior are independently proven.
+        // Persistent dependency caches do not imply reusing hosted binaries.
         SmartDeployState? fastCurrentState = null;
         SmartDeployState? fastPreviousState = null;
         var fastSkipFrontendBuild = false;

@@ -1535,7 +1535,7 @@ public sealed class WizardForm : Form
         void RefreshModeMeaning() => modeMeaning.Text = _profile.BuildMode switch
         {
             "Fast Local Test" => "Compile/test only. The IIS website is NOT updated, so the browser can still show the previously hosted version.",
-            "Fast IIS Update" => "Change-aware build plus IIS activation. Choose this to make the browser show the new source version quickly.",
+            "Fast IIS Update" => "IIS deployment with fresh frontend build (when needed) and dotnet publish. Hosted-release reuse and fingerprint-based build skips are disabled pending release/rollback safety verification; dependency caches may still be reused.",
             "Full IIS Deploy" => "Complete publish, IIS/database preparation, health check and rollback protection.",
             "Prepared IIS Publish" => "Direct deploy of an already-built IIS publish. npm, frontend build, dotnet restore/build/publish and dependency sync are bypassed.",
             _ => "Uses the selected prepared-source/publish workflow."
@@ -1712,7 +1712,9 @@ public sealed class WizardForm : Form
                     ? "Open/build the solution once in Visual Studio first. Deployment Manager skips dependency restore where possible, but still performs the final frontend build (if needed) and dotnet publish."
                     : _profile.BuildMode == "Fast Local Test"
                         ? "Fast Local Test performs only change-aware frontend and incremental backend builds. It does not run dotnet publish, stage files, modify IIS, or prepare rollback."
-                        : "Fast IIS Update reuses the last successful hosted binaries and persistent fingerprints. Full IIS Deploy forces the complete publish and IIS workflow.";
+                        : _profile.BuildMode == "Fast IIS Update"
+                            ? "Fast IIS Update currently runs a fresh frontend build (if required) and dotnet publish before IIS activation. Hosted-binary/fingerprint skip shortcuts are disabled until release and rollback integrity are proven."
+                            : "Full IIS Deploy creates a new publish and performs the complete IIS and database workflow.";
             }
             UpdateNavigationState();
         }
@@ -3067,7 +3069,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         }
         static string BuildModeHelp(int index) => index switch
         {
-            1 => "Change-aware IIS update: reuses trusted hosted output and skips unchanged build/dependency stages.",
+            1 => "Safe IIS update: fresh frontend build (if required) and dotnet publish. Hosted-output reuse and fingerprint-based build skips are disabled; IIS activation and recovery protections still apply.",
             2 => "Complete Release publish, IIS activation, database preparation, health check, and rollback protection.",
             _ => "Incremental local compile only. No dotnet publish, IIS activation, hosted-file changes, or rollback preparation."
         };

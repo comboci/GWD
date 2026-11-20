@@ -148,6 +148,33 @@ public sealed class EnvironmentService
         return list;
     }
 
+    // The background health monitor needs counts, not per-site bindings, paths,
+    // pool assignments or states. Fetch the same distinct names used by the
+    // detailed listing with exactly one read-only appcmd call per object type.
+    // Keep ListIisSitesAsync/ListIisAppPoolsAsync unchanged for management UI.
+    public async Task<(int Sites, int AppPools)> CountIisObjectsAsync(CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        var appcmd = AppCmdPath();
+        if (!File.Exists(appcmd)) return (0, 0);
+
+        async Task<int> CountDistinctNamesAsync(string arguments)
+        {
+            ct.ThrowIfCancellationRequested();
+            var result = await _runner.RunAsync(appcmd, arguments, ct: ct);
+            if (result.ExitCode != 0) return 0; // Match detailed-list behavior.
+            return result.Output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => x.Trim().Trim('"'))
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count();
+        }
+
+        var sites = await CountDistinctNamesAsync("list site /text:name");
+        var pools = await CountDistinctNamesAsync("list apppool /text:name");
+        return (sites, pools);
+    }
+
     public async Task StartIisAppPoolAsync(string name, CancellationToken ct = default)
         => await _runner.RunCheckedAsync(AppCmdPath(), $"start apppool /apppool.name:\"{EscapeArg(name)}\"", ct: ct);
 

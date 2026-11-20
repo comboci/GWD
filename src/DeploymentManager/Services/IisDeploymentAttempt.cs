@@ -68,22 +68,27 @@ public sealed class IisDeploymentAttempt : IDisposable
         _journal = Path.Combine(journalRoot, id + ".json");
         try
         {
+            // Acquire exclusive leases without truncating the previous owner's
+            // diagnostics. An unresolved attempt must not lose its lock evidence
+            // merely because another process tried to start deployment.
             foreach (var path in lockPaths)
             {
                 DeploymentPathSafety.Normalize(path);
                 var lease = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
                 _locks.Add(lease);
-                lease.SetLength(0);
-                var owner = Encoding.UTF8.GetBytes($"attempt={Id}; acquiredUtc={DateTime.UtcNow:O}; journal={_journal}");
-                lease.Write(owner);
-                lease.Flush(flushToDisk: true);
             }
-            // Check every resource: changing a profile name must not bypass a failed target.
+            // Fail closed when marker attributes are unreadable: File.Exists can
+            // silently return false for access-denied paths.
             foreach (var path in _unresolved)
             {
                 DeploymentPathSafety.Normalize(path);
-                if (File.Exists(path))
-                    throw new IOException("IIS_UNRESOLVED_ATTEMPT: review previous attempt, backup, IIS states and HTTP health before manually clearing " + path);
+                FileAttributes attributes;
+                try { attributes = File.GetAttributes(path); }
+                catch (FileNotFoundException) { continue; }
+                if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
+                    throw new IOException("IIS_UNRESOLVED_ATTEMPT: unsafe recovery marker; manual inspection required: " + path);
+                throw new IOException("IIS_UNRESOLVED_ATTEMPT: deployment blocked; inspect prior backup, IIS and HTTP before manual resolution. Marker: "
+                    + path + "; " + DescribeUnresolvedMarker(path, journalRoot));
             }
             if (contentRoot is not null)
             {
@@ -97,12 +102,59 @@ public sealed class IisDeploymentAttempt : IDisposable
                 if (Directory.Exists(target) && Directory.EnumerateFiles(target, "*.gwd.unresolved", SearchOption.AllDirectories).Any())
                     throw new IOException("Nested recovery marker blocks deployment: " + target);
             }
+            // Publish this attempt's lock identity only after all recovery
+            // markers have been checked. Existing lock contents are otherwise
+            // retained for forensic inspection after a crash/restart.
+            foreach (var lease in _locks)
+            {
+                lease.SetLength(0);
+                var owner = Encoding.UTF8.GetBytes($"attempt={Id}; acquiredUtc={DateTime.UtcNow:O}; journal={_journal}");
+                lease.Write(owner);
+                lease.Flush(flushToDisk: true);
+            }
             foreach (var stage in new[] { "PREFLIGHT", "BUILD", "BACKUP", "STOP", "FILE_DEPLOY", "CONFIGURE", "START", "HEALTH", "COMMIT" })
                 _states[stage] = "PENDING";
             Save();
         }
         catch { foreach (var item in _locks) item.Dispose(); throw; }
     }
+    // Diagnostic-only inspection: marker text is untrusted and never used to
+    // authorize deletion, rollback or any IIS mutation.
+    private static string DescribeUnresolvedMarker(string markerPath, string journalRoot)
+    {
+        try
+        {
+            var length = new FileInfo(markerPath).Length;
+            if (length is < 1 or > 128)
+                return "marker owner unreadable/invalid; journal state UNVERIFIED";
+            var ownerId = File.ReadAllText(markerPath).Trim();
+            if (!System.Text.RegularExpressions.Regex.IsMatch(ownerId, @"\A[A-Za-z0-9_-]{1,80}\z"))
+                return "marker owner invalid; journal state UNVERIFIED";
+            var journalPath = Path.Combine(journalRoot, ownerId + ".json");
+            if (!File.Exists(journalPath))
+                return $"attempt={ownerId}; journal={journalPath}; journal missing; state UNVERIFIED";
+            var info = new FileInfo(journalPath);
+            if ((info.Attributes & FileAttributes.ReparsePoint) != 0 || info.Length is < 2 or > 4_194_304)
+                return $"attempt={ownerId}; journal={journalPath}; journal unsafe/unreadable; state UNVERIFIED";
+            using var doc = JsonDocument.Parse(File.ReadAllText(journalPath));
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("AttemptId", out var value) ||
+                value.ValueKind != JsonValueKind.String ||
+                !string.Equals(value.GetString(), ownerId, StringComparison.Ordinal))
+                return $"attempt={ownerId}; journal={journalPath}; journal owner mismatch; state UNVERIFIED";
+            string Flag(string name) =>
+                root.TryGetProperty(name, out var flag) &&
+                (flag.ValueKind == JsonValueKind.True || flag.ValueKind == JsonValueKind.False)
+                    ? flag.GetBoolean().ToString().ToLowerInvariant() : "unknown";
+            return $"attempt={ownerId}; journal={journalPath}; resolved={Flag("Resolved")}; " +
+                   $"mutation_started={Flag("MutationStarted")}; files_changed={Flag("FilesChanged")}; MANUAL_REVIEW_REQUIRED";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or System.Security.SecurityException)
+        {
+            return "marker/journal inspection unavailable (" + ex.GetType().Name + "); MANUAL_REVIEW_REQUIRED";
+        }
+    }
+
     public void Stage(string stage, string state)
     {
         if (IsDisposed) return;

@@ -83,6 +83,7 @@ public sealed class WizardForm : Form
     private CancellationTokenSource? _backgroundVerifyCts;
     private int _preparedValidationGeneration;
     private string? _lastErrorReportPath;
+    private const string InterruptedDeploymentStatus = "PREVIOUS DEPLOYMENT INTERRUPTED — RECOVERY UNVERIFIED";
     private string _deploymentStatus = "Not started";
     private string? _lastSuccessfulPublishPath;
     private string _deploymentElapsedText = "Elapsed: 00:00:00";
@@ -99,7 +100,15 @@ public sealed class WizardForm : Form
     {
         _logService = new LogService(_appData);
         _persistentState = _appData.LoadState();
-        _deploymentStatus = _persistentState.LastResult == "RecoveryFailed" ? "PREVIOUS DEPLOYMENT — RECOVERY FAILED" : (_persistentState.LastResult == "Failed" ? "PREVIOUS DEPLOYMENT UNSUCCESSFUL" : (_persistentState.LastResult == "Successful" ? "PREVIOUS DEPLOYMENT SUCCESSFUL" : "Not started"));
+        _deploymentStatus = _persistentState.LastResult switch
+        {
+            "RecoveryFailed" => "PREVIOUS DEPLOYMENT — RECOVERY FAILED",
+            // A persisted InProgress result survives a crash and is not proof of a clean start.
+            "InProgress" => InterruptedDeploymentStatus,
+            "Failed" => "PREVIOUS DEPLOYMENT UNSUCCESSFUL",
+            "Successful" => "PREVIOUS DEPLOYMENT SUCCESSFUL",
+            _ => "Not started"
+        };
         _environment = new EnvironmentService(_runner);
         _prereq = new PrerequisiteService(_runner);
         _sql = new SqlServerService(_runner, _prereq);
@@ -174,6 +183,8 @@ public sealed class WizardForm : Form
         AppendLog("Deployment history: " + _history.Root);
         AppendLog("Deployment Repository: " + _profile.DeploymentRepositoryFolder);
         AppendLog("Stable Build Workspace Root: " + _profile.WorkspaceRoot);
+        if (_persistentState.LastResult == "InProgress")
+            AppendLog("[RECOVERY] Previous deployment has no recorded final result. Verify IIS states, recovery markers, owned backups and HTTP health before retrying. No markers or backups were cleared.");
     }
 
     private void OnHealthUpdated(HealthSnapshot snapshot)
@@ -498,7 +509,8 @@ public sealed class WizardForm : Form
         _sqlInstances = new();
         _lastErrorReportPath = null;
         _lastSuccessfulPublishPath = null;
-        _deploymentStatus = "Not started";
+        // Start Over must not erase an unresolved prior deployment warning.
+        _deploymentStatus = _persistentState.LastResult == "InProgress" ? InterruptedDeploymentStatus : "Not started";
         _deploymentElapsedText = "Elapsed: 00:00:00";
         _activity.Text = "Ready";
         _progress.Value = 0;
@@ -2770,7 +2782,11 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         reviewRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         reviewRoot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         reviewRoot.Controls.Add(deployModePanel, 0, 0);
-        var statusBanner = new Label { Text = _deploymentStatus, AutoSize = true, Padding = new Padding(8), Font = new Font("Segoe UI Semibold", 11F), ForeColor = _deploymentStatus.Contains("UNSUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.Firebrick : (_deploymentStatus.Contains("SUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.ForestGreen : Color.DimGray) };
+        var recoveryWarning = _deploymentStatus.Contains("UNSUCCESSFUL", StringComparison.OrdinalIgnoreCase)
+            || _deploymentStatus.Contains("RECOVERY FAILED", StringComparison.OrdinalIgnoreCase)
+            || _deploymentStatus.Contains("INTERRUPTED", StringComparison.OrdinalIgnoreCase);
+        var statusBanner = new Label { Text = _deploymentStatus, AutoSize = true, Padding = new Padding(8), Font = new Font("Segoe UI Semibold", 11F),
+            ForeColor = recoveryWarning ? Color.Firebrick : (_deploymentStatus.Contains("SUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.ForestGreen : Color.DimGray) };
         reviewRoot.Controls.Add(statusBanner, 0, 1);
         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 210, FixedPanel = FixedPanel.None };
         void KeepHalfSplit() { if (split.Height > 160) split.SplitterDistance = Math.Max(80, (split.Height - split.SplitterWidth) / 2); }

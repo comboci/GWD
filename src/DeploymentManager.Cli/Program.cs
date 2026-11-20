@@ -198,10 +198,15 @@ internal static class CliApplication
             if (!frontendRelease.Ok) throw new CliFailure(5, frontendRelease.Detail);
             deployment.IisStage("HEALTH", "PASS");
             deployment.IisStage("COMMIT", "RUNNING");
-            deployment.FinalizeSuccessfulDeployment(profile, target);
             deployment.IisStage("COMMIT", "PASS");
-            deployment.ResolveIisAttempt();
+            // Preserve the recovery lease until both completion markers are durable.
+            // A failed success-marker write must still be eligible for compensation.
             deployment.MarkDeploymentSuccessful(target);
+            deployment.ResolveIisAttempt();
+            // Best-effort build-state/retention bookkeeping must not roll back a
+            // verified healthy release after its recovery journal is resolved.
+            try { deployment.FinalizeSuccessfulDeployment(profile, target); }
+            catch (Exception cleanupEx) { runner.Report("[CLEANUP] Post-success bookkeeping warning: " + cleanupEx.Message); }
             return CliResult.Ok("deploy", profile.ApplicationName, new()
             {
                 ["mode"] = mode, ["sourcePath"] = profile.SourceFolder, ["publishPath"] = target,

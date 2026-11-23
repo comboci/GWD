@@ -3,4 +3,5 @@
 <Compile Include="../../src/DeploymentManager/Services/IisDeploymentAttempt.cs" Link="IisDeploymentAttempt.cs" />
 <Compile Include="../../src/DeploymentManager/Services/CommandResult.cs" Link="CommandResult.cs" />
 <Compile Include="../../src/DeploymentManager/Services/IisDiagnostics.cs" Link="IisDiagnostics.cs" />
+<Compile Include="../../src/DeploymentManager/Services/DeploymentLogTailReader.cs" Link="DeploymentLogTailReader.cs" />
 </ItemGroup></Project>

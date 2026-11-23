@@ -3360,12 +3360,33 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 AppendLog("[CLEANUP] Recovery FAILED: " + cleanupEx);
             }
             ShowTrayDeploymentResult(false);
-            _lastErrorReportPath = CreateErrorReport(ex);
-                MessageBox.Show(
+            _lastErrorReportPath = null;
+            string diagnosticLocation;
+            try
+            {
+                _lastErrorReportPath = CreateErrorReport(ex);
+                diagnosticLocation = "Diagnostic report saved to:\r\n" + _lastErrorReportPath;
+            }
+            catch (Exception reportError)
+            {
+                // A secondary diagnostics failure must NEVER replace the
+                // original deployment/rollback exception on screen or propagate
+                // into Auto Deploy as though it were the primary failure.
+                InternalDiagnostics.Record(reportError, "Create deployment failure report");
+                try { AppendLog("[DIAGNOSTICS] Error report unavailable (original deploy error preserved): " + reportError.Message); }
+                catch (Exception secondaryLogError)
+                {
+                    InternalDiagnostics.Record(secondaryLogError, "Log diagnostic report failure");
+                }
+                diagnosticLocation = "Diagnostic report unavailable; original deployment error shown above.\r\n" +
+                    "Active log: " + _logService.LogFile;
+            }
+            MessageBox.Show(
                 this,
-                (recoveryFailed ? "Deployment failed AND recovery failed. Previous deployment state is uncertain.\r\n\r\n" : "Deployment unsuccessful. Recovery handler completed; inspect separate cleanup warnings. Restoration was not independently verified.\r\n\r\n") +
+                (recoveryFailed ? "Deployment failed AND recovery failed. Previous deployment state is uncertain.\r\n\r\n" :
+                    "Deployment unsuccessful. Recovery handler completed; inspect separate cleanup warnings. Restoration was not independently verified.\r\n\r\n") +
                 GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message) + "\r\n\r\n" +
-                "Diagnostic report saved to:\r\n" + _lastErrorReportPath,
+                diagnosticLocation,
                 "Deployment unsuccessful",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
@@ -3477,7 +3498,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
     private string CreateErrorReport(Exception ex)
     {
         var sb = new StringBuilder();
-        sb.AppendLine("Generic Web Deployment Manager V32 — Diagnostic Error Report");
+        sb.AppendLine("Generic Web Deployment Manager " + ProductInfo.DisplayVersion + " — Diagnostic Error Report");
         sb.AppendLine($"Time: {DateTime.Now:O}");
         sb.AppendLine($"Stage: {_steps[Math.Clamp(_pageIndex, 0, _steps.Length - 1)]}");
         sb.AppendLine($"Build mode: {_profile.BuildMode}");
@@ -3502,21 +3523,25 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         sb.AppendLine("NOTE: Passwords are intentionally not included in this report.");
         sb.AppendLine();
         sb.AppendLine("Recent deployment log (tail):");
-        foreach (var line in ReadRecentLogLines(_logService.LogFile, 250)) sb.AppendLine(line);
+        try
+        {
+            foreach (var line in ReadRecentLogLines(_logService.LogFile, 250)) sb.AppendLine(line);
+        }
+        catch (IOException logReadError)
+        {
+            InternalDiagnostics.Record(logReadError, "Read active deployment log for failure report");
+            sb.AppendLine("[Log tail could not be read; original deployment exception is preserved above.]");
+        }
+        catch (UnauthorizedAccessException logReadError)
+        {
+            InternalDiagnostics.Record(logReadError, "Access active deployment log for failure report");
+            sb.AppendLine("[Log tail access denied; original deployment exception is preserved above.]");
+        }
         return _appData.SaveErrorReport(sb.ToString());
     }
 
-    private static IEnumerable<string> ReadRecentLogLines(string path, int maxLines)
-    {
-        if (!File.Exists(path)) yield break;
-        var queue = new Queue<string>(maxLines + 1);
-        foreach (var line in File.ReadLines(path))
-        {
-            queue.Enqueue(line);
-            if (queue.Count > maxLines) queue.Dequeue();
-        }
-        foreach (var line in queue) yield return line;
-    }
+    private static IReadOnlyList<string> ReadRecentLogLines(string path, int maxLines)
+        => DeploymentLogTailReader.ReadLastLines(path, maxLines);
 
 
     private void BuildReviewPageRefresh()

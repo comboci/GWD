@@ -86,4 +86,31 @@ foreach (var desired in new[] { "Stopped", "Started" })
     await Fails(() => Fake(c => c.StartsWith("list") ? State("Stopped") : new(1, "HRESULT 0x80010006", ""), calls).TransitionAsync("site", "site", "Started", default), "start failure propagated for rollback");
     Check(calls.Count == 2, "start management failure never blindly retried");
 }
+{
+    // Simulate the session writer's exact Windows file-sharing flags.
+    var root = Path.Combine(Path.GetTempPath(), "gwd-log-sharing-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    var file = Path.Combine(root, "active.log");
+    try
+    {
+        using (var stream = new FileStream(file, FileMode.Append, FileAccess.Write, FileShare.Read))
+        using (var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false), 1024, leaveOpen: true))
+        {
+            writer.AutoFlush = true;
+            writer.WriteLine("start");
+            writer.WriteLine("original deployment error");
+            Check(DeploymentLogTailReader.ReadLastLines(file, 1)
+                .SequenceEqual(new[] { "original deployment error" }), "active writer permits diagnostic log-tail reader");
+            writer.WriteLine("recovery failed");
+            Check(DeploymentLogTailReader.ReadLastLines(file, 2)
+                .SequenceEqual(new[] { "original deployment error", "recovery failed" }),
+                "bounded log tail keeps the most recent lines while append writer remains open");
+            Check(DeploymentLogTailReader.ReadLastLines(file, 0).Count == 0,
+                "zero-line diagnostic request returns empty");
+        }
+        Check(DeploymentLogTailReader.ReadLastLines(Path.Combine(root, "missing.log"), 20).Count == 0,
+            "missing active log does not prevent diagnostic recovery");
+    }
+    finally { Directory.Delete(root, true); }
+}
 Console.WriteLine($"{passed} checks passed; no IIS or production files accessed.");

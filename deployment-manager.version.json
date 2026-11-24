@@ -1,6 +1,6 @@
 {
-  "version": "263.0.0",
+  "version": "264.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V263 — ابزار بازیابی ایمن نشانگرهای باقی‌مانده IIS پس از تأیید بازیابی"
+  "commitNote": "V264 — IIS recovery review in wizard for resolved attempts"
 }

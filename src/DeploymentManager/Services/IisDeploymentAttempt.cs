@@ -39,7 +39,7 @@ public sealed class IisDeploymentAttempt : IDisposable
     }
     public bool MutationStarted { get; private set; }
     public bool Resolved { get; private set; }
-    public IisDeploymentAttempt(string lockRoot, string journalRoot, IEnumerable<string> targets, string id, Action<string> log, string? contentRoot = null)
+    public IisDeploymentAttempt(string lockRoot, string journalRoot, IEnumerable<string> targets, string id, Action<string> log, string? contentRoot = null, string? resolvedRecoveryOwner = null)
     {
         if (string.IsNullOrWhiteSpace(id) || id is "." or ".." || id.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
             throw new ArgumentException("Invalid IIS attempt identifier.", nameof(id));
@@ -87,6 +87,7 @@ public sealed class IisDeploymentAttempt : IDisposable
                 catch (FileNotFoundException) { continue; }
                 if ((attributes & (FileAttributes.ReparsePoint | FileAttributes.Directory)) != 0)
                     throw new IOException("IIS_UNRESOLVED_ATTEMPT: unsafe recovery marker; manual inspection required: " + path);
+                if (resolvedRecoveryOwner is not null && IsResolvedOwner(path, journalRoot, resolvedRecoveryOwner)) continue;
                 throw new IOException("IIS_UNRESOLVED_ATTEMPT: deployment blocked; inspect prior backup, IIS and HTTP before manual resolution. Marker: "
                     + path + "; " + DescribeUnresolvedMarker(path, journalRoot));
             }
@@ -99,7 +100,8 @@ public sealed class IisDeploymentAttempt : IDisposable
                 // File.Exists silently treats some access errors as "not found":
                 // GetAttributes fails closed instead, retaining earlier lock evidence.
                 for (var ancestor = target; !string.IsNullOrEmpty(Path.GetDirectoryName(ancestor)); ancestor = Path.GetDirectoryName(ancestor)!)
-                    RequireNoHistoricalMarker(ancestor + ".gwd.unresolved", journalRoot, "Ancestor", wasEnumerated: false);
+                    if (resolvedRecoveryOwner is null || !_unresolved.Contains(ancestor + ".gwd.unresolved", StringComparer.OrdinalIgnoreCase))
+                        RequireNoHistoricalMarker(ancestor + ".gwd.unresolved", journalRoot, "Ancestor", wasEnumerated: false);
                 bool targetExists;
                 try
                 {
@@ -134,6 +136,46 @@ public sealed class IisDeploymentAttempt : IDisposable
         }
         catch { foreach (var item in _locks) item.Dispose(); throw; }
     }
+    private static bool IsResolvedOwner(string path, string journalRoot, string owner)
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(owner, @"\A[A-Za-z0-9_-]{1,80}\z")) return false;
+        DeploymentPathSafety.Normalize(path);
+        if (File.ReadAllText(path).Trim() != owner) return false;
+        var journal = Path.Combine(journalRoot, owner + ".json");
+        DeploymentPathSafety.Normalize(journal);
+        var info = new FileInfo(journal);
+        if (!info.Exists || (info.Attributes & FileAttributes.ReparsePoint) != 0 || info.Length > 4194304) return false;
+        using var doc = JsonDocument.Parse(File.ReadAllText(journal));
+        return doc.RootElement.GetProperty("AttemptId").GetString() == owner
+            && doc.RootElement.GetProperty("Resolved").GetBoolean();
+    }
+
+    public void ArchiveVerifiedRecovery(string owner, string journalRoot, string contentRoot)
+    {
+        AssertOwnership();
+        var owned = new List<string>();
+        foreach (var path in _unresolved)
+        {
+            DeploymentPathSafety.Normalize(path);
+            FileAttributes attrs;
+            try { attrs = File.GetAttributes(path); } catch (FileNotFoundException) { continue; }
+            if ((attrs & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0 || !IsResolvedOwner(path, journalRoot, owner))
+                throw new IOException("Unverified recovery marker: " + path);
+            owned.Add(path);
+        }
+        if (owned.Count == 0) throw new IOException("No owned recovery markers; manual review required.");
+        var incomplete = Path.Combine(contentRoot, ".deployment-incomplete");
+        DeploymentPathSafety.Normalize(incomplete);
+        try {
+            var attrs = File.GetAttributes(incomplete);
+            if ((attrs & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) throw new IOException("Unsafe incomplete marker.");
+            owned.Add(incomplete);
+        } catch (FileNotFoundException) { }
+        Observe("Operator verified prior resolved attempt " + owner + "; archiving markers.");
+        foreach (var path in owned.AsEnumerable().Reverse())
+            File.Move(path, path + ".reviewed-" + Guid.NewGuid().ToString("N"));
+    }
+
     // Historical ancestor/nested marker inspection is strictly read-only.
     // Missing is accepted only when the path was not returned by enumeration;
     // unreadable, replaced, directory or reparse-point markers block deployment.

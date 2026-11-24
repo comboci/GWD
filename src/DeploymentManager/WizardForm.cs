@@ -1960,6 +1960,32 @@ public sealed class WizardForm : Form
         var refresh = new Button { Text = "Re-check IIS", AutoSize = true };
         var advanced = new CheckBox { Text = "Advanced IIS Management", AutoSize = true, Margin = new Padding(20, 7, 3, 3), Enabled = _iisState.Installed };
         buttons.Controls.Add(install); buttons.Controls.Add(refresh); buttons.Controls.Add(advanced);
+        var recoveryReview = new Button { Text = "Review & Resolve Previous Deployment", AutoSize = true };
+        buttons.Controls.Add(recoveryReview);
+        recoveryReview.Click += async (_, _) =>
+        {
+            if (_operationRunning || _autoDeployRunning || _dependencySyncRunning) return;
+            using var dialog = new Form { Text = "Review previous deployment", Width = 680, Height = 260, StartPosition = FormStartPosition.CenterParent };
+            var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(12) };
+            var explanation = new Label { AutoSize = true, MaximumSize = new Size(620, 0), Text = "Enter the prior resolved attempt ID from the diagnostic report. Independently verify the database and backup before confirming. IIS, HTTP, API and frontend identity will be checked again. Unresolved journals remain blocked." };
+            var owner = new TextBox { Width = 580 };
+            var verified = new CheckBox { AutoSize = true, Text = "I verified the database and backup/recovery evidence." };
+            var confirm = new Button { Text = "Verify and archive markers", AutoSize = true, DialogResult = DialogResult.OK };
+            layout.Controls.AddRange(new Control[] { explanation, owner, verified, confirm });
+            dialog.Controls.Add(layout);
+            if (dialog.ShowDialog(this) != DialogResult.OK || !verified.Checked || string.IsNullOrWhiteSpace(owner.Text)) return;
+            _operationRunning = true;
+            recoveryReview.Enabled = false;
+            UpdateNavigationState();
+            try
+            {
+                await _deployment.ReviewResolvedDeploymentAsync(_profile, owner.Text.Trim());
+                AppendLog("[RECOVERY] Verified prior resolved deployment; markers archived. Retry Auto Deploy.");
+                MessageBox.Show(this, "Recovery markers archived. Retry Auto Deploy.", "Recovery review", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex) { AppendLog("[RECOVERY] " + ex.Message); MessageBox.Show(this, ex.Message, "Recovery review blocked", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+            finally { _operationRunning = false; recoveryReview.Enabled = true; UpdateNavigationState(); }
+        };
         root.Controls.Add(buttons, 0, 1);
 
         var management = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, Visible = _iisState.Installed, Padding = new Padding(0, 10, 0, 0) };

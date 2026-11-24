@@ -43,6 +43,35 @@ public sealed class DeploymentService
         ReportIis($"[IIS] GWD={ProductInfo.Version}; attempt={_iisAttempt.Id}; site={profile.SiteName}; pool={profile.AppPoolName}; path={profile.HostingRoot}; initial state is an observation, not proof deployment caused a later failure.");
         return _iisAttempt;
     }
+    public async Task ReviewResolvedDeploymentAsync(DeploymentProfile profile, string owner, CancellationToken ct = default)
+    {
+        if (!string.Equals(profile.TargetMode, "Local Server", StringComparison.OrdinalIgnoreCase)
+            || !new EnvironmentService(_runner).IsLocalTarget(profile.TargetHost)
+            || !string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Recovery review requires a local Single Folder target.");
+        ValidateDeploymentPaths(profile);
+        var target = DeploymentPathSafety.Normalize(profile.HostingRoot);
+        var journalRoot = Path.Combine(_appData.Root, "IisAttempts");
+        using var lease = new IisDeploymentAttempt(
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GenericWeb.DeploymentManager", "TargetLocks"),
+            journalRoot, new[] { "site:" + profile.SiteName, "pool:" + profile.AppPoolName, "path:" + Path.GetFullPath(profile.HostingRoot).TrimEnd('\\', '/') },
+            Guid.NewGuid().ToString("N"), _runner.Report, target, owner);
+        var state = await Iis().ValidateAsync(profile.SiteName, profile.AppPoolName, ct);
+        if (state.Site != "Started" || state.Pool != "Started") throw new IOException("IIS site and pool must be started.");
+        var actual = await GetSitePhysicalPathAsync(profile, ct);
+        if (string.IsNullOrWhiteSpace(actual) || !PathsEqual(actual, target)) throw new IOException("IIS path mismatch.");
+        var pool = await Iis().CheckedAsync($"list app /app.name:\"{profile.SiteName}/\" /text:applicationPool", ct);
+        if (!string.Equals(pool.Output.Trim(), profile.AppPoolName, StringComparison.OrdinalIgnoreCase)) throw new IOException("IIS pool mismatch.");
+        await Iis().RequireExclusivePoolAsync(profile.SiteName, profile.AppPoolName, ct);
+        var health = await HealthCheckAsync(profile, ct);
+        if (!health.Ok) throw new IOException(health.Detail);
+        var api = await VerifyRunningApiReleaseAsync(profile, target, ct);
+        if (!api.Ok) throw new IOException(api.Detail);
+        var frontend = await VerifyRunningFrontendReleaseAsync(profile, target, ct);
+        if (!frontend.Ok) throw new IOException(frontend.Detail);
+        lease.ArchiveVerifiedRecovery(owner, journalRoot, target);
+    }
+
     public void RecordDeploymentHealth(string detail) => ReportIis("[HEALTH] " + detail);
     public void IisStage(string stage, string state) => _iisAttempt?.Stage(stage, state);
     public void ResolveIisAttempt() { _iisAttempt?.Resolve(); _filesChanged = false; }

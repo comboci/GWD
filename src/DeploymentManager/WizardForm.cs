@@ -3331,6 +3331,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             elapsedTimer.Stop();
             var successMessage = isFastLocalTest ? "Fast Local Test successful.\r\n\r\nRequired incremental builds completed; IIS and hosted files were not changed." : $"Deployment successful.\r\n\r\n{successUrl}";
             var successTitle = isFastLocalTest ? "Fast Local Test successful" : "Deployment successful";
+            await NotifyDeploymentOutcomeAsync(isFastLocalTest, historyAttempt?.ApplicationVersion, historyAttempt?.AttemptId, deploymentStopwatch.Elapsed, isFastLocalTest ? null : successUrl);
             BeginInvoke(() => MessageBox.Show(this, successMessage, successTitle, MessageBoxButtons.OK, MessageBoxIcon.Information));
         }
         catch (OperationCanceledException) when (_deploymentCts?.IsCancellationRequested == true)
@@ -3360,6 +3361,9 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 AppendLog("[CANCEL] Cleanup/recovery FAILED: " + cleanupEx);
                 ShowTrayDeploymentResult(false);
             }
+            deploymentStopwatch.Stop();
+            elapsedTimer.Stop();
+            await NotifyDeploymentOutcomeAsync(isFastLocalTest, historyAttempt?.ApplicationVersion, historyAttempt?.AttemptId, deploymentStopwatch.Elapsed, null);
             MessageBox.Show(this,
                 cleanupOk ? "Deployment cancelled. Recovery handler completed; inspect the log for separate cleanup warnings. Restoration was not independently verified." : "Deployment cancelled and cleanup/recovery FAILED. Previous deployment state is uncertain. Review the log before retrying.",
                 "Deployment cancelled", MessageBoxButtons.OK, cleanupOk ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
@@ -3408,6 +3412,9 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 diagnosticLocation = "Diagnostic report unavailable; original deployment error shown above.\r\n" +
                     "Active log: " + _logService.LogFile;
             }
+            deploymentStopwatch.Stop();
+            elapsedTimer.Stop();
+            await NotifyDeploymentOutcomeAsync(isFastLocalTest, historyAttempt?.ApplicationVersion, historyAttempt?.AttemptId, deploymentStopwatch.Elapsed, null);
             MessageBox.Show(
                 this,
                 (recoveryFailed ? "Deployment failed AND recovery failed. Previous deployment state is uncertain.\r\n\r\n" :
@@ -3459,6 +3466,35 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         }
     }
 
+
+    private async Task NotifyDeploymentOutcomeAsync(bool fastLocalTest, string? version, string? attemptId, TimeSpan elapsed, string? url)
+    {
+        // A notification is best effort. It must never trigger deployment rollback
+        // or replace the real deployment result, including recovery failures.
+        try
+        {
+            var result = _persistentState.LastResult;
+            var settings = EmailNotificationService.Load();
+            if (!settings.ShouldNotify(result)) return;
+            var operation = fastLocalTest ? "Fast Local Test (no IIS deployment)" : "Deployment";
+            var project = EmailNotificationService.SingleLine(_profile.ApplicationName);
+            var release = EmailNotificationService.SingleLine(version ?? "Unknown");
+            var subject = $"[GWD] {project} {release} - {operation}: {result}";
+            var body = $"Project: {project}\r\nVersion: {release}\r\nOperation: {operation}\r\nResult: {result}\r\nAttempt: {EmailNotificationService.SingleLine(attemptId ?? "Unknown")}\r\nFinished: {DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}\r\nElapsed: {elapsed:c}\r\n";
+            // Do not email raw logs, exception messages, credentials, or database details.
+            if (!string.IsNullOrWhiteSpace(url)) body += $"Site: {EmailNotificationService.SingleLine(url)}\r\n";
+            if (result == "RecoveryFailed") body += "Recovery failed. Previous deployment state is uncertain. Review GWD on the deployment computer.\r\n";
+            else if (result != "Successful") body += "Review GWD locally for failure/cancellation and recovery details.\r\n";
+            await EmailNotificationService.SendAsync(settings, subject, body);
+            AppendLog("[EMAIL] Deployment result notification accepted by SMTP server.");
+        }
+        catch (Exception)
+        {
+            // No SMTP exception payload or credential material enters diagnostics.
+            try { AppendLog("[EMAIL] Result notification failed. Check Email Notifications settings and Test Email. Deployment result is unchanged."); }
+            catch { /* Never fail deployment due to notification or notification logging. */ }
+        }
+    }
 
     private sealed record BrowserChoice(string Name, string? ExecutablePath)
     {

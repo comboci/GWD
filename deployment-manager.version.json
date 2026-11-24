@@ -1,6 +1,6 @@
 {
-  "version": "265.0.0",
+  "version": "266.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V265 — three-second automatic confirmation of deployment protection policy"
+  "commitNote": "V266 — optional SMTP deployment-result notifications with per-user protected settings"
 }

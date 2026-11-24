@@ -1,6 +1,6 @@
 {
-  "version": "264.0.0",
+  "version": "265.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V264 — IIS recovery review in wizard for resolved attempts"
+  "commitNote": "V265 — three-second automatic confirmation of deployment protection policy"
 }

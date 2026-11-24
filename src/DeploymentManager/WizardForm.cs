@@ -3181,7 +3181,8 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         {
             var protection = $"Backup: {(_profile.CreateBackupBeforeDeployment ? "ENABLED" : "DISABLED")}; Keep previous release: {(_profile.KeepPreviousDeploymentForRollback ? "ENABLED" : "DISABLED")}; Automatic rollback: {(_profile.KeepPreviousDeploymentForRollback ? "ENABLED" : "DISABLED")}. " +
                 "Without rollback, a failed deployment may require manual recovery. Continue?";
-            if (MessageBox.Show(this, protection, "Deployment protection policy", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            using var protectionDialog = new AutoYesConfirmationForm("Deployment protection policy", protection, 3);
+            if (protectionDialog.ShowDialog(this) != DialogResult.Yes) return;
         }
         _operationRunning = true;
         AcknowledgeTrayAlert();

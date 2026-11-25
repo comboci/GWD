@@ -53,20 +53,6 @@ public sealed class SettingsForm : Form
         CancelButton = cancel; // Esc closes this modal.
         buttons.Controls.Add(save);
         buttons.Controls.Add(cancel);
-        var email = new Button { Text = "Email Notifications...", Width = 180, Height = 36 };
-        email.Click += (_, _) =>
-        {
-            try
-            {
-                using var dialog = new EmailNotificationSettingsForm();
-                dialog.ShowDialog(this);
-            }
-            catch (Exception)
-            {
-                MessageBox.Show(this, "Email notification settings could not be opened. Check the Windows user credential store.", "Email Notifications", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-        };
-        buttons.Controls.Add(email);
         root.Controls.Add(buttons, 0, 2);
         Controls.Add(root);
     }

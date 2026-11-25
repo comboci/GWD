@@ -428,6 +428,26 @@ public sealed class WizardForm : Form
         var diagnosticsMenu = new ToolStripMenuItem("Diagnostics Center");
         diagnosticsMenu.Click += (_, _) => viewLogs.PerformClick();
         actionsMenu.DropDownItems.Add(diagnosticsMenu);
+        actionsMenu.DropDownItems.Add(new ToolStripSeparator());
+        var emailNotificationsMenu = new ToolStripMenuItem("Email Notifications...");
+        emailNotificationsMenu.Click += (_, _) =>
+        {
+            if (_operationRunning || _autoDeployRunning || _dependencySyncRunning)
+            {
+                MessageBox.Show(this, "Stop the current operation before editing Email Notifications.");
+                return;
+            }
+            try
+            {
+                using var dialog = new EmailNotificationSettingsForm();
+                dialog.ShowDialog(this);
+            }
+            catch (Exception)
+            {
+                MessageBox.Show(this, "Email notification settings could not be opened. Check the Windows user credential store.", "Email Notifications", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        };
+        actionsMenu.DropDownItems.Add(emailNotificationsMenu);
         MainMenuStrip = menu;
         Controls.Add(menu);
 

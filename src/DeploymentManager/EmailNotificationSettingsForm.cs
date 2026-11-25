@@ -8,6 +8,8 @@ public sealed class EmailNotificationSettingsForm : Form
     private readonly CheckBox _success = new() { Text = "Success", AutoSize = true };
     private readonly CheckBox _failure = new() { Text = "Failure / recovery failure", AutoSize = true };
     private readonly CheckBox _cancelled = new() { Text = "Cancelled", AutoSize = true };
+    private readonly ComboBox _provider = new() { Dock = DockStyle.Fill, DropDownStyle = ComboBoxStyle.DropDownList };
+    private readonly Label _providerHint = new() { AutoSize = true, MaximumSize = new Size(640, 0), ForeColor = Color.DimGray };
     private readonly TextBox _host = new() { Dock = DockStyle.Fill };
     private readonly NumericUpDown _port = new() { Minimum = 1, Maximum = 65535, Width = 110, Value = 587 };
     private readonly TextBox _sender = new() { Dock = DockStyle.Fill };
@@ -23,8 +25,8 @@ public sealed class EmailNotificationSettingsForm : Form
     public EmailNotificationSettingsForm()
     {
         Text = "GWD — Email Notifications";
-        ClientSize = new Size(760, 530);
-        MinimumSize = new Size(640, 470);
+        ClientSize = new Size(760, 570);
+        MinimumSize = new Size(640, 500);
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
         MaximizeBox = false;
@@ -33,6 +35,8 @@ public sealed class EmailNotificationSettingsForm : Form
         _success.Checked = settings.OnSuccess;
         _failure.Checked = settings.OnFailure;
         _cancelled.Checked = settings.OnCancellation;
+        _provider.Items.AddRange(EmailProviderPresets.All.Cast<object>().ToArray());
+        _provider.SelectedItem = EmailProviderPresets.FromEndpoint(settings.Host, settings.Port);
         _host.Text = settings.Host;
         _port.Value = Math.Clamp(settings.Port, 1, 65535);
         _sender.Text = settings.Sender;
@@ -50,25 +54,53 @@ public sealed class EmailNotificationSettingsForm : Form
             root.Controls.Add(control, 0, row);
             root.SetColumnSpan(control, 2);
         }
-        void AddRow(string label, Control control)
+        Label AddRow(string label, Control control)
         {
             var row = root.RowCount++;
             root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            root.Controls.Add(new Label { Text = label, AutoSize = true, Padding = new Padding(0, 6, 0, 0) }, 0, row);
+            var caption = new Label { Text = label, AutoSize = true, Padding = new Padding(0, 6, 0, 0) };
+            root.Controls.Add(caption, 0, row);
             control.Margin = new Padding(3, 4, 3, 7);
             root.Controls.Add(control, 1, row);
+            return caption;
         }
         AddWide(_enabled);
-        var events = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true };
-        events.Controls.AddRange(new Control[] { _success, _failure, _cancelled });
-        AddRow("Notify on", events);
-        AddRow("SMTP server", _host);
-        AddRow("SMTP port (STARTTLS)", _port);
+        AddRow("Email provider", _provider);
+        AddWide(_providerHint);
+        var hostLabel = AddRow("SMTP server", _host);
+        var portLabel = AddRow("SMTP port (STARTTLS)", _port);
         AddRow("Sender email", _sender);
         AddRow("SMTP login (optional)", _user);
         AddRow("Password / app password", _password);
         AddRow("Recipient email", _recipient);
-        AddWide(new Label { Text = "TLS is required. Example for Gmail: smtp.gmail.com, port 587, app password (if supported by the account). Port 465 / OAuth-only accounts are not supported. Credentials are protected for the current Windows user.", AutoSize = true, MaximumSize = new Size(680, 0), ForeColor = Color.DimGray, Padding = new Padding(0, 8, 0, 8) });
+        AddWide(new Label { Text = "Leave SMTP login blank to use the sender email address.", AutoSize = true, ForeColor = Color.DimGray });
+        AddWide(new Label { Text = "Which deployment results should send an email?", AutoSize = true, Padding = new Padding(0, 8, 0, 0) });
+        var events = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true };
+        events.Controls.AddRange(new Control[] { _success, _failure, _cancelled });
+        AddWide(events);
+        AddWide(new Label { Text = "STARTTLS is required. Port 465 and OAuth-only accounts (including Outlook.com) are not supported. Credentials are protected for the current Windows user.", AutoSize = true, MaximumSize = new Size(680, 0), ForeColor = Color.DimGray, Padding = new Padding(0, 8, 0, 8) });
+
+        void UpdateProviderFields()
+        {
+            var selected = SelectedProvider;
+            var custom = selected == EmailProviderPresets.Custom;
+            root.SuspendLayout();
+            try
+            {
+                hostLabel.Visible = _host.Visible = custom;
+                portLabel.Visible = _port.Visible = custom;
+                _providerHint.Text = selected.PasswordHint;
+            }
+            finally { root.ResumeLayout(true); }
+        }
+        _provider.SelectedIndexChanged += (_, _) =>
+        {
+            // A password saved for one provider must not be sent to another.
+            _password.Clear();
+            UpdateProviderFields();
+            SetStatus("Re-enter the password for the selected provider.", true);
+        };
+        UpdateProviderFields();
         AddWide(_status);
         var buttons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft };
         buttons.Controls.AddRange(new Control[] { _save, _cancel, _test });
@@ -82,14 +114,17 @@ public sealed class EmailNotificationSettingsForm : Form
         FormClosed += (_, _) => _password.Clear();
     }
 
+    private EmailProviderPreset SelectedProvider =>
+        _provider.SelectedItem as EmailProviderPreset ?? EmailProviderPresets.Gmail;
+
     private EmailNotificationSettings Read() => new()
     {
         Enabled = _enabled.Checked,
         OnSuccess = _success.Checked,
         OnFailure = _failure.Checked,
         OnCancellation = _cancelled.Checked,
-        Host = _host.Text.Trim(),
-        Port = (int)_port.Value,
+        Host = SelectedProvider == EmailProviderPresets.Custom ? _host.Text.Trim() : SelectedProvider.Host,
+        Port = SelectedProvider == EmailProviderPresets.Custom ? (int)_port.Value : SelectedProvider.Port,
         Sender = _sender.Text.Trim(),
         UserName = _user.Text.Trim(),
         Password = _password.Text,
@@ -99,6 +134,11 @@ public sealed class EmailNotificationSettingsForm : Form
     private void Save()
     {
         var settings = Read();
+        if (settings.Enabled && !settings.OnSuccess && !settings.OnFailure && !settings.OnCancellation)
+        {
+            SetStatus("Select at least one deployment result, or disable notifications.", false);
+            return;
+        }
         try { if (settings.Enabled) EmailNotificationService.Validate(settings); }
         catch (ArgumentException ex) { SetStatus(ex.Message, false); return; }
         try
@@ -117,7 +157,7 @@ public sealed class EmailNotificationSettingsForm : Form
         try { EmailNotificationService.Validate(settings); }
         catch (ArgumentException ex) { SetStatus(ex.Message, false); return; }
         _testing = true;
-        _test.Enabled = _save.Enabled = _cancel.Enabled = false;
+        _test.Enabled = _save.Enabled = _cancel.Enabled = _provider.Enabled = false;
         SetStatus("Sending test email (up to 15 seconds)...", true);
         try
         {
@@ -132,7 +172,7 @@ public sealed class EmailNotificationSettingsForm : Form
         finally
         {
             _testing = false;
-            _test.Enabled = _save.Enabled = _cancel.Enabled = true;
+            _test.Enabled = _save.Enabled = _cancel.Enabled = _provider.Enabled = true;
         }
     }
 

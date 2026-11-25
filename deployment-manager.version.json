@@ -1,6 +1,6 @@
 {
-  "version": "266.0.0",
+  "version": "267.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V266 — optional SMTP deployment-result notifications with per-user protected settings"
+  "commitNote": "V267 — simplify email notifications with provider presets and Actions menu"
 }

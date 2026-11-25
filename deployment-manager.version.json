@@ -1,6 +1,6 @@
 {
-  "version": "267.0.0",
+  "version": "268.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V267 — simplify email notifications with provider presets and Actions menu"
+  "commitNote": "V268 — preserve structured history and export active session logs"
 }

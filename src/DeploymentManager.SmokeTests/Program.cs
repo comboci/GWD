@@ -14,6 +14,11 @@ internal static class Program
 
         try
         {
+            if (args.Contains("--diagnostic-history"))
+            {
+                DiagnosticHistoryTests.Run(testRoot);
+                return 0;
+            }
             if (args.Contains("--workspace-sync"))
             {
                 WorkspaceSyncTests.Run(testRoot);

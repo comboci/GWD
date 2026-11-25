@@ -1,6 +1,8 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using GenericWeb.DeploymentManager.Models;
@@ -10,7 +12,7 @@ namespace GenericWeb.DeploymentManager.Services;
 public sealed class DeploymentHistoryService
 {
     private readonly object _sync = new();
-    private readonly JsonSerializerOptions _json = new() { WriteIndented = false };
+    private static readonly ConcurrentDictionary<string, byte> ReportedDamagedRows = new(StringComparer.Ordinal);
 
     public string Root { get; } = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GWDM_APPDATA_ROOT")) ? Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
@@ -128,18 +130,24 @@ public sealed class DeploymentHistoryService
         var events = new List<DeploymentHistoryRecord>();
         lock (_sync)
         {
-            foreach (var line in File.ReadLines(path))
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            int lineNumber = 0;
+            while (reader.ReadLine() is string line)
             {
+                lineNumber++;
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 try
                 {
-                    var item = JsonSerializer.Deserialize<DeploymentHistoryRecord>(line);
-                    if (item is not null && !string.IsNullOrWhiteSpace(item.AttemptId)) events.Add(item);
+                    events.Add(ReadHistoryRecord(line));
                 }
-                catch (Exception ex)
+                catch (JsonException ex)
                 {
-                    InternalDiagnostics.Record(ex, "Read deployment history JSONL record");
-                    // Keep history readable even if a single append was interrupted or corrupted.
+                    // Preserve the original record; never invent dates or successful outcomes.
+                    // Report the same damaged row once per process rather than on every refresh.
+                    var key = path + ":" + lineNumber + ":" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(line)));
+                    if (ReportedDamagedRows.TryAdd(key, 0))
+                        InternalDiagnostics.Record(ex, "Read deployment history JSONL record (line " + lineNumber + ")");
                 }
             }
         }
@@ -227,7 +235,7 @@ public sealed class DeploymentHistoryService
     {
         Directory.CreateDirectory(Root);
         var path = GetProjectFile(record.ProjectId);
-        var json = SecretRedactor.Redact(JsonSerializer.Serialize(record, _json)) + Environment.NewLine;
+        var json = SerializeRedactedRecord(record) + Environment.NewLine;
         lock (_sync)
         {
             using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
@@ -236,6 +244,45 @@ public sealed class DeploymentHistoryService
             writer.Flush();
             stream.Flush(flushToDisk: true);
         }
+    }
+
+    public static DeploymentHistoryRecord ReadHistoryRecord(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        if (document.RootElement.ValueKind != JsonValueKind.Object ||
+            !document.RootElement.TryGetProperty("AttemptId", out var id) || id.ValueKind != JsonValueKind.String ||
+            !Guid.TryParseExact(id.GetString(), "N", out _) ||
+            !document.RootElement.TryGetProperty("StartedAtUtc", out var started) ||
+            started.ValueKind != JsonValueKind.String || !started.TryGetDateTime(out var date) || date == default)
+            throw new JsonException("Required deployment history identity or timestamp is invalid.");
+        return document.RootElement.Deserialize<DeploymentHistoryRecord>()
+            ?? throw new JsonException("Null deployment history record.");
+    }
+
+    // Redact text BEFORE writing JSON. Replacing arbitrary substrings in the
+    // serialized document destroys timestamps, IDs and numeric measurements
+    // when a registered credential is short or numeric.
+    public static string SerializeRedactedRecord(DeploymentHistoryRecord record)
+    {
+        var root = JsonSerializer.SerializeToNode(record)!.AsObject();
+        static void Clean(JsonObject obj, params string[] names)
+        {
+            foreach (var name in names)
+                if (obj[name] is JsonValue value && value.TryGetValue<string>(out var text))
+                    obj[name] = SecretRedactor.Redact(text);
+        }
+        Clean(root, "ApplicationName", "SiteName", "DatabaseName", "SourceFolder",
+            "DeploymentTargetPath", "ApplicationVersion", "SessionLog", "BuildMode");
+        if (root["BuildPerformance"] is JsonObject performance)
+        {
+            Clean(performance, "BuildMode", "DependencyMode");
+            if (performance["Stages"] is JsonArray stages)
+                foreach (var stage in stages.OfType<JsonObject>())
+                    Clean(stage, "Name", "Status", "Detail");
+        }
+        // IDs, result/status event types, times and measurements are generated
+        // metadata, not user-supplied credential fields.
+        return root.ToJsonString();
     }
 
     private string GetProjectFile(string projectId) => Path.Combine(Root, projectId + ".jsonl");

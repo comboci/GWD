@@ -223,9 +223,35 @@ public sealed class DiagnosticBundleService
         ct.ThrowIfCancellationRequested();
         try
         {
-            var contents = File.ReadAllText(source);
+            using var stream = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            var contents = reader.ReadToEnd();
             ct.ThrowIfCancellationRequested();
-            AddText(archive, name, Redact(contents));
+            if (name.StartsWith("history/", StringComparison.Ordinal) && name.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase))
+            {
+                var valid = new StringBuilder();
+                var rejected = new StringBuilder();
+                int lineNumber = 0;
+                using var lines = new StringReader(contents);
+                while (lines.ReadLine() is string line)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    lineNumber++;
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    try
+                    {
+                        var record = DeploymentHistoryService.ReadHistoryRecord(line);
+                        valid.AppendLine(DeploymentHistoryService.SerializeRedactedRecord(record));
+                    }
+                    catch (JsonException)
+                    {
+                        rejected.AppendLine("Invalid history line " + lineNumber + ": " + SecretRedactor.Redact(line));
+                    }
+                }
+                AddAlreadyRedactedText(archive, name, valid.ToString());
+                if (rejected.Length > 0) AddAlreadyRedactedText(archive, name + ".rejected.txt", rejected.ToString());
+            }
+            else AddText(archive, name, contents);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
@@ -237,10 +263,14 @@ public sealed class DiagnosticBundleService
 
     private static void AddText(ZipArchive archive, string name, string text)
     {
-        var entry = archive.CreateEntry(name, CompressionLevel.Optimal);
-        using var writer = new StreamWriter(entry.Open(), new UTF8Encoding(false));
-        writer.Write(SecretRedactor.Redact(text));
+        AddAlreadyRedactedText(archive, name, SecretRedactor.Redact(text));
     }
 
-    private static string Redact(string text) => SecretRedactor.Redact(text);
+    private static void AddAlreadyRedactedText(ZipArchive archive, string name, string text)
+    {
+        var entry = archive.CreateEntry(name, CompressionLevel.Optimal);
+        using var writer = new StreamWriter(entry.Open(), new UTF8Encoding(false));
+        writer.Write(text);
+    }
+
 }

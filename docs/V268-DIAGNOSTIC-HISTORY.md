@@ -1,0 +1,5 @@
+# V268 — diagnostic history and active log export
+
+Observed in the 2026-11-25 V267 diagnostic bundle: repeated JSONL date parse failures and inability to read the active log because of file sharing. The history append path used to redact the entire serialized JSON; registered short/numeric credentials could corrupt numbers, timestamps and identifiers. Redact history text fields before serialization. Typed timestamps, counters, and generated identifiers remain intact. A damaged existing row is reported once per process; it is never deleted or repaired by guessing. Export keeps valid typed history in JSONL and separate sanitized rejected-row evidence. Open diagnostic files using read access with compatible sharing; existing writer stays protected against additional writers. No source history is rewritten. Other historical reports are not proof of present failures.
+
+Regression: `dotnet run --project src/DeploymentManager.SmokeTests -- --diagnostic-history` on Windows. Covers short secret redaction, valid timestamps/IDs/metrics, invalid row isolation, valid history export, retention of original history, and active session log export. Build/Windows runtime NOT_RUN.

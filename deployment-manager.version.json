@@ -1,6 +1,6 @@
 {
-  "version": "278.0.0",
+  "version": "279.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V278-R — A02.7 - Installers and SQL views; Windows acceptance pending"
+  "commitNote": "V279-R — A02.8 - Central Wizard stage registry and page lifetime; Windows acceptance pending"
 }

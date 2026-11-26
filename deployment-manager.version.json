@@ -1,6 +1,6 @@
 {
-  "version": "281.0.0",
+  "version": "282.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V281-R — A03.2 - background queue with debounce, immutable changes and explicit opt-out fencing; Windows acceptance pending"
+  "commitNote": "V282-R — A04 - verified source-prefix incremental history index and paging; Windows acceptance pending"
 }

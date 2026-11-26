@@ -23,6 +23,10 @@ public sealed class DeploymentHistoryForm : Form
         MultiSelect = false
     };
     private readonly Label _status = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 8, 0) };
+    private const int HistoryPageSize = 100;
+    private readonly Button _newer = new() { Text = "Newer", AutoSize = true, Enabled = false };
+    private readonly Button _older = new() { Text = "Older", AutoSize = true, Enabled = false };
+    private int _pageIndex;
     private IReadOnlyList<DeploymentHistoryRecord> _currentAttempts = Array.Empty<DeploymentHistoryRecord>();
     private readonly HashSet<string> _expandedAttemptIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly Font _boldAttemptFont;
@@ -69,6 +73,10 @@ public sealed class DeploymentHistoryForm : Form
         var refresh = new Button { Text = "Refresh", Width = 95, Height = 32, Margin = new Padding(10, 2, 0, 2) };
         refresh.Click += async (_, _) => await LoadProjectsAsync();
         header.Controls.Add(refresh);
+        _newer.Click += async (_, _) => await LoadSelectedProjectAsync(Math.Max(0, _pageIndex - 1));
+        _older.Click += async (_, _) => await LoadSelectedProjectAsync(_pageIndex + 1);
+        header.Controls.Add(_newer);
+        header.Controls.Add(_older);
         var openFolder = new Button { Text = "Open History Folder", Width = 150, Height = 32, Margin = new Padding(10, 2, 0, 2) };
         openFolder.Click += (_, _) => OpenTarget(_history.Root);
         header.Controls.Add(openFolder);
@@ -202,11 +210,12 @@ public sealed class DeploymentHistoryForm : Form
         }
     }
 
-    private async Task LoadSelectedProjectAsync()
+    private async Task LoadSelectedProjectAsync(int pageIndex = 0)
     {
         _loadRequest?.Cancel();
         var generation = ++_generation;
         _currentAttempts = Array.Empty<DeploymentHistoryRecord>();
+        _newer.Enabled = _older.Enabled = false;
         _expandedAttemptIds.Clear();
         PopulateHistoryGrid();
         if (_projects.SelectedItem is not ProjectChoice choice)
@@ -224,16 +233,21 @@ public sealed class DeploymentHistoryForm : Form
         {
             var result = await Task.Run(() =>
             {
-                var summary = _history.GetSummary(id, request.Token);
-                return (Text: summary is null ? "No deployment history has been recorded yet." : BuildSummaryText(summary),
-                    Attempts: summary?.Attempts.OrderByDescending(x => x.StartedAtUtc).ToArray() ?? Array.Empty<DeploymentHistoryRecord>());
+                var data = _history.GetHistoryPage(id, pageIndex, HistoryPageSize, request.Token);
+                return (Text: data.Summary is null ? "No deployment history has been recorded yet." : BuildSummaryText(data.Summary, data.Rows),
+                    Page: data);
             }, request.Token);
             if (request.IsCancellationRequested || generation != _generation || IsDisposed || Disposing ||
                 (_projects.SelectedItem as ProjectChoice)?.ProjectId != id) return;
-            _currentAttempts = result.Attempts;
+            _currentAttempts = result.Page.Rows;
+            _pageIndex = result.Page.PageIndex;
             _summary.Text = result.Text;
             PopulateHistoryGrid();
-            _status.Text = $"{result.Attempts.Length} attempt(s) recorded. Persistent history: {_history.Root}";
+            var pageCount = result.Page.TotalAttempts == 0 ? 0 : (result.Page.TotalAttempts - 1) / result.Page.PageSize + 1;
+            _newer.Enabled = _pageIndex > 0;
+            _older.Enabled = _pageIndex + 1 < pageCount;
+            _status.Text = pageCount == 0 ? "No deployment history recorded."
+                : $"Page {_pageIndex + 1}/{pageCount} · {result.Page.TotalAttempts} attempt(s) recorded. Persistent history: {_history.Root}";
         }
         catch (OperationCanceledException) when (request.IsCancellationRequested) { }
         catch (Exception ex)
@@ -303,7 +317,7 @@ public sealed class DeploymentHistoryForm : Form
         PopulateHistoryGrid();
     }
 
-    private static string BuildSummaryText(DeploymentProjectSummary s)
+    private static string BuildSummaryText(DeploymentProjectSummary s, IReadOnlyList<DeploymentHistoryRecord> page)
     {
         var lines = new List<string>
         {
@@ -334,11 +348,11 @@ public sealed class DeploymentHistoryForm : Form
             $"Full IIS Deploy count     : {s.FullDeployCount}",
             $"Prepared deploy count    : {s.PreparedDeployCount}",
             "",
-            "RELEASE / DEPLOYMENT TIMELINE",
+            "RELEASE / DEPLOYMENT TIMELINE — current page",
             new string('-', 72)
         };
 
-        foreach (var item in s.Attempts.OrderBy(x => x.StartedAtUtc))
+        foreach (var item in page.OrderBy(x => x.StartedAtUtc))
         {
             var version = string.IsNullOrWhiteSpace(item.ApplicationVersion) ? "version ?" : "V" + item.ApplicationVersion.TrimStart('V', 'v');
             var result = item.EndedAtUtc.HasValue ? item.Result : "In progress / interrupted";

@@ -11,6 +11,9 @@ namespace GenericWeb.DeploymentManager.Services;
 
 public sealed record DeploymentProjectCatalogEntry(string ProjectId, string ApplicationName, string SiteName, DateTime LatestDeploymentUtc);
 
+public sealed record DeploymentHistoryPage(DeploymentProjectSummary? Summary, IReadOnlyList<DeploymentHistoryRecord> Rows,
+    int PageIndex, int PageSize, int TotalAttempts);
+
 public sealed class DeploymentHistoryService
 {
     private readonly object _sync = new();
@@ -153,15 +156,74 @@ public sealed class DeploymentHistoryService
                 {
                     // Preserve the original record; never invent dates or successful outcomes.
                     // Report the same damaged row once per process rather than on every refresh.
-                    var key = path + ":" + lineNumber + ":" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(line)));
-                    if (ReportedDamagedRows.TryAdd(key, 0))
-                        InternalDiagnostics.Record(ex, "Read deployment history JSONL record (line " + lineNumber + ")");
+                    ReportDamagedRow(path, lineNumber, line, ex);
                 }
             }
         }
 
         ct.ThrowIfCancellationRequested();
         return latest.Values.OrderBy(x => x.StartedAtUtc).ToArray();
+    }
+
+    private static void ReportDamagedRow(string path, int lineNumber, string line, JsonException ex)
+    {
+        var key = path + ":" + lineNumber + ":" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(line.TrimEnd('\r', '\n'))));
+        if (ReportedDamagedRows.TryAdd(key, 0))
+            InternalDiagnostics.Record(ex, "Read deployment history JSONL record (line " + lineNumber + ")");
+    }
+
+    private T? ReadIndexed<T>(string projectId, Func<FileStream, DeploymentHistoryIndex.Snapshot, T> query, CancellationToken ct)
+        where T : class
+    {
+        var path = GetProjectFile(projectId);
+        try
+        {
+            lock (_sync)
+            {
+                ct.ThrowIfCancellationRequested();
+                using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                var length = source.Length;
+                var modified = File.GetLastWriteTimeUtc(path);
+                var snapshot = DeploymentHistoryIndex.Read(source, path, (line, text, error) => ReportDamagedRow(path, line, text, error), ct);
+                var result = query(source, snapshot);
+                ct.ThrowIfCancellationRequested();
+                if (!File.Exists(path) || source.Length != length || File.GetLastWriteTimeUtc(path) != modified)
+                    return null;
+                return result;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or NotSupportedException or UnauthorizedAccessException or JsonException)
+        {
+            // The legacy reader remains authoritative when an old encoding,
+            // incomplete tail, or a concurrent replacement prevents indexing.
+            return null;
+        }
+    }
+
+    public DeploymentHistoryPage GetHistoryPage(string projectId, int requestedPage, int pageSize, CancellationToken ct = default)
+    {
+        pageSize = Math.Clamp(pageSize, 1, 250);
+        int ClampPage(int count) => Math.Clamp(requestedPage, 0, count == 0 ? 0 : (count - 1) / pageSize);
+        var indexed = ReadIndexed(projectId, (source, snapshot) =>
+        {
+            var sorted = snapshot.Rows.OrderBy(r => r.StartedAtUtc).ThenBy(r => r.FirstOffset).ToArray();
+            var page = ClampPage(sorted.Length);
+            var rows = sorted.OrderByDescending(r => r.StartedAtUtc).ThenBy(r => r.FirstOffset)
+                .Skip(page * pageSize).Take(pageSize).Select(row =>
+                {
+                    ct.ThrowIfCancellationRequested();
+                    return DeploymentHistoryIndex.ReadRow(source, row);
+                }).ToArray();
+            var summary = sorted.Length == 0 ? null : BuildSummary(projectId, sorted.Select(r => r.ToSummaryRecord()).ToArray());
+            return new DeploymentHistoryPage(summary, rows, page, pageSize, sorted.Length);
+        }, ct);
+        if (indexed is not null) return indexed;
+
+        var attempts = GetAttempts(projectId, ct);
+        var fallbackPage = ClampPage(attempts.Count);
+        var fallbackRows = attempts.OrderByDescending(r => r.StartedAtUtc).Skip(fallbackPage * pageSize).Take(pageSize).ToArray();
+        return new(attempts.Count == 0 ? null : BuildSummary(projectId, attempts), fallbackRows,
+            fallbackPage, pageSize, attempts.Count);
     }
 
     public IReadOnlyList<DeploymentProjectSummary> GetProjectSummaries()
@@ -193,6 +255,17 @@ public sealed class DeploymentHistoryService
         {
             ct.ThrowIfCancellationRequested();
             var projectId = Path.GetFileNameWithoutExtension(path);
+            var indexed = ReadIndexed(projectId, (_, snapshot) =>
+            {
+                var row = snapshot.Rows.OrderBy(x => x.StartedAtUtc).ThenBy(x => x.FirstOffset).LastOrDefault();
+                return new CatalogLookup(row is null ? null : new(projectId, row.ApplicationName, row.SiteName,
+                    row.EndedAtUtc ?? row.StartedAtUtc));
+            }, ct);
+            if (indexed is not null)
+            {
+                if (indexed.Entry is not null) catalog.Add(indexed.Entry);
+                continue;
+            }
             var attempts = GetAttempts(projectId, ct);
             if (attempts.Count == 0) continue;
             var latest = attempts[^1];
@@ -202,6 +275,8 @@ public sealed class DeploymentHistoryService
         return catalog.OrderByDescending(x => x.LatestDeploymentUtc)
             .ThenBy(x => x.ApplicationName, StringComparer.OrdinalIgnoreCase).ToArray();
     }
+
+    private sealed record CatalogLookup(DeploymentProjectCatalogEntry? Entry);
 
     public DeploymentProjectSummary? GetSummary(string projectId, CancellationToken ct = default)
     {

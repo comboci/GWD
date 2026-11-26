@@ -10,7 +10,7 @@ using System.IO.Compression;
 
 namespace GenericWeb.DeploymentManager;
 
-public sealed class WizardForm : Form
+public sealed partial class WizardForm : Form
 {
     private readonly DeploymentProfile _profile = new();
     private readonly AppDataService _appData = new();
@@ -73,6 +73,10 @@ public sealed class WizardForm : Form
     private CheckBox? _lockSourceAction;
     private Button? _exportSourceAction;
     private int _pageIndex;
+    private int _renderedPageIndex = -1;
+    private bool _navigationInProgress;
+    private bool _pageActionRunning;
+    private Action? _refreshScanCards;
     private int _lastLoggedPageIndex = -1;
     private bool _scanCompleted;
     private PrerequisiteState _iisState = new(false, "Not scanned");
@@ -297,7 +301,7 @@ public sealed class WizardForm : Form
                 Cursor = Cursors.Hand
             };
             var stepIndex = _stepLabels.Count;
-            label.Click += (_, _) => { if (!_operationRunning && !_autoDeployRunning && !_dependencySyncRunning) ShowPage(stepIndex); };
+            label.Click += (_, _) => { if (CanNavigateInteractively()) ShowPage(stepIndex); };
             _stepLabels.Add(label);
             _stepPanel.Controls.Add(label);
         }
@@ -382,21 +386,25 @@ public sealed class WizardForm : Form
         var menu = new MenuStrip { Dock = DockStyle.Top };
         var fileMenu = new ToolStripMenuItem("File");
         var saveMenu = new ToolStripMenuItem("Save Profile");
-        saveMenu.Click += (_, _) => { if (_operationRunning || _autoDeployRunning) return; ShowPage(0); _saveProfileAction?.PerformClick(); };
+        saveMenu.Click += (_, _) => { if (!CanNavigateInteractively()) return; ShowPage(0); _saveProfileAction?.PerformClick(); };
         var loadMenu = new ToolStripMenuItem("Load Profile");
-        loadMenu.Click += (_, _) => { if (_operationRunning || _autoDeployRunning) return; ShowPage(0); _loadProfileAction?.PerformClick(); };
+        loadMenu.Click += (_, _) => { if (!CanNavigateInteractively()) return; ShowPage(0); _loadProfileAction?.PerformClick(); };
         fileMenu.DropDownItems.Add(saveMenu);
         fileMenu.DropDownItems.Add(loadMenu);
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
         var settingsButton = new Button { Text = "Settings", Width = 110, Height = 36 };
         settingsButton.Click += (_, _) =>
         {
+            if (!CanNavigateInteractively()) return;
+            FlushDeferredSettingsSaves();
             using var dialog = new SettingsForm(_appData);
             if (dialog.ShowDialog(this) == DialogResult.OK)
             {
                 _profile.DeploymentRepositoryFolder = _appData.GetDeploymentRepositoryFolder();
                 _profile.WorkspaceRoot = _appData.GetWorkspaceRoot();
                 AppendLog("Settings updated. Release output: " + _appData.GetManagerReleaseRoot());
+                // These views display the settings that just changed.
+                if (_pageIndex == 0 || _pageIndex == 4) RebuildCurrentPage();
             }
         };
 
@@ -419,18 +427,18 @@ public sealed class WizardForm : Form
         menu.Items.Add(fileMenu);
         var actionsMenu = new ToolStripMenuItem("Actions");
         var cleanupMenu = new ToolStripMenuItem("Clean Previous Versions");
-        cleanupMenu.Click += async (_, _) => { if (!_operationRunning && !_autoDeployRunning) await CleanupPreviousVersionsAsync(); };
+        cleanupMenu.Click += async (_, _) => { if (CanNavigateInteractively()) await CleanupPreviousVersionsAsync(); };
         actionsMenu.DropDownItems.Add(cleanupMenu);
         var deploymentCleanupMenu = new ToolStripMenuItem("Deployment Cleanup...");
-        deploymentCleanupMenu.Click += async (_, _) => { if (!_operationRunning && !_autoDeployRunning && !_dependencySyncRunning) await ShowDeploymentCleanupAsync(); };
+        deploymentCleanupMenu.Click += async (_, _) => { if (CanNavigateInteractively()) await ShowDeploymentCleanupAsync(); };
         actionsMenu.DropDownItems.Add(deploymentCleanupMenu);
         menu.Items.Add(actionsMenu);
         actionsMenu.DropDownItems.Add(new ToolStripSeparator());
         var lockSourceMenu = new ToolStripMenuItem("Lock Source") { CheckOnClick = false };
-        lockSourceMenu.Click += (_, _) => { if (_pageIndex != 0) ShowPage(0); if (_lockSourceAction is { IsDisposed: false } control) { control.Checked = !control.Checked; lockSourceMenu.Checked = control.Checked; } };
+        lockSourceMenu.Click += (_, _) => { if (!CanNavigateInteractively()) return; if (_pageIndex != 0) ShowPage(0); if (_lockSourceAction is { IsDisposed: false } control) { control.Checked = !control.Checked; lockSourceMenu.Checked = control.Checked; } };
         actionsMenu.DropDownItems.Add(lockSourceMenu);
         var exportSourceMenu = new ToolStripMenuItem("Export Clean Source ZIP");
-        exportSourceMenu.Click += (_, _) => { if (_pageIndex != 0) ShowPage(0); _exportSourceAction?.PerformClick(); };
+        exportSourceMenu.Click += (_, _) => { if (!CanNavigateInteractively()) return; if (_pageIndex != 0) ShowPage(0); _exportSourceAction?.PerformClick(); };
         actionsMenu.DropDownItems.Add(exportSourceMenu);
         var diagnosticsMenu = new ToolStripMenuItem("Diagnostics Center");
         diagnosticsMenu.Click += (_, _) => viewLogs.PerformClick();
@@ -459,7 +467,7 @@ public sealed class WizardForm : Form
         Controls.Add(menu);
 
 
-        _back.Click += (_, _) => { if (_pageIndex > 0) ShowPage(_pageIndex - 1); };
+        _back.Click += (_, _) => { if (CanNavigateInteractively() && _pageIndex > 0) ShowPage(_pageIndex - 1); };
         _next.Click += async (_, _) => await NextAsync();
         _autoDeploy.Click += async (_, _) =>
         {
@@ -557,7 +565,7 @@ public sealed class WizardForm : Form
 
     private void ResetWizard(bool clearLog)
     {
-        if (_operationRunning)
+        if (!CanNavigateInteractively())
         {
             MessageBox.Show(this, "Cancel the running deployment before starting over.", "Start over", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
@@ -579,6 +587,7 @@ public sealed class WizardForm : Form
         _autoDeployCts = null;
         _deployment.ResetPerformanceSnapshot();
         InvalidateNavigationSourceReadiness();
+        CancelBackgroundVerification();
         DisposeContentControls();
 
         // Keep the selected project so Start Over returns to Project Source ready for confirmation/change.
@@ -596,6 +605,7 @@ public sealed class WizardForm : Form
         _offlineDependenciesReady = false;
         _offlineDependenciesDetail = "Not checked";
         _scanCompleted = false;
+        _iisAutoVerified = _runtimesAutoVerified = _deploymentLocationAutoVerified = false;
         
         
         _iisState = new(false, "Not scanned");
@@ -633,42 +643,68 @@ public sealed class WizardForm : Form
         _lastLoggedPageIndex = -1;
         _healthMonitor.Start();
         ShowPage(0);
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false, compacting: false);
+        // Allow normal GC scheduling; Start Over need not trigger a full-generation collection.
     }
 
-    private void ShowPage(int index)
-    {
-        var previousPage = _pageIndex;
-        _pageIndex = Math.Clamp(index, 0, _steps.Length - 1);
-        if (_lastLoggedPageIndex != _pageIndex)
-        {
-            if (_lastLoggedPageIndex >= 0)
-                AppendLog($"[STAGE-END] {_steps[_lastLoggedPageIndex]}");
-            AppendLog("[STAGE-SEPARATOR] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            AppendLog($"[STAGE-START] Step {_pageIndex + 1}/{_steps.Length} — {_steps[_pageIndex]}");
-            _lastLoggedPageIndex = _pageIndex;
-        }
-        _activity.Visible = _pageIndex != _steps.Length - 1;
-        UpdateDeploymentIndicator();
-        UpdateStepIndicator();
-        DisposeContentControls();
-        _stepIndicator.Text = $"Step {_pageIndex + 1} of {_steps.Length}";
-        _back.Enabled = _pageIndex > 0;
-        _next.Text = _pageIndex == _steps.Length - 1 ? ((_persistentState.LastResult == "Failed" || _persistentState.LastResult == "RecoveryFailed") ? "Retry Deploy" : (_persistentState.LastResult == "Successful" ? "Deploy Again" : "Deploy")) : "Next >";
-        _progress.Value = (int)Math.Round((_pageIndex / (double)(_steps.Length - 1)) * 100);
+    private bool CanNavigateInteractively() =>
+        !IsDisposed && !Disposing && !_operationRunning && !_autoDeployRunning &&
+        !_dependencySyncRunning && !_navigationInProgress && !_pageActionRunning;
 
-        switch (_pageIndex)
+    // Keep the original one-argument entry point for existing smoke tests.
+    private void ShowPage(int index) => NavigateToPage(index, forceRebuild: false);
+
+    private void RebuildCurrentPage() => NavigateToPage(_pageIndex, forceRebuild: true);
+
+    private void NavigateToPage(int index, bool forceRebuild)
+    {
+        if (IsDisposed || Disposing) return;
+        var requested = Math.Clamp(index, 0, _steps.Length - 1);
+        if (!forceRebuild && _renderedPageIndex == requested && _pageIndex == requested &&
+            _content.Controls.Count > 0)
         {
-            case 0: BuildProjectSourcePage(); break;
-            case 1: BuildTargetPage(); break;
-            case 2: BuildScanPage(); break;
-            case 3: BuildIisPage(); break;
-            case 4: BuildInstallersPage(); break;
-            case 5: BuildSqlPage(); break;
-            case 6: BuildDeploymentLocationPage(); break;
-            case 7: BuildReviewPage(); break;
+            // Re-selecting the active step is not a request to reset its controls.
+            UpdateStepIndicator();
+            UpdateNavigationState();
+            return;
         }
-        ApplyInteractiveCursors(this);
+
+        _content.SuspendLayout();
+        try
+        {
+            // Flush the outgoing view while its controls and page identity still exist.
+            DisposeContentControls();
+            _pageIndex = requested;
+            if (_lastLoggedPageIndex != _pageIndex)
+            {
+                if (_lastLoggedPageIndex >= 0)
+                    AppendLog($"[STAGE-END] {_steps[_lastLoggedPageIndex]}");
+                AppendLog("[STAGE-SEPARATOR] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                AppendLog($"[STAGE-START] Step {_pageIndex + 1}/{_steps.Length} — {_steps[_pageIndex]}");
+                _lastLoggedPageIndex = _pageIndex;
+            }
+            _activity.Visible = _pageIndex != _steps.Length - 1;
+            UpdateDeploymentIndicator();
+            UpdateStepIndicator();
+            _stepIndicator.Text = $"Step {_pageIndex + 1} of {_steps.Length}";
+            _back.Enabled = _pageIndex > 0;
+            _next.Text = _pageIndex == _steps.Length - 1 ? ((_persistentState.LastResult == "Failed" || _persistentState.LastResult == "RecoveryFailed") ? "Retry Deploy" : (_persistentState.LastResult == "Successful" ? "Deploy Again" : "Deploy")) : "Next >";
+            _progress.Value = (int)Math.Round((_pageIndex / (double)(_steps.Length - 1)) * 100);
+
+            switch (_pageIndex)
+            {
+                case 0: BuildProjectSourcePage(); break;
+                case 1: BuildTargetPage(); break;
+                case 2: BuildScanPage(); break;
+                case 3: BuildIisPage(); break;
+                case 4: BuildInstallersPage(); break;
+                case 5: BuildSqlPage(); break;
+                case 6: BuildDeploymentLocationPage(); break;
+                case 7: BuildReviewPage(); break;
+            }
+            _renderedPageIndex = _pageIndex;
+            ApplyInteractiveCursors(_content);
+        }
+        finally { _content.ResumeLayout(true); }
         UpdateNavigationState();
     }
 
@@ -705,6 +741,9 @@ public sealed class WizardForm : Form
 
     private void DisposeContentControls()
     {
+        _renderedPageIndex = -1;
+        _refreshScanCards = null;
+        if (_pageIndex == 0) CancelBackgroundVerification();
         // Source/target controls may own the latest unsaved edit. Their queued
         // actions must execute while controls are still alive.
         FlushDeferredSettingsSaves();
@@ -851,13 +890,13 @@ public sealed class WizardForm : Form
         }
         else
         {
-            _next.Enabled = canNext && !_autoDeployRunning && !_dependencySyncRunning;
+            _next.Enabled = canNext && CanNavigateInteractively();
         }
-        _back.Enabled = _pageIndex > 0 && !_operationRunning && !_autoDeployRunning && !_dependencySyncRunning;
+        _back.Enabled = _pageIndex > 0 && CanNavigateInteractively();
         if (_autoDeployRunning)
             _autoDeploy.Enabled = _autoDeployCts?.IsCancellationRequested != true;
         else
-            _autoDeploy.Enabled = !_operationRunning && !_dependencySyncRunning && CanAutoDeployStart();
+            _autoDeploy.Enabled = CanNavigateInteractively() && CanAutoDeployStart();
     }
 
     private bool CanLeaveTargetPage()
@@ -930,7 +969,8 @@ public sealed class WizardForm : Form
 
     private async Task AutoDeployAsync()
     {
-        if (_operationRunning || _autoDeployRunning) return;
+        if (!CanNavigateInteractively()) return;
+        CancelBackgroundVerification();
 
         _autoDeployCts?.Dispose();
         _autoDeployCts = new CancellationTokenSource();
@@ -964,7 +1004,7 @@ public sealed class WizardForm : Form
                         break;
 
                     case 2:
-                        await ScanEnvironmentAsync();
+                        await ScanEnvironmentAsync(ct);
                         ct.ThrowIfCancellationRequested();
                         if (!_scanCompleted) throw new InvalidOperationException("Environment scan did not complete.");
                         break;
@@ -1152,9 +1192,12 @@ public sealed class WizardForm : Form
     {
         if (_operationRunning)
         {
-            RequestDeploymentCancellation();
+            if (_pageIndex == _steps.Length - 1) RequestDeploymentCancellation();
             return;
         }
+        if (!CanNavigateInteractively()) return;
+        _navigationInProgress = true;
+        UpdateNavigationState();
         try
         {
             switch (_pageIndex)
@@ -1222,7 +1265,11 @@ public sealed class WizardForm : Form
             if (_pageIndex <= 1) InvalidateNavigationSourceReadiness();
             MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Cannot continue", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             AppendLog("ERROR: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message));
-            UpdateNavigationState();
+        }
+        finally
+        {
+            _navigationInProgress = false;
+            if (!IsDisposed && !Disposing) UpdateNavigationState();
         }
     }
 
@@ -1234,693 +1281,6 @@ public sealed class WizardForm : Form
         body.Controls.Add(InfoBox("What this wizard does", "• Detects the selected ASP.NET Core web project and its target .NET version\r\n• Checks and enables IIS\r\n• Reuses cached/local installers or downloads missing prerequisites\r\n• Detects or installs SQL Server Express\r\n• Creates/prepares the database\r\n• Supports automatic build, Visual Studio-prepared source, or an already-published folder\r\n• Publishes/deploys and configures IIS\r\n• Runs a health check before reporting success"));
         body.Controls.Add(InfoBox("Safe workflow", "Each prerequisite is validated before the Next button is enabled. Reusable installers and offline dependency packages are stored in the selected Deployment Repository, separate from the application source, so they can be reused across deployments."));
         _content.Controls.Add(body);
-    }
-
-    private void BuildProjectSourcePage()
-    {
-        _pageTitle.Text = "Select source and dependency strategy";
-        _pageDescription.Text = "Choose the incoming source and all build/dependency settings here. Source preflight runs automatically. Persistent dependencies and stable build workspaces stay outside the versioned source folder.";
-        var form = FormGrid();
-        var source = new TextBox { Text = _profile.SourceFolder, Dock = DockStyle.Fill, ReadOnly = true, TabStop = false, BackColor = SystemColors.Window };
-        var browse = new Button { Text = "Browse source...", AutoSize = true };
-        var lockSource = new CheckBox { Text = "Lock source", AutoSize = true, Checked = false, Margin = new Padding(8, 7, 3, 3) };
-        var saveProfile = new Button { Text = "Save Profile", AutoSize = true };
-        var loadProfile = new Button { Text = "Load Profile", AutoSize = true };
-        _saveProfileAction = saveProfile;
-        _loadProfileAction = loadProfile;
-        var exportSource = new Button { Text = "Export Clean Source ZIP", AutoSize = true };
-        _lockSourceAction = lockSource;
-        _exportSourceAction = exportSource;
-        // A single compact action strip stays opposite the Deployment profile label.
-        foreach (var action in new Control[] { saveProfile, loadProfile, lockSource, exportSource })
-        {
-            action.Font = new Font("Segoe UI", 8.5F);
-            action.Margin = new Padding(2, 1, 3, 1);
-        }
-        var profileActions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight };
-        // Actions are exposed through the top menu; no duplicate controls on the page.
-        var sourceRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
-        sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        sourceRow.Controls.Add(source, 0, 0); sourceRow.Controls.Add(browse, 1, 0);
-
-        var detectedRoot = new Label { AutoSize = true, MaximumSize = new Size(850, 0), ForeColor = Color.DimGray };
-        var app = new TextBox { Width = 260 };
-        var site = new TextBox { Width = 260 };
-        var database = new TextBox { Width = 260 };
-        var buildMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 };
-        buildMode.Items.AddRange(new object[] { "Fast Local Test", "Fast IIS Update", "Full IIS Deploy", "Visual Studio prepared", "Prepared IIS Publish" });
-        buildMode.SelectedItem = buildMode.Items.Cast<object>().FirstOrDefault(x => string.Equals(x.ToString(), _profile.BuildMode, StringComparison.OrdinalIgnoreCase)) ?? buildMode.Items[0];
-        var dependencyMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
-        dependencyMode.Items.AddRange(new object[] { "Offline Only", "Hybrid", "Online" });
-        dependencyMode.SelectedItem = NormalizeDependencyMode(_profile.DependencyResolutionMode);
-        var modeMeaning = new Label { AutoSize = true, MaximumSize = new Size(800, 0), ForeColor = Color.DarkOrange };
-        var preparedPublish = new TextBox { Text = _profile.ReadyPublishFolder, Dock = DockStyle.Fill };
-        var browsePreparedPublish = new Button { Text = "Browse prepared publish...", AutoSize = true };
-        var preparedPublishRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
-        preparedPublishRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); preparedPublishRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        preparedPublishRow.Controls.Add(preparedPublish, 0, 0); preparedPublishRow.Controls.Add(browsePreparedPublish, 1, 0);
-        var preparedValidation = new Label { AutoSize = true, MaximumSize = new Size(800, 0), ForeColor = Color.DimGray, Text = "Select Prepared IIS Publish mode to validate a prebuilt IIS artifact." };
-
-        var repository = new TextBox { Text = _profile.DeploymentRepositoryFolder, Dock = DockStyle.Fill };
-        var browseRepository = new Button { Text = "Browse repository...", AutoSize = true };
-        var repositoryRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
-        repositoryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); repositoryRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        repositoryRow.Controls.Add(repository, 0, 0); repositoryRow.Controls.Add(browseRepository, 1, 0);
-
-        var workspace = new TextBox { Text = _profile.WorkspaceRoot, Dock = DockStyle.Fill };
-        var browseWorkspace = new Button { Text = "Browse workspace...", AutoSize = true };
-        var workspaceRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
-        workspaceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); workspaceRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        workspaceRow.Controls.Add(workspace, 0, 0); workspaceRow.Controls.Add(browseWorkspace, 1, 0);
-
-        var offlineAction = new Button { Text = "Sync Missing Online Once", AutoSize = true };
-        var offlineTest = new Button { Text = "Test Offline Build", AutoSize = true };
-        var offlineState = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(800, 0), Text = "Dependency readiness has not been checked yet." };
-        var dependencySyncProgress = new ProgressBar { Width = 360, Height = 18, Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 28, Visible = false };
-        var dependencySyncActivity = new Label { AutoSize = true, ForeColor = Color.RoyalBlue, MaximumSize = new Size(800, 0), Visible = false, Text = "Checking dependencies..." };
-
-        AddRow(form, "Source folder", sourceRow);
-
-        AddRow(form, "Detected source root", detectedRoot);
-        AddRow(form, "Application name", app);
-        AddRow(form, "IIS site name", site);
-        AddRow(form, "Database name", database);
-        AddRow(form, "Build / deployment mode", buildMode);
-        AddRow(form, "Dependency mode", dependencyMode);
-        AddRow(form, "Selected behavior", modeMeaning);
-        AddRow(form, "Prepared publish folder", preparedPublishRow);
-        AddRow(form, "Prepared publish validation", preparedValidation);
-        AddRow(form, "Shared Dependency Repository", repositoryRow);
-        AddRow(form, "Repository behavior", new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(800, 0), Text = "Persistent across source versions. NuGet/npm/installers/offline packages live here; the incoming source folder is never used as the dependency repository." });
-        AddRow(form, "Stable Build Workspace", workspaceRow);
-        AddRow(form, "Workspace behavior", new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(800, 0), Text = "Persistent build working area. Versioned incoming sources may be deleted after deployment without losing reusable dependency/build state." });
-        AddRow(form, "Dependency actions", Wrap(offlineAction, offlineTest));
-        AddRow(form, "Dependency status", offlineState);
-        AddRow(form, "Dependency sync", Wrap(dependencySyncProgress, dependencySyncActivity));
-        var sourceTestResult = new Label { AutoSize = true, MaximumSize = new Size(800, 0), ForeColor = Color.DimGray, Text = "Automatic source preflight starts as soon as a valid source folder is selected." };
-        AddRow(form, "Automatic source preflight", sourceTestResult);
-        _content.Controls.Add(form);
-
-        void RefreshPreparedPublishValidation()
-        {
-            var prepared = string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase);
-            preparedPublish.Enabled = browsePreparedPublish.Enabled = prepared;
-            repository.Enabled = browseRepository.Enabled = workspace.Enabled = browseWorkspace.Enabled = dependencyMode.Enabled = !prepared;
-            if (!prepared) { preparedValidation.Text = "Not applicable for source-build mode."; preparedValidation.ForeColor = Color.DimGray; return; }
-            _profile.ReadyPublishFolder = preparedPublish.Text.Trim();
-            var validation = DeploymentService.ValidatePreparedPublish(_profile.ReadyPublishFolder);
-            RememberNavigationSourceReadiness(true, _profile.ReadyPublishFolder, validation.Ok);
-            preparedValidation.Text = validation.Detail;
-            preparedValidation.ForeColor = validation.Ok ? Color.ForestGreen : Color.Firebrick;
-            if (validation.Ok && string.IsNullOrWhiteSpace(app.Text) && !string.IsNullOrWhiteSpace(validation.ApplicationBinary))
-            {
-                var inferred = Path.GetFileNameWithoutExtension(validation.ApplicationBinary);
-                if (inferred.EndsWith(".Api", StringComparison.OrdinalIgnoreCase)) inferred = inferred[..^4];
-                app.Text = inferred;
-                var safe = new string(inferred.Where(char.IsLetterOrDigit).ToArray());
-                if (string.IsNullOrWhiteSpace(site.Text)) site.Text = safe;
-                if (string.IsNullOrWhiteSpace(database.Text)) database.Text = safe;
-            }
-            _profile.RequiresNode = false;
-        }
-
-        void Detect()
-        {
-            _profile.SourceFolder = source.Text.Trim();
-            var api = Directory.Exists(_profile.SourceFolder) ? _environment.DetectApiProject(_profile.SourceFolder) : null;
-            RememberNavigationSourceReadiness(false, _profile.SourceFolder, !string.IsNullOrWhiteSpace(api));
-            if (api is null)
-            {
-                _profile.ApiProjectPath = string.Empty;
-                detectedRoot.Text = "No ASP.NET Core Web project detected."; detectedRoot.ForeColor = Color.Firebrick;
-                app.Text = site.Text = database.Text = string.Empty;
-            }
-            else
-            {
-                _profile.ApiProjectPath = api;
-                var root = DeploymentService.ResolveCanonicalSourceRoot(_profile.SourceFolder, api);
-                detectedRoot.Text = root + "\r\nWeb project: " + api; detectedRoot.ForeColor = Color.ForestGreen;
-                var inferred = InferApplicationName(_profile.SourceFolder, api);
-                app.Text = inferred;
-                var safe = new string(inferred.Where(char.IsLetterOrDigit).ToArray());
-                site.Text = safe; database.Text = safe;
-            }
-            UpdateNavigationState();
-        }
-
-        static bool IsGeneratedFrontendCandidate(string root, string file)
-        {
-            var rel = "/" + Path.GetRelativePath(root, file).Replace('\\','/').Trim('/') + "/";
-            string[] excluded = { "/node_modules/", "/bin/", "/obj/", "/dist/", "/build/", "/out/", "/.vite/", "/iis-publish/", "/publish/" };
-            return excluded.Any(x => rel.Contains(x, StringComparison.OrdinalIgnoreCase));
-        }
-
-        // Only one source preflight may publish results for the current page.
-        // Cancellation does not interrupt every filesystem API, but it prevents stale
-        // results from being applied after a source/mode change or page disposal.
-        CancellationTokenSource? sourcePreflightCts = null;
-        var sourcePreflightGeneration = 0;
-
-        void CancelSourcePreflight()
-        {
-            sourcePreflightGeneration++;
-            sourcePreflightCts?.Cancel();
-        }
-
-        sourceTestResult.Disposed += (_, _) => CancelSourcePreflight();
-
-        void RunSourceTests()
-        {
-            CancelSourcePreflight();
-            var request = new CancellationTokenSource();
-            sourcePreflightCts = request;
-            var generation = sourcePreflightGeneration;
-            var selectedMode = _profile.BuildMode;
-            var selectedSource = source.Text.Trim();
-            var selectedPrepared = preparedPublish.Text.Trim();
-            sourceTestResult.Text = "Running source preflight tests...";
-            sourceTestResult.ForeColor = Color.RoyalBlue;
-            _ = RunSourceTestsAsync(request, generation, selectedMode, selectedSource, selectedPrepared);
-        }
-
-        async Task RunSourceTestsAsync(CancellationTokenSource request, int generation, string mode, string selectedSource, string selectedPrepared)
-        {
-            try
-            {
-                // Coalesce consecutive programmatic TextChanged events and large-folder selections.
-                await Task.Delay(200, request.Token);
-                // Worker code never reads or writes WinForms controls or mutable profile fields.
-                var result = await Task.Run(
-                    () => InspectSourcePreflight(_environment, mode, selectedSource, selectedPrepared, request.Token),
-                    request.Token);
-                if (request.IsCancellationRequested || generation != sourcePreflightGeneration ||
-                    IsDisposed || Disposing || sourceTestResult.IsDisposed || _pageIndex != 0 ||
-                    !string.Equals(mode, _profile.BuildMode, StringComparison.Ordinal) ||
-                    !string.Equals(selectedSource, source.Text.Trim(), StringComparison.Ordinal) ||
-                    (string.Equals(mode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase) &&
-                     !string.Equals(selectedPrepared, preparedPublish.Text.Trim(), StringComparison.Ordinal)))
-                    return;
-
-                sourceTestResult.Text = string.Join(Environment.NewLine, result.Lines);
-                sourceTestResult.ForeColor = result.Failures == 0 ? Color.ForestGreen : Color.Firebrick;
-                if (string.Equals(mode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
-                    RefreshPreparedPublishValidation();
-                else
-                    AppendLog($"Source preflight completed: {Math.Max(0, result.Lines.Length - result.Failures)} passed, {result.Failures} failed.");
-            }
-            catch (OperationCanceledException) when (request.IsCancellationRequested) { }
-            catch (Exception ex)
-            {
-                InternalDiagnostics.Record(ex, "Source preflight background task");
-                if (!request.IsCancellationRequested && generation == sourcePreflightGeneration &&
-                    !IsDisposed && !Disposing && !sourceTestResult.IsDisposed && _pageIndex == 0)
-                {
-                    sourceTestResult.Text = "FAIL — " + SecretRedactor.Redact(ex.Message);
-                    sourceTestResult.ForeColor = Color.Firebrick;
-                }
-            }
-            finally
-            {
-                if (ReferenceEquals(sourcePreflightCts, request)) sourcePreflightCts = null;
-                request.Dispose();
-            }
-        }
-
-        static (string[] Lines, int Failures) InspectSourcePreflight(
-            EnvironmentService environment, string mode, string selectedSource, string selectedPrepared, CancellationToken ct)
-        {
-            var lines = new List<string>();
-            var failures = 0;
-            try
-            {
-                ct.ThrowIfCancellationRequested();
-                if (string.Equals(mode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
-                {
-                    var validation = DeploymentService.ValidatePreparedPublish(selectedPrepared);
-                    ct.ThrowIfCancellationRequested();
-                    lines.Add(validation.Ok ? "PASS — " + validation.Detail : "FAIL — " + validation.Detail);
-                    if (!validation.Ok) failures++;
-                    return (lines.ToArray(), failures);
-                }
-                if (!Directory.Exists(selectedSource))
-                    throw new DirectoryNotFoundException("Select an existing source folder first.");
-                var api = environment.DetectApiProject(selectedSource);
-                ct.ThrowIfCancellationRequested();
-                var structureOk = !string.IsNullOrWhiteSpace(api);
-                lines.Add($"{(structureOk ? "PASS" : "FAIL")} — Web project structure: {(structureOk ? api : "ASP.NET Core Web .csproj not found")}");
-                if (!structureOk) failures++;
-                var frameworkOk = structureOk && File.Exists(api);
-                var major = frameworkOk ? environment.DetectTargetFrameworkMajor(api!) : 0;
-                lines.Add($"{(frameworkOk ? "PASS" : "FAIL")} — Target framework: {(frameworkOk ? ".NET " + major : "cannot detect without Web project")}");
-                if (!frameworkOk) failures++;
-                ct.ThrowIfCancellationRequested();
-                var required = environment.DetectNodeRequirement(selectedSource, api ?? string.Empty);
-                var packages = Directory.EnumerateFiles(selectedSource, "package.json", SearchOption.AllDirectories)
-                    .Where(p => { ct.ThrowIfCancellationRequested(); return !IsGeneratedFrontendCandidate(selectedSource, p); })
-                    .Take(10).ToArray();
-                var viteRoots = packages.Select(Path.GetDirectoryName).Where(p => !string.IsNullOrWhiteSpace(p))
-                    .Where(p => File.Exists(Path.Combine(p!, "index.html")) &&
-                        Directory.EnumerateFiles(p!, "vite.config.*", SearchOption.TopDirectoryOnly).Any())
-                    .ToArray();
-                ct.ThrowIfCancellationRequested();
-                lines.Add($"PASS — Frontend / Node assets: {(required ? "detected" : "not required")} ({packages.Length} source package.json candidate(s))");
-                if (required && viteRoots.Length > 0) lines.Add($"PASS — Frontend root: {viteRoots[0]}");
-                else if (required) { lines.Add("FAIL — Frontend detected but no complete source frontend root (index.html + vite.config.*) was found."); failures++; }
-                _ = Directory.EnumerateFileSystemEntries(selectedSource, "*", SearchOption.TopDirectoryOnly).Take(1).ToArray();
-                ct.ThrowIfCancellationRequested();
-                lines.Add("PASS — Source access/readability");
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception ex)
-            {
-                failures++;
-                InternalDiagnostics.Record(ex, "Source preflight tests");
-                lines.Add("FAIL — " + SecretRedactor.Redact(ex.Message));
-            }
-            return (lines.ToArray(), failures);
-        }
-
-        void ApplyDependencyMode()
-        {
-            _profile.DependencyResolutionMode = NormalizeDependencyMode(dependencyMode.SelectedItem?.ToString());
-            _profile.OfflineBuild = string.Equals(_profile.DependencyResolutionMode, "Offline Only", StringComparison.OrdinalIgnoreCase);
-            _appData.SaveDependencyResolutionMode(_profile.DependencyResolutionMode);
-            _offlineDependenciesReady = false;
-            offlineState.ForeColor = Color.DimGray;
-            offlineState.Text = _profile.DependencyResolutionMode switch
-            {
-                "Offline Only" => "Local Repository -> System Cache -> FAIL. Use Sync Missing Online Once while Internet is available, then Test Offline Build.",
-                "Hybrid" => "Local Repository -> System Cache -> Internet fallback. Sync is optional but recommended for future offline use.",
-                _ => "Online mode: package restore may use Internet sources; offline readiness is not required."
-            };
-            var sourceBuild = !string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase);
-            offlineAction.Enabled = sourceBuild && _profile.DependencyResolutionMode != "Online" && !_dependencySyncRunning;
-            offlineTest.Enabled = sourceBuild && _profile.DependencyResolutionMode == "Offline Only" && !_dependencySyncRunning;
-            UpdateNavigationState();
-        }
-
-        lockSource.CheckedChanged += (_, _) =>
-        {
-            // The path is always browse-only; locking also prevents folder changes.
-            browse.Enabled = !lockSource.Checked;
-            lockSource.Text = lockSource.Checked ? "Source locked" : "Lock source";
-        };
-        saveProfile.Click += (_, _) =>
-        {
-            Directory.CreateDirectory(ProfilesFolder);
-            using var dialog = new SaveFileDialog { Title = "Save deployment profile", Filter = "Deployment profile (*.json)|*.json", InitialDirectory = ProfilesFolder, FileName = string.IsNullOrWhiteSpace(_profile.ApplicationName) ? "deployment-profile.json" : _profile.ApplicationName.Replace(" ", "-") + ".json" };
-            if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            var dto = DeploymentProfileSnapshot.From(_profile, lockSource.Checked);
-            File.WriteAllText(dialog.FileName, JsonSerializer.Serialize(dto, new JsonSerializerOptions { WriteIndented = true }));
-            AppendLog("[PROFILE] Saved: " + dialog.FileName + " (secrets excluded)");
-        };
-        loadProfile.Click += (_, _) =>
-        {
-            Directory.CreateDirectory(ProfilesFolder);
-            using var dialog = new OpenFileDialog { Title = "Load deployment profile", Filter = "Deployment profile (*.json)|*.json", InitialDirectory = ProfilesFolder };
-            if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            try
-            {
-                var dto = JsonSerializer.Deserialize<DeploymentProfileSnapshot>(File.ReadAllText(dialog.FileName)) ?? throw new InvalidDataException("Profile is empty.");
-                dto.ApplyTo(_profile);
-                source.Text = _profile.SourceFolder; app.Text = _profile.ApplicationName; site.Text = _profile.SiteName; database.Text = _profile.DatabaseName;
-                repository.Text = _profile.DeploymentRepositoryFolder; workspace.Text = _profile.WorkspaceRoot; preparedPublish.Text = _profile.ReadyPublishFolder;
-                buildMode.SelectedItem = buildMode.Items.Cast<object>().FirstOrDefault(x => string.Equals(x.ToString(), _profile.BuildMode, StringComparison.OrdinalIgnoreCase)) ?? buildMode.Items[0];
-                dependencyMode.SelectedItem = NormalizeDependencyMode(_profile.DependencyResolutionMode);
-                lockSource.Checked = dto.SourceLocked;
-                AppendLog("[PROFILE] Loaded: " + dialog.FileName + " (secrets remain session-only)");
-            }
-            catch (Exception ex) { InternalDiagnostics.Record(ex, "Load deployment profile"); MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Profile", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-        };
-        exportSource.Click += (_, _) =>
-        {
-            var src = source.Text.Trim(); if (!Directory.Exists(src)) { MessageBox.Show(this, "Select a valid source folder first.", "Clean Source Export", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
-            using var options = new CleanExportOptionsForm(); if (options.ShowDialog(this) != DialogResult.OK) return;
-            using var dialog = new SaveFileDialog { Title = "Export clean source ZIP", Filter = "ZIP archive (*.zip)|*.zip", FileName = $"{SanitizeFileName(_profile.ApplicationName)}-Last-Sources.zip" };
-            if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            try { ExportCleanSourceWithProgress(src, dialog.FileName, options.Exclusions); MessageBox.Show(this, "Clean source ZIP created successfully.\r\n" + dialog.FileName, "Clean Source Export", MessageBoxButtons.OK, MessageBoxIcon.Information); AppendLog("[EXPORT] Clean source ZIP: " + dialog.FileName); }
-            catch (Exception ex) { InternalDiagnostics.Record(ex, "Clean source export"); MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Clean Source Export", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-        };
-
-        browse.Click += (_, _) =>
-        {
-            using var dialog = new FolderBrowserDialog { Description = "Select the new project release/source folder", SelectedPath = BrowseStartFolder(source.Text, BrowseContext.Source) };
-            if (dialog.ShowDialog(this) == DialogResult.OK) { source.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Source); }
-        };
-        browsePreparedPublish.Click += (_, _) =>
-        {
-            using var dialog = new FolderBrowserDialog { Description = "Select the final prepared ASP.NET Core IIS publish folder", SelectedPath = BrowseStartFolder(preparedPublish.Text, BrowseContext.Publish) };
-            if (dialog.ShowDialog(this) == DialogResult.OK) { preparedPublish.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Publish); }
-        };
-        void CommitAndValidatePreparedPublish()
-        {
-            var generation = ++_preparedValidationGeneration;
-            var selected = preparedPublish.Text.Trim();
-            try { selected = string.IsNullOrWhiteSpace(selected) ? string.Empty : Path.GetFullPath(selected); } catch { }
-            _profile.ReadyPublishFolder = selected;
-            if (preparedPublish.Text != selected) { preparedPublish.Text = selected; return; }
-            RefreshPreparedPublishValidation();
-            if (generation != _preparedValidationGeneration) return; // stale UI event must not overwrite newer selection
-            if (string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase)) RunSourceTests();
-            UpdateNavigationState();
-        }
-        preparedPublish.TextChanged += (_, _) => CommitAndValidatePreparedPublish();
-        browseRepository.Click += (_, _) =>
-        {
-            using var dialog = new FolderBrowserDialog { Description = @"Select persistent Shared Dependency Repository (for example G:\Developer-Packages)", SelectedPath = BrowseStartFolder(repository.Text, BrowseContext.Repository) };
-            if (dialog.ShowDialog(this) == DialogResult.OK) { repository.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Repository); }
-        };
-        browseWorkspace.Click += (_, _) =>
-        {
-            using var dialog = new FolderBrowserDialog { Description = "Select the persistent Stable Build Workspace root", SelectedPath = BrowseStartFolder(workspace.Text, BrowseContext.Workspace) };
-            if (dialog.ShowDialog(this) == DialogResult.OK) { workspace.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Workspace); }
-        };
-        source.TextChanged += async (_, _) =>
-        {
-            Detect();
-            _offlineDependenciesReady = false;
-            _offlineDependenciesDetail = "Source changed; dependency readiness must be rechecked if required.";
-            _backgroundVerifyCts?.Cancel(); _backgroundVerifyCts?.Dispose(); _backgroundVerifyCts = new CancellationTokenSource();
-            var token = _backgroundVerifyCts.Token;
-            if (Directory.Exists(source.Text.Trim()))
-            {
-                RunSourceTests();
-                try { await Task.Delay(250, token); if (!token.IsCancellationRequested) await RunBackgroundAutoVerificationAsync(token); }
-                catch (OperationCanceledException) { }
-            }
-            else { CancelSourcePreflight(); sourceTestResult.Text = "Waiting for a valid source folder..."; sourceTestResult.ForeColor = Color.DimGray; }
-        };
-        repository.TextChanged += (_, _) =>
-        {
-            _profile.DeploymentRepositoryFolder = repository.Text.Trim();
-            _profile.InstallerCacheFolder = Path.Combine(_profile.DeploymentRepositoryFolder, "Installers");
-            if (!string.IsNullOrWhiteSpace(_profile.DeploymentRepositoryFolder))
-                QueueDeferredSettingsSave("repository", () => _appData.SaveDeploymentRepositoryFolder(_profile.DeploymentRepositoryFolder));
-            _offlineDependenciesReady = false;
-            UpdateNavigationState();
-        };
-        workspace.TextChanged += (_, _) =>
-        {
-            _profile.WorkspaceRoot = workspace.Text.Trim();
-            if (!string.IsNullOrWhiteSpace(_profile.WorkspaceRoot))
-                QueueDeferredSettingsSave("workspace", () => _appData.SaveWorkspaceRoot(_profile.WorkspaceRoot));
-            UpdateNavigationState();
-        };
-        app.TextChanged += (_, _) => { _profile.ApplicationName = app.Text.Trim(); UpdateNavigationState(); };
-        repository.Leave += (_, _) => FlushDeferredSettingsSaves();
-        workspace.Leave += (_, _) => FlushDeferredSettingsSaves();
-        site.TextChanged += (_, _) => { _profile.SiteName = site.Text.Trim(); _profile.AppPoolName = _profile.SiteName; UpdateNavigationState(); };
-        database.TextChanged += (_, _) => { _profile.DatabaseName = database.Text.Trim(); UpdateNavigationState(); };
-        void RefreshModeMeaning() => modeMeaning.Text = _profile.BuildMode switch
-        {
-            "Fast Local Test" => "Compile/test only. The IIS website is NOT updated, so the browser can still show the previously hosted version.",
-            "Fast IIS Update" => "IIS deployment with fresh frontend build (when needed) and dotnet publish. Hosted-release reuse and fingerprint-based build skips are disabled pending release/rollback safety verification; dependency caches may still be reused.",
-            "Full IIS Deploy" => "Complete publish, IIS/database preparation, health check and rollback protection.",
-            "Prepared IIS Publish" => "Direct deploy of an already-built IIS publish. npm, frontend build, dotnet restore/build/publish and dependency sync are bypassed.",
-            _ => "Uses the selected prepared-source/publish workflow."
-        };
-        buildMode.SelectedIndexChanged += (_, _) => { _profile.BuildMode = buildMode.SelectedItem?.ToString() ?? "Fast Local Test"; RefreshModeMeaning(); ApplyDependencyMode(); if (_profile.BuildMode == "Prepared IIS Publish") CommitAndValidatePreparedPublish(); else { RefreshPreparedPublishValidation(); UpdateNavigationState(); RunSourceTests(); } };
-        dependencyMode.SelectedIndexChanged += (_, _) => ApplyDependencyMode();
-        RefreshModeMeaning();
-        RefreshPreparedPublishValidation();
-
-        offlineAction.Click += async (_, _) =>
-        {
-            if (_dependencySyncRunning) return;
-            _dependencySyncRunning = true;
-            try
-            {
-                _profile.SourceFolder = source.Text.Trim();
-                if (!Directory.Exists(_profile.SourceFolder)) throw new InvalidOperationException("Select a valid source folder first.");
-                if (string.IsNullOrWhiteSpace(_profile.DeploymentRepositoryFolder)) throw new InvalidOperationException("Select a persistent Shared Dependency Repository first.");
-                _profile.ApiProjectPath = _environment.DetectApiProject(_profile.SourceFolder) ?? throw new InvalidOperationException("No ASP.NET Core Web .csproj was found under the selected source folder.");
-                _profile.TargetFrameworkMajor = _environment.DetectTargetFrameworkMajor(_profile.ApiProjectPath);
-                _profile.RequiresNode = _environment.DetectNodeRequirement(_profile.SourceFolder, _profile.ApiProjectPath);
-                offlineAction.Enabled = false; offlineTest.Enabled = false;
-                dependencySyncProgress.Visible = true; dependencySyncActivity.Visible = true;
-                dependencySyncActivity.Text = "Checking NuGet and npm dependencies; downloading missing items...";
-                offlineState.Text = "SYNC IN PROGRESS — reusable packages are being prepared in the Shared Dependency Repository.";
-                offlineState.ForeColor = Color.RoyalBlue; _activity.Text = "Dependency sync running...";
-                UpdateNavigationState();
-                AppendLog("[ONLINE-ONCE] Operator requested one-time synchronization of missing dependencies.");
-                var result = await PrepareOfflineRepositoryWithProgressAsync(CancellationToken.None);
-                _offlineDependenciesReady = result.Ok; _offlineDependenciesDetail = result.Detail;
-                offlineState.Text = result.Ok ? "OFFLINE REPOSITORY READY ✓ — " + result.Detail : "OFFLINE REPOSITORY INCOMPLETE ✕ — " + result.Detail;
-                offlineState.ForeColor = result.Ok ? Color.ForestGreen : Color.Firebrick;
-                dependencySyncActivity.Text = result.Ok ? "Dependency sync completed successfully." : "Dependency sync finished with missing/incomplete dependencies.";
-                AppendLog(result.Ok ? "[ONLINE-ONCE] COMPLETE — OFFLINE REPOSITORY READY." : "[ONLINE-ONCE] COMPLETE — repository is still incomplete: " + result.Detail);
-            }
-            catch (Exception ex)
-            {
-                _offlineDependenciesReady = false; _offlineDependenciesDetail = GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message);
-                offlineState.Text = "OFFLINE REPOSITORY INCOMPLETE ✕ — " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message); offlineState.ForeColor = Color.Firebrick;
-                dependencySyncActivity.Text = "Dependency sync failed."; AppendLog("[ONLINE-ONCE] FAILED: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message));
-                InternalDiagnostics.Record(ex, "Source page dependency sync");
-            }
-            finally
-            {
-                _dependencySyncRunning = false; dependencySyncProgress.Visible = false;
-                ApplyDependencyMode();
-                _activity.Text = _offlineDependenciesReady ? "Offline repository ready." : "Dependency sync finished; repository needs attention.";
-                ApplyInteractiveCursors(this);
-            }
-        };
-        offlineTest.Click += async (_, _) =>
-        {
-            try
-            {
-                _profile.SourceFolder = source.Text.Trim();
-                if (!Directory.Exists(_profile.SourceFolder)) throw new InvalidOperationException("Select a valid source folder first.");
-                _profile.ApiProjectPath = _environment.DetectApiProject(_profile.SourceFolder) ?? throw new InvalidOperationException("No ASP.NET Core Web .csproj was found under the selected source folder.");
-                _profile.TargetFrameworkMajor = _environment.DetectTargetFrameworkMajor(_profile.ApiProjectPath);
-                _profile.RequiresNode = _environment.DetectNodeRequirement(_profile.SourceFolder, _profile.ApiProjectPath);
-                offlineTest.Enabled = false; offlineState.Text = "Testing with online package sources disabled...";
-                AppendLog("[OFFLINE-TEST] Starting local-only dependency restore test.");
-                var result = await _deployment.ValidateOfflinePackageAsync(_profile);
-                _offlineDependenciesReady = result.Ok; _offlineDependenciesDetail = result.Detail;
-                offlineState.Text = result.Ok ? "OFFLINE BUILD READY ✓" : "OFFLINE BUILD FAILED ✕ — " + result.Detail;
-                offlineState.ForeColor = result.Ok ? Color.ForestGreen : Color.Firebrick;
-            }
-            catch (Exception ex)
-            {
-                _offlineDependenciesReady = false; _offlineDependenciesDetail = GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message);
-                offlineState.Text = "OFFLINE BUILD FAILED ✕ — " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message); offlineState.ForeColor = Color.Firebrick;
-                AppendLog("[OFFLINE-TEST] FAILED: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message)); InternalDiagnostics.Record(ex, "Source page offline dependency test");
-            }
-            finally { ApplyDependencyMode(); }
-        };
-
-        RefreshModeMeaning();
-        ApplyDependencyMode();
-        Detect();
-        if (Directory.Exists(source.Text.Trim()) || string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
-        {
-            // Defer the first asynchronous preflight until the form has a UI
-            // message pump; later page visits already have a window handle.
-            if (IsHandleCreated) RunSourceTests();
-            else Shown += (_, _) => { if (!sourceTestResult.IsDisposed) RunSourceTests(); };
-        }
-    }
-
-    private void BuildTargetPage()
-    {
-        _pageTitle.Text = "Target and deployment identity";
-        _pageDescription.Text = "Configure deployment identity, local/remote target, and prepared publish input when applicable.";
-        var form = FormGrid();
-        var sourceAlreadySelected = Directory.Exists(_profile.SourceFolder);
-        var appName = new TextBox { Text = sourceAlreadySelected ? _profile.ApplicationName : string.Empty, Width = 210 };
-        var siteName = new TextBox { Text = sourceAlreadySelected ? _profile.SiteName : string.Empty, Width = 210 };
-        var databaseName = new TextBox { Text = sourceAlreadySelected ? _profile.DatabaseName : string.Empty, Width = 210 };
-        var targetMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 175 };
-        targetMode.Items.AddRange(new object[] { "Local Server", "Remote IIS Server" });
-        targetMode.SelectedItem = _profile.TargetMode;
-        var host = new Ipv4AddressControl { Text = _profile.TargetMode == "Remote IIS Server" ? _profile.TargetHost : string.Empty };
-        var remoteUser = new TextBox { Text = _profile.RemoteUserName, Width = 180 };
-        var remotePassword = new TextBox { Text = _profile.RemotePassword, Width = 170, UseSystemPasswordChar = true };
-        var remotePort = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = _profile.RemoteWinRmPort, Width = 82 };
-        var remoteSsl = new CheckBox { Text = "HTTPS / SSL", Checked = _profile.RemoteUseSsl, AutoSize = true };
-        var savedRemote = _appData.GetRemoteCredential();
-        var rememberRemote = new CheckBox { Text = "Save securely", Checked = savedRemote.Remember, AutoSize = true };
-        var testRemote = new Button { Text = "Test / Bootstrap Remote", Width = 170 };
-        var remoteState = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(690,0), Text = "Remote readiness not tested." };
-        var publish = new TextBox { Text = _profile.ReadyPublishFolder, Dock = DockStyle.Fill };
-        var browsePublish = new Button { Text = "Browse publish folder...", AutoSize = true };
-        var detected = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(650, 0) };
-        var framework = new Label { AutoSize = true, ForeColor = Color.DimGray };
-        var node = new Label { AutoSize = true, ForeColor = Color.DimGray };
-        var modeHelp = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(700, 0) };
-
-        var identityRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
-        identityRow.Controls.AddRange(new Control[]
-        {
-            new Label { Text = "App", AutoSize = true, Padding = new Padding(0, 7, 4, 0) }, appName,
-            new Label { Text = "Site", AutoSize = true, Padding = new Padding(10, 7, 4, 0) }, siteName,
-            new Label { Text = "Database", AutoSize = true, Padding = new Padding(10, 7, 4, 0) }, databaseName
-        });
-        AddRow(form, "Identity", identityRow);
-        AddRow(form, "Database behavior", new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(760, 0), Text = "Changing the database name connects the application to a different database; Deployment Manager does not delete or migrate data from the previous database automatically." });
-
-        var targetRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
-        targetRow.Controls.AddRange(new Control[]
-        {
-            targetMode,
-            new Label { Text = "Host / IP", AutoSize = true, Padding = new Padding(10, 7, 3, 0) }, host,
-            new Label { Text = "User", AutoSize = true, Padding = new Padding(8, 7, 3, 0) }, remoteUser,
-            new Label { Text = "Password", AutoSize = true, Padding = new Padding(8, 7, 3, 0) }, remotePassword,
-            new Label { Text = "WinRM", AutoSize = true, Padding = new Padding(8, 7, 3, 0) }, remotePort,
-            remoteSsl, rememberRemote, testRemote
-        });
-        AddRow(form, "Deployment target", targetRow);
-        AddRow(form, "Remote readiness", remoteState);
-
-        var publishRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
-        publishRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); publishRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        publishRow.Controls.Add(publish, 0, 0); publishRow.Controls.Add(browsePublish, 1, 0);
-        AddRow(form, "Detected Web project", detected);
-        AddRow(form, "Target framework", framework);
-        AddRow(form, "Frontend", node);
-        AddRow(form, "Mode behavior", modeHelp);
-        _content.Controls.Add(form);
-
-        void RefreshDetected()
-        {
-            var ready = _profile.BuildMode == "Prepared IIS Publish";
-            publish.Enabled = browsePublish.Enabled = ready;
-            if (ready)
-            {
-                detected.Text = "Prepared Publish: VALIDATION REQUIRED — source build is bypassed.";
-                framework.Text = "Runtime/Hosting Bundle is still validated on the target machine.";
-                node.Text = "Node.js/npm not required by Deployment Manager.";
-                modeHelp.Text = "Use this when Visual Studio or another build machine has already produced a publish folder. The wizard only performs server/database/IIS deployment steps.";
-                _profile.RequiresNode = false;
-            }
-            else
-            {
-                var api = _environment.DetectApiProject(_profile.SourceFolder);
-                detected.Text = api ?? "Not detected";
-                if (api is not null)
-                {
-                    _profile.ApiProjectPath = api;
-                    _profile.TargetFrameworkMajor = _environment.DetectTargetFrameworkMajor(api);
-                    _profile.RequiresNode = _environment.DetectNodeRequirement(_profile.SourceFolder, api);
-                    framework.Text = $".NET {_profile.TargetFrameworkMajor}";
-                    node.Text = _profile.RequiresNode ? "Node.js/npm detected" : "No Node.js frontend detected";
-                }
-                else { framework.Text = "—"; node.Text = "—"; }
-                modeHelp.Text = _profile.BuildMode == "Visual Studio prepared"
-                    ? "Open/build the solution once in Visual Studio first. Deployment Manager skips dependency restore where possible, but still performs the final frontend build (if needed) and dotnet publish."
-                    : _profile.BuildMode == "Fast Local Test"
-                        ? "Fast Local Test performs only change-aware frontend and incremental backend builds. It does not run dotnet publish, stage files, modify IIS, or prepare rollback."
-                        : _profile.BuildMode == "Fast IIS Update"
-                            ? "Fast IIS Update currently runs a fresh frontend build (if required) and dotnet publish before IIS activation. Hosted-binary/fingerprint skip shortcuts are disabled until release and rollback integrity are proven."
-                            : "Full IIS Deploy creates a new publish and performs the complete IIS and database workflow.";
-            }
-            UpdateNavigationState();
-        }
-
-        bool IsValidIpv4(string value) => IPAddress.TryParse(value?.Trim(), out var ip) && ip.AddressFamily == AddressFamily.InterNetwork && string.Equals(ip.ToString(), value?.Trim(), StringComparison.Ordinal);
-        bool ValidateRemoteInputs(bool showMessage)
-        {
-            if (!string.Equals(targetMode.SelectedItem?.ToString(), "Remote IIS Server", StringComparison.OrdinalIgnoreCase)) return true;
-            var ipText = host.Text.Trim(); string? error = null; Control? focus = null;
-            if (string.IsNullOrWhiteSpace(ipText) || !IsValidIpv4(ipText)) { error = "Enter a valid IPv4 address for the remote IIS server (example: 192.168.1.50)."; focus = host; }
-            else if (string.IsNullOrWhiteSpace(remoteUser.Text)) { error = "Remote User is required before testing or continuing."; focus = remoteUser; }
-            else if (string.IsNullOrWhiteSpace(remotePassword.Text)) { error = "Remote Password is required before testing or continuing."; focus = remotePassword; }
-            if (error is null) return true;
-            remoteState.Text = "Remote target validation failed — " + error; remoteState.ForeColor = Color.Firebrick;
-            if (showMessage) MessageBox.Show(this, error, "Remote target validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            focus?.Focus(); return false;
-        }
-        void ApplyTargetModeState()
-        {
-            _profile.TargetMode = targetMode.SelectedItem?.ToString() ?? "Local Server";
-            var remoteSelected = _profile.TargetMode == "Remote IIS Server";
-            host.Enabled = remoteUser.Enabled = remotePassword.Enabled = remotePort.Enabled = remoteSsl.Enabled = rememberRemote.Enabled = testRemote.Enabled = remoteSelected;
-            remoteState.Text = remoteSelected ? "Remote readiness not tested." : "Local deployment selected.";
-            remoteState.ForeColor = Color.DimGray;
-            if (!remoteSelected) { _profile.TargetHost = Environment.MachineName; host.Text = string.Empty; }
-        }
-        targetMode.SelectedIndexChanged += (_, _) =>
-        {
-            // The remote host control is cleared in Local mode. Commit any
-            // pending remote credentials while their original host is visible.
-            FlushDeferredSettingsSaves();
-            ApplyTargetModeState();
-            UpdateNavigationState();
-        };
-        ApplyTargetModeState();
-        void QueueRememberedRemoteCredential()
-        {
-            // Host is not a credential when the Local Server mode is selected.
-            // Do not overwrite a stored remote host with the cleared local UI.
-            if (rememberRemote.Checked &&
-                string.Equals(targetMode.SelectedItem?.ToString(), "Remote IIS Server", StringComparison.OrdinalIgnoreCase))
-                QueueDeferredSettingsSave("remote-credential",
-                    () => _appData.SaveRemoteCredential(host.Text.Trim(), remoteUser.Text.Trim(), remotePassword.Text, true));
-        }
-        remoteUser.TextChanged += (_, _) => { _profile.RemoteUserName = remoteUser.Text.Trim(); QueueRememberedRemoteCredential(); UpdateNavigationState(); };
-        remotePassword.TextChanged += (_, _) => { _profile.RemotePassword = remotePassword.Text; QueueRememberedRemoteCredential(); UpdateNavigationState(); };
-        remotePort.ValueChanged += (_, _) => _profile.RemoteWinRmPort = (int)remotePort.Value;
-        remoteSsl.CheckedChanged += (_, _) => _profile.RemoteUseSsl = remoteSsl.Checked;
-        rememberRemote.CheckedChanged += (_, _) =>
-        {
-            // Opting out must revoke the persisted secret immediately; do not
-            // allow a queued Save(true) to re-create it after the checkbox is off.
-            CancelDeferredSettingsSave("remote-credential");
-            _appData.SaveRemoteCredential(host.Text.Trim(), remoteUser.Text.Trim(), remotePassword.Text, rememberRemote.Checked);
-        };
-        remoteUser.Leave += (_, _) => FlushDeferredSettingsSaves();
-        remotePassword.Leave += (_, _) => FlushDeferredSettingsSaves();
-        host.Leave += (_, _) => FlushDeferredSettingsSaves();
-        testRemote.Click += async (_, _) =>
-        {
-            if (!ValidateRemoteInputs(showMessage: true)) return;
-            try
-            {
-                testRemote.Enabled = false; remoteState.Text = "Checking remote server...";
-                var rr = await _remote.CheckReadinessAsync(_profile);
-                if (!rr.Connected && IsCredentialFailure(rr.Detail)) throw new InvalidOperationException("Remote username or password is incorrect.");
-                remoteState.Text = rr.Detail; remoteState.ForeColor = rr.Connected && rr.IsAdministrator ? Color.ForestGreen : Color.Firebrick;
-                if (rr.Connected && rr.IsAdministrator && (!rr.IisInstalled || !rr.HostingBundleInstalled))
-                {
-                    remoteState.Text += " Preparing missing prerequisites..."; await _remote.BootstrapAsync(_profile);
-                    var rr2 = await _remote.CheckReadinessAsync(_profile); remoteState.Text = rr2.Detail;
-                    remoteState.ForeColor = rr2.Connected && rr2.IsAdministrator && rr2.IisInstalled && rr2.HostingBundleInstalled ? Color.ForestGreen : Color.DarkOrange;
-                }
-            }
-            catch (Exception ex) { remoteState.Text = "Remote NOT READY — " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message); remoteState.ForeColor = Color.Firebrick; InternalDiagnostics.Record(ex, "Remote readiness test"); }
-            finally { testRemote.Enabled = string.Equals(targetMode.SelectedItem?.ToString(), "Remote IIS Server", StringComparison.OrdinalIgnoreCase); }
-        };
-        browsePublish.Click += (_, _) =>
-        {
-            using var dialog = new FolderBrowserDialog { Description = "Select the already-published application folder", SelectedPath = BrowseStartFolder(publish.Text, BrowseContext.Publish) };
-            if (dialog.ShowDialog(this) == DialogResult.OK) { publish.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Publish); }
-        };
-        appName.TextChanged += (_, _) =>
-        {
-            var previousApplicationName = _profile.ApplicationName; _profile.ApplicationName = appName.Text.Trim();
-            _profile.HostingRoot = UpdateAutoHostingRootForApplicationName(_profile.HostingRoot, previousApplicationName, _profile.ApplicationName);
-            QueueDeferredSettingsSave("identity", () => _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName));
-            QueueDeferredSettingsSave("hosting", () => _appData.SaveHostingSettings(_profile.HostingRoot, _profile.DeploymentLayout, _profile.CleanupPreviousDeployments, _profile.UseDefaultIisWebsite));
-        };
-        siteName.TextChanged += (_, _) => { _profile.SiteName = siteName.Text.Trim(); _profile.AppPoolName = _profile.SiteName; QueueDeferredSettingsSave("identity", () => _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName)); UpdateNavigationState(); };
-        databaseName.TextChanged += (_, _) => { _profile.DatabaseName = databaseName.Text.Trim(); QueueDeferredSettingsSave("identity", () => _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName)); UpdateNavigationState(); };
-        appName.Leave += (_, _) => FlushDeferredSettingsSaves();
-        siteName.Leave += (_, _) => FlushDeferredSettingsSaves();
-        databaseName.Leave += (_, _) => FlushDeferredSettingsSaves();
-        host.TextChanged += (_, _) =>
-        {
-            _profile.TargetHost = host.Text.Trim();
-            if (string.Equals(targetMode.SelectedItem?.ToString(), "Remote IIS Server", StringComparison.OrdinalIgnoreCase))
-            {
-                var valid = IsValidIpv4(host.Text); remoteState.Text = valid ? "IPv4 format valid. Remote readiness not tested." : "Enter IPv4 only, for example 192.168.1.50.";
-                remoteState.ForeColor = valid ? Color.DimGray : Color.Firebrick;
-            }
-            QueueRememberedRemoteCredential();
-            UpdateNavigationState();
-        };
-        publish.TextChanged += (_, _) => { _profile.ReadyPublishFolder = publish.Text.Trim(); UpdateNavigationState(); };
-        RefreshDetected();
     }
 
     private void ValidateTargetPage()
@@ -1950,22 +1310,31 @@ public sealed class WizardForm : Form
         _profile.RequiresNode = _environment.DetectNodeRequirement(_profile.SourceFolder, _profile.ApiProjectPath);
     }
 
+    private void CancelBackgroundVerification()
+    {
+        var request = _backgroundVerifyCts;
+        _backgroundVerifyCts = null;
+        request?.Cancel(); // The initiating event owns disposal.
+    }
+
     private async Task RunBackgroundAutoVerificationAsync(CancellationToken ct)
     {
-        if (_operationRunning || _autoDeployRunning) return;
+        if (ct.IsCancellationRequested || !CanNavigateInteractively() || _pageIndex != 0) return;
         try
         {
             AppendLog("[AUTO-VERIFY] Background verification started after source selection.");
-            await ScanEnvironmentAsync(); ct.ThrowIfCancellationRequested();
+            await ScanEnvironmentAsync(ct); ct.ThrowIfCancellationRequested();
             if (_sqlInstances.Count > 0 && string.IsNullOrWhiteSpace(_profile.SqlInstance)) _profile.SqlInstance = _sqlInstances[0].ServerName;
             if (!string.IsNullOrWhiteSpace(_profile.SqlInstance) && !string.IsNullOrWhiteSpace(_profile.DatabaseName))
             {
-                try { await _sql.TestConnectionWithSafeFallbackAsync(_profile);  _healthMonitor.ReportSqlSuccess("Background SQL/database verification passed"); }
+                try { await _sql.TestConnectionWithSafeFallbackAsync(_profile, ct); ct.ThrowIfCancellationRequested(); _healthMonitor.ReportSqlSuccess("Background SQL/database verification passed"); }
+                catch (OperationCanceledException) { throw; }
                 catch (Exception ex) {  AppendLog("[AUTO-VERIFY] SQL/database needs attention: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message)); }
             }
+            ct.ThrowIfCancellationRequested();
             try { ValidateDeploymentLocationPage(); _deploymentLocationAutoVerified = true; }
             catch { _deploymentLocationAutoVerified = false; }
-            if (!IsDisposed && !Disposing) BeginInvoke(() => { UpdateStepIndicator(); UpdateNavigationState(); });
+            if (!IsDisposed && !Disposing && !ct.IsCancellationRequested) { UpdateStepIndicator(); UpdateNavigationState(); }
             AppendLog("[AUTO-VERIFY] Background verification completed.");
         }
         catch (OperationCanceledException) { }
@@ -1999,49 +1368,74 @@ public sealed class WizardForm : Form
         root.Controls.Add(cards, 0, 1);
         _content.Controls.Add(root);
 
-        scan.Click += async (_, _) =>
+        _refreshScanCards = () =>
         {
-            scan.Enabled = false;
+            if (root.IsDisposed || _pageIndex != 2) return;
+            cards.SuspendLayout();
             try
             {
-                await ScanEnvironmentAsync();
-                ReplaceCard(cards, 0, 0, StatusCard("Windows", _environment.GetWindowsDescription(), true));
-                ReplaceCard(cards, 1, 0, StatusCard("IIS Web Server", _iisState.Detail, _iisState.Installed));
-                ReplaceCard(cards, 0, 1, StatusCard($"ASP.NET Core Hosting Bundle (.NET {_profile.TargetFrameworkMajor})", _hostingState.Detail, _hostingState.Installed));
-                ReplaceCard(cards, 1, 1, StatusCard($".NET {_profile.TargetFrameworkMajor} SDK", _sdkState.Detail, _sdkState.Installed));
-                ReplaceCard(cards, 0, 2, StatusCard("Node.js / npm", _nodeState.Detail, _nodeState.Installed));
-                ReplaceCard(cards, 1, 2, StatusCard("SQL Server Engine", _sqlInstances.Count == 0 ? "No SQL Server Database Engine instance detected." : string.Join("\r\n", _sqlInstances), _sqlInstances.Count > 0));
+                UpdateStatusCard(win, "Windows", _environment.GetWindowsDescription(), true);
+                UpdateStatusCard(iis, "IIS Web Server", _iisState.Detail, _iisState.Installed);
+                UpdateStatusCard(hosting, $"ASP.NET Core Hosting Bundle (.NET {_profile.TargetFrameworkMajor})", _hostingState.Detail, _hostingState.Installed);
+                UpdateStatusCard(sdk, $".NET {_profile.TargetFrameworkMajor} SDK", _sdkState.Detail, _sdkState.Installed);
+                UpdateStatusCard(node, "Node.js / npm", _nodeState.Detail, _nodeState.Installed);
+                UpdateStatusCard(sql, "SQL Server Engine", _sqlInstances.Count == 0 ? "No SQL Server Database Engine instance detected." : string.Join("\r\n", _sqlInstances), _sqlInstances.Count > 0);
             }
-            catch (Exception ex)
-            {
-                AppendLog("SCAN ERROR: " + ex);
-                MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Scan failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-            finally { scan.Enabled = true; UpdateNavigationState(); }
+            finally { cards.ResumeLayout(true); }
+        };
+        scan.Click += async (_, _) =>
+        {
+            if (root.IsDisposed || _pageIndex != 2 || !CanNavigateInteractively()) return;
+            await BusyAsync(scan, ScanEnvironmentAsyncWithoutToken);
         };
 
-        // Environment Scan is automatic on page entry. The button remains available only for an explicit re-scan.
-        BeginInvoke(new Action(scan.PerformClick));
+        // Auto Deploy owns its explicit scan; never schedule a duplicate page scan.
+        if (!_autoDeployRunning)
+            BeginInvoke(new Action(() =>
+            {
+                if (!root.IsDisposed && _pageIndex == 2 && CanNavigateInteractively())
+                    scan.PerformClick();
+            }));
     }
 
-    private async Task ScanEnvironmentAsync()
+    private Task ScanEnvironmentAsyncWithoutToken() => ScanEnvironmentAsync();
+
+    private async Task ScanEnvironmentAsync(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         ValidateTargetPage();
-        _iisState = await _environment.CheckIisAsync();
-        _hostingState = await _environment.CheckHostingBundleAsync(_profile.TargetFrameworkMajor);
-        var readyPublish = _profile.BuildMode == "Prepared IIS Publish";
-        _sdkState = readyPublish ? new PrerequisiteState(true, "Not required — build is skipped because a ready publish folder was selected.") : await _environment.CheckDotNetSdkAsync(_profile.TargetFrameworkMajor);
-        _nodeState = readyPublish ? new PrerequisiteState(true, "Not required — build is skipped because a ready publish folder was selected.") : await _environment.CheckNodeAsync(_profile.RequiresNode);
-        _sqlInstances = await _sql.DetectInstancesAsync();
-        // V67: Environment Scan is the gatekeeper. Only stages whose actual
-        // acceptance criteria are already proven are marked Auto verified.
+        var mode = _profile.BuildMode;
+        var source = _profile.SourceFolder;
+        var prepared = _profile.ReadyPublishFolder;
+        var major = _profile.TargetFrameworkMajor;
+        var requiresNode = _profile.RequiresNode;
+        var readyPublish = mode == "Prepared IIS Publish";
+        // Gather a full snapshot before publication; a cancelled/stale scan cannot
+        // publish partially updated global flags.
+        var iisState = await _environment.CheckIisAsync();
+        ct.ThrowIfCancellationRequested();
+        var hostingState = await _environment.CheckHostingBundleAsync(major, ct);
+        ct.ThrowIfCancellationRequested();
+        var sdkState = readyPublish ? new PrerequisiteState(true, "Not required — build is skipped because a ready publish folder was selected.") : await _environment.CheckDotNetSdkAsync(major);
+        ct.ThrowIfCancellationRequested();
+        var nodeState = readyPublish ? new PrerequisiteState(true, "Not required — build is skipped because a ready publish folder was selected.") : await _environment.CheckNodeAsync(requiresNode);
+        ct.ThrowIfCancellationRequested();
+        var sqlInstances = await _sql.DetectInstancesAsync(ct);
+        ct.ThrowIfCancellationRequested();
+        if (IsDisposed || Disposing || mode != _profile.BuildMode || source != _profile.SourceFolder ||
+            prepared != _profile.ReadyPublishFolder || major != _profile.TargetFrameworkMajor || requiresNode != _profile.RequiresNode)
+            throw new OperationCanceledException("Environment selection changed during scan.");
+
+        _iisState = iisState; _hostingState = hostingState; _sdkState = sdkState; _nodeState = nodeState; _sqlInstances = sqlInstances;
+        // V67: mark only stages whose actual acceptance criteria are proven.
         _iisAutoVerified = _iisState.Installed;
         var needsSdk = !readyPublish;
-        var needsNode = needsSdk && _profile.RequiresNode;
+        var needsNode = needsSdk && requiresNode;
         _runtimesAutoVerified = _hostingState.Installed && (!needsSdk || _sdkState.Installed) && (!needsNode || _nodeState.Installed);
         _scanCompleted = true;
         AutoLocateCachedInstallers();
         UpdateStepIndicator();
+        _refreshScanCards?.Invoke();
     }
 
     private void BuildIisPage()
@@ -2140,10 +1534,10 @@ public sealed class WizardForm : Form
 
         async Task RefreshIisStatus()
         {
-            _iisState = await _environment.CheckIisAsync();
-            status.Controls.Clear();
-            var replacement = StatusCard("IIS status", _iisState.Detail, _iisState.Installed);
-            foreach (Control c in replacement.Controls.Cast<Control>().ToArray()) { replacement.Controls.Remove(c); status.Controls.Add(c); }
+            var result = await _environment.CheckIisAsync();
+            if (status.IsDisposed || _pageIndex != 3) return;
+            _iisState = result;
+            UpdateStatusCard(status, "IIS status", _iisState.Detail, _iisState.Installed);
             install.Enabled = !_iisState.Installed; advanced.Enabled = _iisState.Installed;
             if (!_iisState.Installed) { advanced.Checked = false; management.Visible = false; }
             UpdateNavigationState();
@@ -2264,763 +1658,6 @@ public sealed class WizardForm : Form
         };
     }
 
-    private void BuildInstallersPage()
-    {
-        _pageTitle.Text = "Installers and runtimes";
-        _pageDescription.Text = "Reuse local/cached installers whenever possible. If a download fails, open the official download page, download the file manually, then choose it here.";
-
-        AutoLocateCachedInstallers();
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3 };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var cacheRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false };
-        var cacheText = new TextBox { Text = _profile.InstallerCacheFolder, Width = 570 };
-        var browseCache = new Button { Text = "Choose installer folder...", AutoSize = true };
-        var openCache = new Button { Text = "Open folder", AutoSize = true };
-        cacheRow.Controls.Add(new Label { Text = "Installer cache", AutoSize = true, Padding = new Padding(0, 7, 8, 0) });
-        cacheRow.Controls.Add(cacheText); cacheRow.Controls.Add(browseCache); cacheRow.Controls.Add(openCache);
-        root.Controls.Add(cacheRow, 0, 0);
-
-        var versionRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(0, 8, 0, 4) };
-        var sqlVersion = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
-        sqlVersion.Items.AddRange(CompatibleSqlVersions().Cast<object>().ToArray());
-        var currentIndex = sqlVersion.Items.IndexOf(_profile.SqlExpressVersion);
-        sqlVersion.SelectedIndex = currentIndex >= 0 ? currentIndex : 0;
-        var sqlInstalled = _sqlInstances.Count > 0;
-        sqlVersion.Enabled = !sqlInstalled;
-        versionRow.Controls.Add(new Label { Text = "SQL Express package", AutoSize = true, Padding = new Padding(0, 7, 8, 0) });
-        versionRow.Controls.Add(sqlVersion);
-        versionRow.Controls.Add(new Label
-        {
-            Text = sqlInstalled ? "Already Installed — " + InstalledSqlSummary() + "; SQL download is skipped." : "Not installed — select the package to download.",
-            AutoSize = true,
-            ForeColor = sqlInstalled ? Color.ForestGreen : Color.DimGray,
-            Padding = new Padding(10, 7, 0, 0)
-        });
-        var downloadAll = new Button { Text = "Download all missing installers", AutoSize = true, Margin = new Padding(18, 3, 3, 3) };
-        versionRow.Controls.Add(downloadAll);
-        root.Controls.Add(versionRow, 0, 1);
-
-        var list = VerticalPanel();
-        list.AutoScroll = true;
-        root.Controls.Add(list, 0, 2);
-        _content.Controls.Add(root);
-
-        void RebuildCards()
-        {
-            list.Controls.Clear();
-            var hostingPackage = _prereq.HostingBundle(_profile.TargetFrameworkMajor);
-            var sdkPackage = _prereq.DotNetSdk(_profile.TargetFrameworkMajor);
-            var nodePackage = _prereq.Node();
-            var sqlPackage = _prereq.Sql(_profile.SqlExpressVersion);
-
-            list.Controls.Add(InstallerCard(hostingPackage, () => _profile.HostingBundleInstallerPath, x => _profile.HostingBundleInstallerPath = x,
-                _hostingState, required: true, installAction: async path =>
-                {
-                    if (!(await _environment.CheckIisAsync()).Installed) throw new InvalidOperationException("IIS must be installed first.");
-                    await _prereq.InstallHostingBundleAsync(path);
-                    _hostingState = await _environment.CheckHostingBundleAsync(_profile.TargetFrameworkMajor);
-                }));
-
-            list.Controls.Add(InstallerCard(sdkPackage, () => _profile.DotNetSdkInstallerPath, x => _profile.DotNetSdkInstallerPath = x,
-                _sdkState, required: _profile.BuildMode != "Prepared IIS Publish", installAction: async path =>
-                {
-                    await _prereq.InstallDotNetSdkAsync(path);
-                    _sdkState = await _environment.CheckDotNetSdkAsync(_profile.TargetFrameworkMajor);
-                }));
-
-            list.Controls.Add(InstallerCard(nodePackage, () => _profile.NodeInstallerPath, x => _profile.NodeInstallerPath = x,
-                _nodeState, required: _profile.BuildMode != "Prepared IIS Publish" && _profile.RequiresNode, installAction: async path =>
-                {
-                    await _prereq.InstallNodeAsync(path);
-                    _nodeState = await _environment.CheckNodeAsync(_profile.RequiresNode);
-                }));
-
-            var sqlState = _sqlInstances.Count > 0
-                ? new PrerequisiteState(true, "Already Installed — " + InstalledSqlSummary() + ". No replacement SQL Server package is required.")
-                : new PrerequisiteState(File.Exists(_profile.SqlInstallerPath), File.Exists(_profile.SqlInstallerPath) ? "Installer ready for the next step." : "SQL Server is missing; choose or download an installer.");
-            list.Controls.Add(InstallerCard(sqlPackage, () => _profile.SqlInstallerPath, x => _profile.SqlInstallerPath = x,
-                sqlState, required: _sqlInstances.Count == 0, installAction: null, disableInstallerActionsWhenInstalled: true));
-            UpdateNavigationState();
-        }
-
-        cacheText.TextChanged += (_, _) => { _profile.InstallerCacheFolder = cacheText.Text.Trim(); if (!string.IsNullOrWhiteSpace(_profile.InstallerCacheFolder)) _appData.SaveInstallerCacheFolder(_profile.InstallerCacheFolder); AutoLocateCachedInstallers(); RebuildCards(); };
-        browseCache.Click += (_, _) =>
-        {
-            using var dialog = new FolderBrowserDialog { Description = "Choose a reusable installer cache folder", SelectedPath = BrowseStartFolder(cacheText.Text, BrowseContext.Repository) };
-            if (dialog.ShowDialog(this) == DialogResult.OK) { cacheText.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Repository); }
-        };
-        openCache.Click += (_, _) =>
-        {
-            Directory.CreateDirectory(_profile.InstallerCacheFolder);
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(_profile.InstallerCacheFolder) { UseShellExecute = true });
-        };
-        sqlVersion.SelectedIndexChanged += (_, _) =>
-        {
-            _profile.SqlExpressVersion = sqlVersion.SelectedItem?.ToString() ?? "SQL Server 2019 Express";
-            _profile.SqlInstallerPath = _prereq.FindCached(_profile.InstallerCacheFolder, _prereq.Sql(_profile.SqlExpressVersion)) ?? string.Empty;
-            RebuildCards();
-        };
-        downloadAll.Click += async (_, _) => await BusyAsync(downloadAll, async () =>
-        {
-            await RefreshRuntimeStatesAsync();
-            var packages = new List<(InstallerDescriptor pkg, Func<string> get, Action<string> set, bool needed)> {
-                (_prereq.HostingBundle(_profile.TargetFrameworkMajor), () => _profile.HostingBundleInstallerPath, x => _profile.HostingBundleInstallerPath=x, !_hostingState.Installed),
-                (_prereq.DotNetSdk(_profile.TargetFrameworkMajor), () => _profile.DotNetSdkInstallerPath, x => _profile.DotNetSdkInstallerPath=x, _profile.BuildMode != "Prepared IIS Publish" && !_sdkState.Installed),
-                (_prereq.Node(), () => _profile.NodeInstallerPath, x => _profile.NodeInstallerPath=x, _profile.BuildMode != "Prepared IIS Publish" && _profile.RequiresNode && !_nodeState.Installed),
-                (_prereq.Sql(_profile.SqlExpressVersion), () => _profile.SqlInstallerPath, x => _profile.SqlInstallerPath=x, _sqlInstances.Count==0)
-            };
-            foreach (var item in packages.Where(x => x.needed && !File.Exists(x.get())))
-            {
-                try { item.set(await DownloadPackageAsync(item.pkg)); }
-                catch (Exception ex) { InternalDiagnostics.Record(ex, "Installer automatic download/browser fallback"); /* DownloadPackageAsync already offers browser fallback. */ }
-            }
-            RebuildCards();
-        });
-
-        RebuildCards();
-    }
-
-    private GroupBox InstallerCard(InstallerDescriptor package, Func<string> getPath, Action<string> setPath, PrerequisiteState state, bool required, Func<string, Task>? installAction, bool disableInstallerActionsWhenInstalled = false)
-    {
-        var box = new GroupBox { Text = required ? package.DisplayName + " — Required" : package.DisplayName + " — Optional", Width = 870, Height = 142, Padding = new Padding(12) };
-        var layout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1 };
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var status = new Label { Text = state.Detail, AutoSize = true, ForeColor = state.Installed ? Color.ForestGreen : (required ? Color.Firebrick : Color.DimGray), MaximumSize = new Size(820, 0) };
-        var path = new TextBox { Text = getPath(), Dock = DockStyle.Fill, ReadOnly = true };
-        var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
-        var local = new Button { Text = "Use local file...", AutoSize = true };
-        var download = new Button { Text = "Download", AutoSize = true };
-        var official = new Button { Text = "Open official page", AutoSize = true };
-        buttons.Controls.Add(local); buttons.Controls.Add(download); buttons.Controls.Add(official);
-        if (disableInstallerActionsWhenInstalled && state.Installed)
-            local.Enabled = download.Enabled = false;
-        Button? install = null;
-        if (installAction is not null)
-        {
-            install = new Button { Text = "Install", AutoSize = true, Enabled = File.Exists(getPath()) && !state.Installed };
-            buttons.Controls.Add(install);
-        }
-        layout.Controls.Add(status, 0, 0); layout.Controls.Add(path, 0, 1); layout.Controls.Add(buttons, 0, 2);
-        box.Controls.Add(layout);
-
-        void UpdatePath(string value)
-        {
-            setPath(value);
-            path.Text = value;
-            if (install is not null) install.Enabled = File.Exists(value) && !state.Installed;
-            UpdateNavigationState();
-        }
-
-        local.Click += (_, _) =>
-        {
-            using var dialog = new OpenFileDialog { Title = $"Select {package.DisplayName} installer", Filter = "Installer files (*.exe;*.msi)|*.exe;*.msi|All files (*.*)|*.*", InitialDirectory = BrowseStartFolder(getPath(), BrowseContext.Installer) };
-            if (dialog.ShowDialog(this) == DialogResult.OK) { UpdatePath(dialog.FileName); RememberBrowseSelection(dialog.FileName, BrowseContext.Installer); }
-        };
-        download.Click += async (_, _) => await BusyAsync(download, async () => UpdatePath(await DownloadPackageAsync(package)));
-        official.Click += (_, _) => _prereq.OpenOfficialPage(package.OfficialPageUrl);
-        if (install is not null)
-        {
-            install.Click += async (_, _) => await BusyAsync(install, async () =>
-            {
-                await installAction!(getPath());
-                MessageBox.Show(this, $"{package.DisplayName} installation completed. The wizard will re-check it.", "Installer", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                await RefreshRuntimeStatesAsync();
-                ShowPage(4);
-            });
-        }
-        return box;
-    }
-
-    private async Task<string> DownloadPackageAsync(InstallerDescriptor package)
-    {
-        try
-        {
-            Directory.CreateDirectory(_profile.InstallerCacheFolder);
-            AppendLog($"Downloading {package.DisplayName} to {_profile.InstallerCacheFolder} ...");
-            var progress = new Progress<int>(p => _progress.Value = Math.Clamp(p, 0, 100));
-            var path = await _prereq.DownloadAsync(package, _profile.InstallerCacheFolder, progress);
-            AppendLog($"Downloaded: {path}");
-            return path;
-        }
-        catch (Exception ex)
-        {
-            AppendLog($"DOWNLOAD FAILED: {package.DisplayName}: {GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message)}");
-            var answer = MessageBox.Show(this,
-                $"The automatic download failed.\r\n\r\n{GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message)}\r\n\r\nOpen the official download page in your browser? After downloading, use 'Use local file...' to select the installer.",
-                "Download failed", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-            if (answer == DialogResult.Yes) _prereq.OpenOfficialPage(package.OfficialPageUrl);
-            throw;
-        }
-        finally { _progress.Value = (int)Math.Round((_pageIndex / (double)(_steps.Length - 1)) * 100); }
-    }
-
-    private void AutoLocateCachedInstallers()
-    {
-        Directory.CreateDirectory(_profile.InstallerCacheFolder);
-        _profile.HostingBundleInstallerPath = ExistingOrCached(_profile.HostingBundleInstallerPath, _prereq.HostingBundle(_profile.TargetFrameworkMajor));
-        _profile.DotNetSdkInstallerPath = ExistingOrCached(_profile.DotNetSdkInstallerPath, _prereq.DotNetSdk(_profile.TargetFrameworkMajor));
-        _profile.NodeInstallerPath = ExistingOrCached(_profile.NodeInstallerPath, _prereq.Node());
-        _profile.SqlInstallerPath = ExistingOrCached(_profile.SqlInstallerPath, _prereq.Sql(_profile.SqlExpressVersion));
-    }
-
-    private string ExistingOrCached(string current, InstallerDescriptor package)
-    {
-        if (File.Exists(current)) return current;
-        return _prereq.FindCached(_profile.InstallerCacheFolder, package) ?? string.Empty;
-    }
-
-    private async Task RefreshRuntimeStatesAsync()
-    {
-        _hostingState = await _environment.CheckHostingBundleAsync(_profile.TargetFrameworkMajor);
-        var readyPublish = _profile.BuildMode == "Prepared IIS Publish";
-        _sdkState = readyPublish ? new PrerequisiteState(true, "Not required — build is skipped because a ready publish folder was selected.") : await _environment.CheckDotNetSdkAsync(_profile.TargetFrameworkMajor);
-        _nodeState = readyPublish ? new PrerequisiteState(true, "Not required — build is skipped because a ready publish folder was selected.") : await _environment.CheckNodeAsync(_profile.RequiresNode);
-        _sqlInstances = await _sql.DetectInstancesAsync();
-        UpdateNavigationState();
-    }
-
-    private string InstalledSqlSummary()
-    {
-        return string.Join(", ", _sqlInstances.Select(x =>
-        {
-            var majorText = (x.ProductVersion ?? string.Empty).Split('.').FirstOrDefault();
-            var product = int.TryParse(majorText, out var major) ? major switch
-            {
-                11 => "SQL Server 2012",
-                12 => "SQL Server 2014",
-                13 => "SQL Server 2016",
-                14 => "SQL Server 2017",
-                15 => "SQL Server 2019",
-                16 => "SQL Server 2022",
-                17 => "SQL Server 2025",
-                _ => "SQL Server"
-            } : "SQL Server";
-            return $"{product} ({x.ServerName}, {x.ProductVersion})";
-        }));
-    }
-
-    private void BuildSqlPage()
-    {
-        _pageTitle.Text = "SQL Server & Database";
-        _pageDescription.Text = "Configure and verify SQL Server and the application database in one place. Healthy connections are verified automatically; repair and recovery tools remain available under troubleshooting.";
-        
-        var body = VerticalPanel();
-
-        var existingRadio = new RadioButton { Text = "Use an existing SQL Server instance", AutoSize = true, Checked = _sqlInstances.Count > 0 };
-        var existing = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 700 };
-        foreach (var item in _sqlInstances) existing.Items.Add(item);
-        if (existing.Items.Count > 0) existing.SelectedIndex = Math.Max(0, _sqlInstances.FindIndex(x => string.Equals(x.ServerName, _profile.SqlInstance, StringComparison.OrdinalIgnoreCase)));
-
-        var installRadio = new RadioButton { Text = "Install SQL Server Express", AutoSize = true, Checked = _sqlInstances.Count == 0 };
-        var installer = new TextBox { Text = _profile.SqlInstallerPath, Width = 670, ReadOnly = true };
-        var browse = new Button { Text = "Choose installer...", AutoSize = true };
-        var instanceName = new TextBox { Text = "NSPOFFICE", Width = 220 };
-        var install = new Button { Text = "Run SQL Server installer", AutoSize = true };
-        var rescan = new Button { Text = "Re-scan SQL Server", AutoSize = true };
-
-        body.Controls.Add(existingRadio);
-        body.Controls.Add(existing);
-        body.Controls.Add(new Label { Height = 8 });
-        body.Controls.Add(installRadio);
-        body.Controls.Add(Wrap(installer, browse));
-        body.Controls.Add(Wrap(new Label { Text = "New instance name", AutoSize = true, Padding = new Padding(0, 7, 8, 0) }, instanceName));
-        body.Controls.Add(Wrap(install, rescan));
-        body.Controls.Add(new Label { Height = 10 });
-
-        var diagnosticsBox = new GroupBox { Text = "Selected instance diagnostics", Width = 850, Height = 190, Padding = new Padding(12) };
-        var diagnosticsPanel = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
-        diagnosticsPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        diagnosticsPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        var diagnostics = new TextBox
-        {
-            Multiline = true,
-            ReadOnly = true,
-            ScrollBars = ScrollBars.Vertical,
-            Dock = DockStyle.Fill,
-            Font = new Font("Consolas", 9F),
-            Text = "Select an instance, then click Refresh diagnostics."
-        };
-        var refreshDiagnostics = new Button { Text = "Refresh diagnostics", AutoSize = true };
-        var repairConnectivity = new Button { Text = "Repair local SQL connectivity", AutoSize = true };
-        diagnosticsPanel.Controls.Add(diagnostics, 0, 0);
-        diagnosticsPanel.Controls.Add(Wrap(refreshDiagnostics, repairConnectivity), 0, 1);
-        diagnosticsBox.Controls.Add(diagnosticsPanel);
-        body.Controls.Add(diagnosticsBox);
-        body.Controls.Add(new Label { Height = 8 });
-
-        var authBox = new GroupBox { Text = "Administrative connection", Width = 850, Height = 320, Padding = new Padding(14) };
-        var authPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = false };
-        var windowsAuth = new RadioButton { Text = "Windows Authentication", AutoSize = true, Checked = _profile.UseWindowsAuthentication };
-        var sqlAuth = new RadioButton { Text = "SQL Authentication", AutoSize = true, Checked = !_profile.UseWindowsAuthentication };
-        var user = new TextBox { Text = _profile.SqlUserName, Width = 170, Enabled = true };
-        var passwordWasSuggested = false;
-        var password = new TextBox { Text = _profile.SqlPassword, UseSystemPasswordChar = !passwordWasSuggested, Width = 260, Enabled = true };
-        var generate = new Button { Text = "Generate strong password", AutoSize = true, Enabled = true };
-        var copy = new Button { Text = "Copy password", AutoSize = true, Enabled = true };
-        var showPassword = new CheckBox { Text = "Show password", AutoSize = true, Enabled = true, Checked = passwordWasSuggested };
-        var resetSa = new Button { Text = "Configure / Reset sa", AutoSize = true, Enabled = existing.Items.Count > 0 };
-        var emergency = new Button { Text = "Emergency recover SQL access", AutoSize = true, Enabled = existing.Items.Count > 0 };
-        var test = new Button { Text = "Test administrative connection", AutoSize = true };
-        var recentSql = _healthMonitor.HasRecentSuccessfulSql(TimeSpan.FromMinutes(10));
-        var verified = new Label { Text = recentSql ? _sql.Connections.State(_profile).Detail : "Not verified", AutoSize = true, ForeColor = recentSql ? Color.ForestGreen : Color.Firebrick, Padding = new Padding(8, 7, 0, 0) };
-
-        authPanel.Controls.Add(windowsAuth);
-        authPanel.Controls.Add(sqlAuth);
-        authPanel.Controls.Add(new Label
-        {
-            Text = "SQL user/password remain editable in both modes. Normal SA reset requires Windows Authentication to already be SQL sysadmin; emergency recovery is for a local instance when that SQL sysadmin access has been lost.",
-            AutoSize = true,
-            MaximumSize = new Size(790, 0),
-            ForeColor = Color.DimGray
-        });
-        authPanel.Controls.Add(Wrap(
-            new Label { Text = "SQL user", AutoSize = true, Padding = new Padding(0, 7, 8, 0) }, user,
-            new Label { Text = "Password", AutoSize = true, Padding = new Padding(12, 7, 8, 0) }, password,
-            showPassword, generate, copy));
-        authPanel.Controls.Add(new Label { Text = "Enter an existing SQL credential, or generate a password and apply Configure / Reset sa. Passwords are session-only and excluded from profiles and diagnostics.", AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(790, 0) });
-        authPanel.Controls.Add(Wrap(resetSa, emergency));
-        authPanel.Controls.Add(Wrap(test, verified));
-        authBox.Controls.Add(authPanel);
-        body.Controls.Add(authBox);
-        var databaseBox = new GroupBox { Text = "Application database", Width = 850, Height = 105, Padding = new Padding(14) };
-        var databasePanel = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-        var databaseName = new TextBox { Text = _profile.DatabaseName, Width = 250 };
-        var verifyDatabase = new Button { Text = "Verify database", AutoSize = true };
-        var databaseState = new Label { Text = _databaseConnectionVerified ? "✓ SQL preflight verified" : "Auto verification pending", AutoSize = true, ForeColor = _databaseConnectionVerified ? Color.ForestGreen : Color.DimGray, Padding = new Padding(10,7,0,0) };
-        databasePanel.Controls.Add(new Label { Text = "Database name", AutoSize = true, Padding = new Padding(0,7,8,0) });
-        databasePanel.Controls.Add(databaseName); databasePanel.Controls.Add(verifyDatabase); databasePanel.Controls.Add(databaseState);
-        databaseBox.Controls.Add(databasePanel); body.Controls.Add(databaseBox);
-        databaseName.TextChanged += (_, _) => { _profile.DatabaseName = databaseName.Text.Trim();   databaseState.Text = "Not verified"; databaseState.ForeColor = Color.Firebrick; UpdateNavigationState(); };
-        verifyDatabase.Click += async (_, _) => await BusyAsync(verifyDatabase, async () => { await _sql.TestConnectionWithSafeFallbackAsync(_profile);  databaseState.Text = "✓ Administrative SQL verified; database prepared at deploy"; databaseState.ForeColor = Color.ForestGreen; UpdateStepIndicator(); UpdateNavigationState(); });
-        body.Controls.Add(new Label
-        {
-            AutoSize = true,
-            MaximumSize = new Size(820, 0),
-            ForeColor = Color.DimGray,
-            Text = "Emergency recovery temporarily restarts the selected local SQL Server service in restricted single-user mode, grants the current Windows account SQL sysadmin, enables Mixed Mode/sa, then returns SQL Server to normal multi-user mode. Close SSMS and other SQL tools before using it."
-        });
-        _content.Controls.Add(body);
-
-        void FitSqlPanels()
-        {
-            var available = Math.Max(850, body.ClientSize.Width - body.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 12);
-            diagnosticsBox.Width = available;
-            authBox.Width = available;
-            databaseBox.Width = available;
-        }
-        body.ClientSizeChanged += (_, _) => FitSqlPanels();
-        BeginInvoke(FitSqlPanels);
-
-        void InvalidateSqlVerification()
-        {
-            var current = _sql.Connections.State(_profile);
-            verified.Text = current.Detail;
-            verified.ForeColor = current.Verified ? Color.ForestGreen : Color.Firebrick;
-            UpdateNavigationState();
-        }
-
-        void SyncAuth()
-        {
-            _profile.UseWindowsAuthentication = windowsAuth.Checked;
-            user.Enabled = password.Enabled = showPassword.Enabled = generate.Enabled = copy.Enabled = true;
-            resetSa.Enabled = existingRadio.Checked && existing.Items.Count > 0;
-            emergency.Enabled = existingRadio.Checked && existing.Items.Count > 0;
-        }
-
-        void SyncSelection()
-        {
-            existing.Enabled = existingRadio.Checked;
-            installer.Enabled = browse.Enabled = instanceName.Enabled = install.Enabled = installRadio.Checked;
-            if (existingRadio.Checked && existing.SelectedItem is SqlInstanceInfo info)
-                _profile.SqlInstance = info.ServerName;
-            if (installRadio.Checked)
-                _profile.SqlInstance = string.Empty;
-            resetSa.Enabled = existingRadio.Checked && existing.Items.Count > 0;
-            emergency.Enabled = existingRadio.Checked && existing.Items.Count > 0;
-            repairConnectivity.Enabled = existingRadio.Checked && existing.Items.Count > 0;
-            refreshDiagnostics.Enabled = existingRadio.Checked && existing.Items.Count > 0;
-        }
-
-        var sqlDiagnosticGeneration = 0;
-        async Task RefreshDiagnosticsAsync()
-        {
-            var generation = ++sqlDiagnosticGeneration;
-            var fingerprint = _sql.Connections.Fingerprint(_profile);
-            if (string.IsNullOrWhiteSpace(_profile.SqlInstance))
-            {
-                diagnostics.Text = "Select an existing SQL Server instance first.";
-                return;
-            }
-            diagnostics.Text = "Checking SQL Server...";
-            try
-            {
-                var state = await _sql.DiagnoseAsync(_profile);
-                if (!diagnostics.IsDisposed && generation == sqlDiagnosticGeneration &&
-                    fingerprint == _sql.Connections.Fingerprint(_profile))
-                    diagnostics.Text = state.ToDisplayText();
-            }
-            catch (OperationCanceledException) when (fingerprint != _sql.Connections.Fingerprint(_profile))
-            {
-                if (!diagnostics.IsDisposed && generation == sqlDiagnosticGeneration)
-                    diagnostics.Text = "SQL configuration changed. Refresh diagnostics for the current configuration.";
-            }
-        }
-
-        existingRadio.CheckedChanged += (_, _) => SyncSelection();
-        installRadio.CheckedChanged += (_, _) => SyncSelection();
-        existing.SelectedIndexChanged += (_, _) =>
-        {
-            if (existing.SelectedItem is SqlInstanceInfo info)
-                _profile.SqlInstance = info.ServerName;
-            InvalidateSqlVerification();
-        };
-        windowsAuth.CheckedChanged += (_, _) => { SyncAuth(); InvalidateSqlVerification(); };
-        sqlAuth.CheckedChanged += (_, _) => { SyncAuth(); InvalidateSqlVerification(); };
-        user.TextChanged += (_, _) => { _profile.SqlUserName = user.Text.Trim(); InvalidateSqlVerification(); };
-        password.TextChanged += (_, _) => { _profile.SqlPassword = password.Text; InvalidateSqlVerification(); };
-        showPassword.CheckedChanged += (_, _) => password.UseSystemPasswordChar = !showPassword.Checked;
-
-        generate.Click += (_, _) =>
-        {
-            var generated = GenerateStrongPassword();
-            password.Text = generated;
-            _profile.SqlPassword = generated;
-            _profile.SqlCredentialConfigured = false;
-            Clipboard.SetText(generated);
-            MessageBox.Show(this, "A strong password was generated and copied to the clipboard.", "SQL password", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        };
-        copy.Click += (_, _) =>
-        {
-            if (!string.IsNullOrWhiteSpace(password.Text)) Clipboard.SetText(password.Text);
-        };
-
-        browse.Click += (_, _) =>
-        {
-            using var dialog = new OpenFileDialog
-            {
-                Title = "Select SQL Server Express bootstrapper or full setup.exe",
-                Filter = "Executable (*.exe)|*.exe|All files (*.*)|*.*",
-                InitialDirectory = BrowseStartFolder(installer.Text, BrowseContext.Installer)
-            };
-            if (dialog.ShowDialog(this) == DialogResult.OK)
-            {
-                _profile.SqlInstallerPath = installer.Text = dialog.FileName;
-                RememberBrowseSelection(dialog.FileName, BrowseContext.Installer);
-                UpdateNavigationState();
-            }
-        };
-
-        rescan.Click += async (_, _) => await BusyAsync(rescan, async () =>
-        {
-            _sqlInstances = await _sql.DetectInstancesAsync();
-            existing.Items.Clear();
-            foreach (var item in _sqlInstances) existing.Items.Add(item);
-            if (existing.Items.Count > 0)
-            {
-                existing.SelectedIndex = 0;
-                existingRadio.Checked = true;
-            }
-            SyncSelection();
-            if (!string.IsNullOrWhiteSpace(_profile.SqlInstance))
-                await RefreshDiagnosticsAsync();
-        });
-
-        refreshDiagnostics.Click += async (_, _) => await BusyAsync(refreshDiagnostics, RefreshDiagnosticsAsync);
-
-        repairConnectivity.Click += async (_, _) => await BusyAsync(repairConnectivity, async () =>
-        {
-            if (string.IsNullOrWhiteSpace(_profile.SqlInstance))
-                throw new InvalidOperationException("Select an existing SQL Server instance first.");
-            AppendLog("Repairing selected local SQL service/TCP/Browser configuration...");
-            await _sql.RepairLocalConnectivityAsync(_profile.SqlInstance, profile: _profile);
-            await RefreshDiagnosticsAsync();
-            InvalidateSqlVerification();
-        });
-
-        install.Click += async (_, _) => await BusyAsync(install, async () =>
-        {
-            if (!File.Exists(_profile.SqlInstallerPath))
-                throw new InvalidOperationException("Choose or download a SQL Server installer first.");
-            if (string.IsNullOrWhiteSpace(instanceName.Text))
-                throw new InvalidOperationException("Instance name is required.");
-
-            await _sql.InstallExpressFromFileAsync(_profile.SqlInstallerPath, instanceName.Text.Trim());
-            _sqlInstances = await _sql.DetectInstancesAsync();
-            existing.Items.Clear();
-            foreach (var item in _sqlInstances) existing.Items.Add(item);
-            var match = _sqlInstances.FirstOrDefault(x => x.ServerName.EndsWith("\\" + instanceName.Text.Trim(), StringComparison.OrdinalIgnoreCase));
-            if (match is not null)
-            {
-                var item = existing.Items.Cast<object>().FirstOrDefault(x => x is SqlInstanceInfo i && i.ServerName == match.ServerName);
-                if (item is not null) existing.SelectedItem = item;
-                existingRadio.Checked = true;
-                _profile.SqlInstance = match.ServerName;
-            }
-            else if (_sqlInstances.Count > 0)
-            {
-                existing.SelectedIndex = 0;
-                existingRadio.Checked = true;
-            }
-            else
-            {
-                MessageBox.Show(this, "No SQL Server instance was detected after installation. Re-scan after the SQL service is running.", "SQL Server", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-            SyncSelection();
-        });
-
-        resetSa.Click += async (_, _) => await BusyAsync(resetSa, async () =>
-        {
-            if (string.IsNullOrWhiteSpace(_profile.SqlInstance))
-                throw new InvalidOperationException("Select an existing SQL Server instance first.");
-            _profile.SqlUserName = "sa";
-            user.Text = "sa";
-            _profile.SqlPassword = password.Text;
-            AppendLog("Testing Windows SQL sysadmin access, then configuring/enabling SQL login 'sa' (password is never written to the log)...");
-            await _sql.ConfigureOrResetSaAsync(_profile.SqlInstance, _profile.SqlPassword);
-            _profile.SqlCredentialConfigured = true;
-            _profile.UseWindowsAuthentication = false;
-            windowsAuth.Checked = false;
-            sqlAuth.Checked = true;
-            
-            await _sql.TestConnectionWithSafeFallbackAsync(_profile);
-            _healthMonitor.ReportSqlSuccess(_sql.Connections.State(_profile).Detail);
-            verified.Text = "Verified — sa login works";
-            verified.ForeColor = Color.ForestGreen;
-            await RefreshDiagnosticsAsync();
-            UpdateNavigationState();
-        });
-
-        emergency.Click += async (_, _) => await BusyAsync(emergency, async () =>
-        {
-            if (string.IsNullOrWhiteSpace(_profile.SqlInstance))
-                throw new InvalidOperationException("Select an existing SQL Server instance first.");
-
-            var answer = MessageBox.Show(
-                this,
-                "Emergency recovery will temporarily stop the selected local SQL Server service, start it in restricted single-user mode, grant the current Windows account SQL sysadmin, reset/enable sa, and restart SQL normally.\r\n\r\nClose SSMS, Visual Studio database tools, and other SQL clients first. Continue?",
-                "Emergency SQL recovery",
-                MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning,
-                MessageBoxDefaultButton.Button2);
-            if (answer != DialogResult.Yes) return;
-
-            _profile.SqlUserName = "sa";
-            user.Text = "sa";
-            _profile.SqlPassword = password.Text;
-            await _sql.EmergencyRecoverSqlAccessAsync(_profile.SqlInstance, _profile.SqlPassword);
-            _profile.SqlCredentialConfigured = true;
-            _profile.UseWindowsAuthentication = false;
-            windowsAuth.Checked = false;
-            sqlAuth.Checked = true;
-            
-            await _sql.TestConnectionWithSafeFallbackAsync(_profile);
-            _healthMonitor.ReportSqlSuccess("Emergency recovery completed; sa verified");
-            verified.Text = "Verified — emergency recovery completed; sa works";
-            verified.ForeColor = Color.ForestGreen;
-            await RefreshDiagnosticsAsync();
-            UpdateNavigationState();
-        });
-
-        test.Click += async (_, _) => await BusyAsync(test, async () =>
-        {
-            if (string.IsNullOrWhiteSpace(_profile.SqlInstance))
-                throw new InvalidOperationException("Select a SQL Server instance first.");
-            _profile.UseWindowsAuthentication = windowsAuth.Checked;
-            _profile.SqlUserName = user.Text.Trim();
-            _profile.SqlPassword = password.Text;
-            await _sql.TestConnectionWithSafeFallbackAsync(_profile);
-            
-            _healthMonitor.ReportSqlSuccess(_sql.Connections.State(_profile).Detail);
-            verified.Text = _sql.Connections.State(_profile).Detail;
-            verified.ForeColor = Color.ForestGreen;
-            await RefreshDiagnosticsAsync();
-            UpdateNavigationState();
-        });
-
-        SyncSelection();
-        SyncAuth();
-
-        BeginInvoke(async () =>
-        {
-            if (_pageIndex != 5 || string.IsNullOrWhiteSpace(_profile.SqlInstance) || _sqlAdminConnectionVerified) return;
-            try
-            {
-                verified.Text = "Testing automatically...";
-                verified.ForeColor = Color.DarkOrange;
-                _profile.UseWindowsAuthentication = windowsAuth.Checked;
-                _profile.SqlUserName = user.Text.Trim();
-                _profile.SqlPassword = password.Text;
-                await _sql.TestConnectionWithSafeFallbackAsync(_profile);
-                
-                
-                
-                databaseState.Text = _databaseConnectionVerified ? "✓ Administrative SQL verified; database prepared at deploy" : "Database name required";
-                databaseState.ForeColor = _databaseConnectionVerified ? Color.ForestGreen : Color.Firebrick;
-                UpdateStepIndicator();
-                _healthMonitor.ReportSqlSuccess(_sql.Connections.State(_profile).Detail);
-                verified.Text = _sql.Connections.State(_profile).Detail;
-                verified.ForeColor = Color.ForestGreen;
-                await RefreshDiagnosticsAsync();
-            }
-            catch (Exception ex)
-            {
-                
-                verified.Text = "Automatic test failed — use Test / recovery";
-                verified.ForeColor = Color.Firebrick;
-                AppendLog("[SQL] Automatic administrative connection test failed: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message));
-            }
-            UpdateNavigationState();
-        });
-    }
-
-    private IEnumerable<string> CompatibleSqlVersions()
-    {
-        var windows = _environment.GetWindowsDescription();
-        // Current supported shortlist for this tool. SQL Server 2019/2022 cover Windows 10/11 and Windows Server 2016-2025 in our intended environments.
-        if (windows.Contains("Server 2016", StringComparison.OrdinalIgnoreCase)) return new[] { "SQL Server 2019 Express", "SQL Server 2022 Express" };
-        return new[] { "SQL Server 2019 Express", "SQL Server 2022 Express" };
-    }
-
-    private void BuildDatabasePage()
-    {
-        _pageTitle.Text = "Database";
-        _pageDescription.Text = "Verify the application database selected on the first page. This step verifies SQL Server administrative access; if the database does not yet exist, Deploy will create it automatically and wait until it is ONLINE.";
-        
-        var form = FormGrid();
-        var server = new TextBox { Text = _profile.SqlInstance, Dock = DockStyle.Fill, ReadOnly = true };
-        var database = new TextBox { Text = _profile.DatabaseName, Dock = DockStyle.Fill, ReadOnly = true };
-        var auth = new TextBox { Text = _sql.Connections.State(_profile).Detail, Dock = DockStyle.Fill, ReadOnly = true };
-        var test = new Button { Text = "Re-test SQL connection", AutoSize = true };
-        var state = new Label { Text = "Not verified for this database step", AutoSize = true, ForeColor = Color.Firebrick, Padding = new Padding(8, 7, 0, 0) };
-        AddRow(form, "SQL instance", server);
-        AddRow(form, "Database name", database);
-        AddRow(form, "Authentication", auth);
-        AddRow(form, "", Wrap(test, state));
-        _content.Controls.Add(form);
-
-        database.TextChanged += (_, _) =>
-        {
-            _profile.DatabaseName = database.Text.Trim();
-            
-            state.Text = "Not verified for this database step";
-            state.ForeColor = Color.Firebrick;
-            UpdateNavigationState();
-        };
-        test.Click += async (_, _) => await BusyAsync(test, async () =>
-        {
-            await _sql.TestConnectionWithSafeFallbackAsync(_profile);
-            
-            state.Text = "SQL Server verified — database will be created automatically if missing";
-            state.ForeColor = Color.ForestGreen;
-            UpdateNavigationState();
-        });
-
-        BeginInvoke(async () =>
-        {
-            if (_pageIndex != 6 || string.IsNullOrWhiteSpace(_profile.SqlInstance) || string.IsNullOrWhiteSpace(_profile.DatabaseName)) return;
-            try
-            {
-                state.Text = "Testing automatically...";
-                state.ForeColor = Color.DarkOrange;
-                await _sql.TestConnectionWithSafeFallbackAsync(_profile);
-                
-                state.Text = "SQL Server verified — database will be created automatically if missing";
-                state.ForeColor = Color.ForestGreen;
-            }
-            catch (Exception ex)
-            {
-                
-                state.Text = "Automatic test failed — use Re-test SQL connection";
-                state.ForeColor = Color.Firebrick;
-                AppendLog("[DATABASE] Automatic SQL connection test failed: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message));
-            }
-            UpdateNavigationState();
-        });
-    }
-
-    private void BuildDeploymentLocationPage()
-    {
-        _pageTitle.Text = "Deployment location";
-        _pageDescription.Text = "Choose exactly where IIS should host the application. You can use a dedicated application folder or explicitly take over the IIS default web root on port 80.";
-        var form = FormGrid();
-        var lastCustomRoot = string.Equals(_profile.HostingRoot.TrimEnd('\\'), @"C:\inetpub\wwwroot", StringComparison.OrdinalIgnoreCase)
-            ? Path.Combine(@"C:\inetpub\wwwroot", SafeApplicationFolderName(_profile.ApplicationName))
-            : _profile.HostingRoot;
-        var useDefault = new CheckBox
-        {
-            Text = @"Use IIS default web root (C:\inetpub\wwwroot) and port 80 — replace the existing IIS site/content on port 80",
-            AutoSize = true,
-            Checked = _profile.UseDefaultIisWebsite,
-            ForeColor = Color.DarkRed
-        };
-        var hostingRoot = new TextBox { Text = _profile.HostingRoot, Dock = DockStyle.Fill, MinimumSize = new Size(650, 38), Font = new Font("Segoe UI", 10F) };
-        var browse = new Button { Text = "Browse...", Width = 120, Height = 38 };
-        var single = new RadioButton { Text = "Single Folder — always deploy the active site into this exact folder", AutoSize = true, Checked = string.Equals(_profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) };
-        var versioned = new RadioButton { Text = "Versioned Folders — keep releases as subfolders under this root", AutoSize = true, Checked = !string.Equals(_profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) };
-        var cleanup = new CheckBox { Text = "After a successful versioned deployment, delete older release folders", AutoSize = true, Checked = _profile.CleanupPreviousDeployments, Enabled = versioned.Checked };
-        var hint = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(720, 0), Text = @"Dedicated folder example: C:\inetpub\wwwroot\NSPOfficeAutomation
-Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site owning port 80 blocks deployment; reconfigure its binding explicitly first." };
-
-        AddRow(form, "Application", new TextBox { Text = _profile.ApplicationName, Dock = DockStyle.Fill, ReadOnly = true });
-        AddRow(form, "Default IIS website", useDefault);
-        AddRow(form, "Hosted site folder", Wrap(hostingRoot, browse));
-        AddRow(form, "Deployment layout", VerticalWrap(single, versioned, cleanup));
-        AddRow(form, "", hint);
-        _content.Controls.Add(form);
-
-        void ApplyDefaultMode()
-        {
-            if (useDefault.Checked)
-            {
-                if (!string.Equals(hostingRoot.Text.TrimEnd('\\'), @"C:\inetpub\wwwroot", StringComparison.OrdinalIgnoreCase)) lastCustomRoot = hostingRoot.Text.Trim();
-                hostingRoot.Text = @"C:\inetpub\wwwroot";
-                single.Checked = true;
-                _profile.HttpPort = 80;
-                _profile.HostHeader = string.Empty;
-            }
-            else if (string.Equals(hostingRoot.Text.TrimEnd('\\'), @"C:\inetpub\wwwroot", StringComparison.OrdinalIgnoreCase))
-            {
-                hostingRoot.Text = string.IsNullOrWhiteSpace(lastCustomRoot) ? Path.Combine(@"C:\inetpub\wwwroot", SafeApplicationFolderName(_profile.ApplicationName)) : lastCustomRoot;
-            }
-            hostingRoot.ReadOnly = useDefault.Checked;
-            browse.Enabled = !useDefault.Checked;
-            single.Enabled = !useDefault.Checked;
-            versioned.Enabled = !useDefault.Checked;
-            cleanup.Enabled = !useDefault.Checked && versioned.Checked;
-        }
-
-        void Save()
-        {
-            _profile.UseDefaultIisWebsite = useDefault.Checked;
-            _profile.HostingRoot = hostingRoot.Text.Trim();
-            _profile.DeploymentLayout = useDefault.Checked || single.Checked ? "Single Folder" : "Versioned Folders";
-            _profile.CleanupPreviousDeployments = cleanup.Checked;
-            if (_profile.UseDefaultIisWebsite) { _profile.HttpPort = 80; _profile.HostHeader = string.Empty; }
-            cleanup.Enabled = !useDefault.Checked && versioned.Checked;
-            QueueDeferredSettingsSave("hosting", () => _appData.SaveHostingSettings(_profile.HostingRoot, _profile.DeploymentLayout, _profile.CleanupPreviousDeployments, _profile.UseDefaultIisWebsite));
-            UpdateNavigationState();
-        }
-
-        hostingRoot.TextChanged += (_, _) => Save();
-        hostingRoot.Leave += (_, _) => FlushDeferredSettingsSaves();
-        single.CheckedChanged += (_, _) => Save();
-        versioned.CheckedChanged += (_, _) => Save();
-        cleanup.CheckedChanged += (_, _) => Save();
-        useDefault.CheckedChanged += (_, _) => { ApplyDefaultMode(); Save(); };
-        browse.Click += (_, _) =>
-        {
-            using var dialog = new FolderBrowserDialog { Description = "Choose the folder where IIS site files should be hosted", UseDescriptionForTitle = true, SelectedPath = Directory.Exists(hostingRoot.Text) ? hostingRoot.Text : string.Empty, ShowNewFolderButton = true };
-            if (dialog.ShowDialog(this) == DialogResult.OK) hostingRoot.Text = dialog.SelectedPath;
-        };
-        ApplyDefaultMode();
-        Save();
-    }
-
     private static string NormalizeAutoHostingRoot(string hostingRoot, string applicationName)
     {
         if (string.IsNullOrWhiteSpace(hostingRoot))
@@ -3121,134 +1758,6 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         if (_profile.UseDefaultIisWebsite) { _profile.HttpPort = 80; _profile.HostHeader = string.Empty; }
         if (!_environment.IsPortUsableForSite(_profile.HttpPort, _profile.SiteName, out var portDetail))
             throw new InvalidOperationException($"Port {_profile.HttpPort} cannot be used. {portDetail}. Choose another port or stop/reconfigure the conflicting service.");
-    }
-
-    private void BuildReviewPage()
-    {
-        _pageTitle.Text = "Review and deploy";
-        _pageDescription.Text = "Review the plan. Depending on Build mode, Deploy either builds the source or uses prepared publish files, then prepares the database, configures IIS, and performs the health check.";
-        var reviewRoot = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 4 };
-        reviewRoot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        reviewRoot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        reviewRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        reviewRoot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-
-        var deployModePanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 0, 0, 8) };
-        var deployModeLabel = new Label { Text = "Deployment mode:", AutoSize = true, Padding = new Padding(0, 8, 8, 0), Font = new Font("Segoe UI Semibold", 10.5F) };
-        var deployMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 260, Enabled = !_operationRunning };
-        var sourceBuildMode = _profile.BuildMode is "Fast Local Test" or "Fast IIS Update" or "Full IIS Deploy";
-        if (sourceBuildMode)
-        {
-            deployMode.Items.AddRange(new object[] { "Fast Local Test (Default)", "Fast IIS Update", "Full IIS Deploy" });
-            deployMode.SelectedIndex = string.Equals(_profile.BuildMode, "Full IIS Deploy", StringComparison.OrdinalIgnoreCase) ? 2
-                : string.Equals(_profile.BuildMode, "Fast IIS Update", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
-        }
-        else
-        {
-            deployMode.Items.Add(_profile.BuildMode);
-            deployMode.SelectedIndex = 0;
-            deployMode.Enabled = false;
-        }
-        var deployModeHelp = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(720, 0), Padding = new Padding(12, 8, 0, 0), Text = sourceBuildMode ? BuildModeHelp(deployMode.SelectedIndex) : "Prepared mode selected on the Source page is preserved; Review does not rewrite it." };
-        deployMode.SelectedIndexChanged += (_, __) =>
-        {
-            if (!sourceBuildMode) return;
-            _profile.BuildMode = deployMode.SelectedIndex switch { 1 => "Fast IIS Update", 2 => "Full IIS Deploy", _ => "Fast Local Test" };
-            deployModeHelp.Text = BuildModeHelp(deployMode.SelectedIndex);
-        };
-        deployModePanel.Controls.Add(deployModeLabel);
-        deployModePanel.Controls.Add(deployMode);
-        deployModePanel.Controls.Add(deployModeHelp);
-        // V159: policy settings are persisted per project and enforced by DeploymentService.
-        var backupChoice = new CheckBox { Text = "Create Backup Before Deployment", AutoSize = true, Checked = _profile.CreateBackupBeforeDeployment, Enabled = !_operationRunning };
-        var retentionChoice = new CheckBox { Text = "Keep Previous Deployment for Rollback", AutoSize = true, Checked = _profile.KeepPreviousDeploymentForRollback, Enabled = !_operationRunning };
-        var retentionCount = new NumericUpDown { Minimum = 1, Maximum = 20, Value = Math.Clamp(_profile.PreviousDeploymentRetentionCount, 1, 20), Width = 55, Enabled = retentionChoice.Checked && !_operationRunning };
-        backupChoice.CheckedChanged += (_, _) => { _profile.CreateBackupBeforeDeployment = backupChoice.Checked; _appData.SaveProjectProfile(_profile); };
-        retentionChoice.CheckedChanged += (_, _) => { _profile.KeepPreviousDeploymentForRollback = retentionChoice.Checked; retentionCount.Enabled = retentionChoice.Checked && !_operationRunning; _appData.SaveProjectProfile(_profile); };
-        retentionCount.ValueChanged += (_, _) => { _profile.PreviousDeploymentRetentionCount = (int)retentionCount.Value; _appData.SaveProjectProfile(_profile); };
-        var policyPanel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true, Padding = new Padding(8, 2, 8, 2) };
-        policyPanel.Controls.Add(backupChoice);
-        policyPanel.Controls.Add(retentionChoice);
-        policyPanel.Controls.Add(new Label { Text = "Keep count:", AutoSize = true, Padding = new Padding(8, 4, 0, 0) });
-        policyPanel.Controls.Add(retentionCount);
-        policyPanel.Controls.Add(new Label { Text = "Old releases are removed only after explicit confirmation in Deployment Cleanup.", AutoSize = true, ForeColor = Color.DarkOrange, MaximumSize = new Size(550, 0) });
-        deployModePanel.Controls.Add(policyPanel);
-        reviewRoot.RowCount = 5;
-        reviewRoot.RowStyles.Clear();
-        reviewRoot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        reviewRoot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        reviewRoot.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        reviewRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-        reviewRoot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        reviewRoot.Controls.Add(deployModePanel, 0, 0);
-        var recoveryWarning = _deploymentStatus.Contains("UNSUCCESSFUL", StringComparison.OrdinalIgnoreCase)
-            || _deploymentStatus.Contains("RECOVERY FAILED", StringComparison.OrdinalIgnoreCase)
-            || _deploymentStatus.Contains("INTERRUPTED", StringComparison.OrdinalIgnoreCase);
-        var statusBanner = new Label { Text = _deploymentStatus, AutoSize = true, Padding = new Padding(8), Font = new Font("Segoe UI Semibold", 11F),
-            ForeColor = recoveryWarning ? Color.Firebrick : (_deploymentStatus.Contains("SUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.ForestGreen : Color.DimGray) };
-        reviewRoot.Controls.Add(statusBanner, 0, 1);
-        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 210, FixedPanel = FixedPanel.None };
-        void KeepHalfSplit() { if (split.Height > 160) split.SplitterDistance = Math.Max(80, (split.Height - split.SplitterWidth) / 2); }
-        split.Resize += (_, _) => KeepHalfSplit();
-        split.HandleCreated += (_, _) => BeginInvoke(() => KeepHalfSplit());
-        var summary = new TextBox { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, Font = new Font("Consolas", 9.5F) };
-        summary.Text = $"Application: {_profile.ApplicationName}\r\nBuild mode (selected on Project Source): {_profile.BuildMode}\r\nHosted website action: {(_profile.BuildMode == "Fast Local Test" ? "UNCHANGED — compile only" : "UPDATE after successful build")}\r\nDependency mode: {_profile.DependencyResolutionMode}\r\nOffline build: {_profile.OfflineBuild}\r\nTarget mode: {_profile.TargetMode}\r\nTarget: {_profile.TargetHost}\r\nDeployment Repository: {_profile.DeploymentRepositoryFolder}\r\nStable Build Workspace: {_profile.WorkspaceRoot}\r\nIncoming Source: {_profile.SourceFolder}\r\nReady publish folder: {_profile.ReadyPublishFolder}\r\nAPI project: {_profile.ApiProjectPath}\r\nTarget framework: .NET {_profile.TargetFrameworkMajor}\r\nNode required: {_profile.RequiresNode}\r\nSQL: {_profile.SqlInstance}\r\nDatabase: {_profile.DatabaseName}\r\nHosted site folder: {_profile.HostingRoot}\r\nDeployment layout: {_profile.DeploymentLayout}\r\nDefault IIS website: {_profile.UseDefaultIisWebsite}\r\nPersistent data root: {_profile.DeploymentRoot}\r\nIIS site: {_profile.SiteName}\r\nApp pool: {_profile.AppPoolName}\r\nPort: {_profile.HttpPort}\r\nHealth: {_profile.HealthPath}";
-        split.Panel1.Controls.Add(summary); split.Panel2.Controls.Add(_log); reviewRoot.Controls.Add(split, 0, 2);
-        _reviewActivity = new Label { Text = _activity.Text, Dock = DockStyle.Fill, AutoEllipsis = true, Height = 32, Padding = new Padding(4, 6, 4, 0), ForeColor = Color.DimGray, Font = new Font("Segoe UI Semibold", 9.5F) };
-        reviewRoot.Controls.Add(_reviewActivity, 0, 3);
-
-        {
-            var deploymentReady = (_persistentState.LastResult == "Successful" && !string.IsNullOrWhiteSpace(_lastSuccessfulPublishPath)) || Directory.Exists(_profile.HostingRoot);
-            var actions = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2, RowCount = 1, Padding = new Padding(0, 8, 0, 0) };
-            actions.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            actions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            var logActions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Margin = new Padding(0) };
-            var commandActions = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = true, Margin = new Padding(12, 0, 0, 0) };
-            var host = string.IsNullOrWhiteSpace(_profile.HostHeader) ? "localhost" : _profile.HostHeader;
-            var siteUrl = _profile.HttpPort == 80 ? $"http://{host}" : $"http://{host}:{_profile.HttpPort}";
-            var logModeLabel = new Label { Text = "Log:", AutoSize = true, Padding = new Padding(0, 8, 6, 0) };
-            var logMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110, Enabled = !_operationRunning };
-            _logModeCombo = logMode;
-            logMode.Items.AddRange(new object[] { "Minimal", "Normal", "Verbose" });
-            logMode.SelectedItem = _logViewMode.ToString();
-            logMode.SelectedIndexChanged += (_, __) =>
-            {
-                if (Enum.TryParse<LogViewMode>(logMode.SelectedItem?.ToString(), out var mode)) { _logViewMode = mode; RenderVisibleLog(); }
-            };
-            var logHeader = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, WrapContents = false, Margin = new Padding(0) };
-            logHeader.Controls.Add(logModeLabel);
-            logHeader.Controls.Add(logMode);
-            logActions.Controls.Add(logHeader);
-            _deploymentElapsedLabel = new Label { Text = _deploymentElapsedText, AutoSize = true, Padding = new Padding(16, 6, 22, 0), ForeColor = Color.RoyalBlue, Font = new Font("Segoe UI Semibold", 11.5F) };
-            commandActions.Controls.Add(_deploymentElapsedLabel);
-            var openSite = new LinkLabel { Text = "Open deployed site", AutoSize = true, Padding = new Padding(16, 6, 24, 6), LinkColor = Color.RoyalBlue, Enabled = deploymentReady };
-            openSite.LinkClicked += (_, __) =>
-            {
-                OpenSiteWithBrowser(siteUrl, new BrowserChoice("System Default", null));
-            };
-            logActions.Controls.Add(openSite);
-
-            var deployPath = _lastSuccessfulPublishPath;
-            if (string.IsNullOrWhiteSpace(deployPath))
-                deployPath = _profile.HostingRoot;
-            var openFolder = new LinkLabel { Text = "Open hosted folder", AutoSize = true, Padding = new Padding(0, 6, 0, 6), LinkColor = Color.RoyalBlue, Enabled = deploymentReady };
-            var folderToOpen = deployPath;
-            openFolder.LinkClicked += (_, __) => OpenTarget(folderToOpen!);
-            logActions.Controls.Add(openFolder);
-
-
-            actions.Controls.Add(logActions, 0, 0);
-            actions.Controls.Add(commandActions, 1, 0);
-            reviewRoot.Controls.Add(actions, 0, 4);
-        }
-        static string BuildModeHelp(int index) => index switch
-        {
-            1 => "Safe IIS update: fresh frontend build (if required) and dotnet publish. Hosted-output reuse and fingerprint-based build skips are disabled; IIS activation and recovery protections still apply.",
-            2 => "Complete Release publish, IIS activation, database preparation, health check, and rollback protection.",
-            _ => "Incremental local compile only. No dotnet publish, IIS activation, hosted-file changes, or rollback preparation."
-        };
-
-        _content.Controls.Add(reviewRoot);
     }
 
     private async Task ShowDeploymentCleanupAsync()
@@ -3764,17 +2273,33 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             // Detach the persistent log, then dispose the previous view and its handlers.
             DisposeContentControls();
             BuildReviewPage();
+            _renderedPageIndex = _pageIndex;
+            ApplyInteractiveCursors(_content);
         }
         finally { _content.ResumeLayout(true); }
     }
 
     private async Task BusyAsync(Control control, Func<Task> action)
     {
+        if (!CanNavigateInteractively() || control.IsDisposed) return;
+        _pageActionRunning = true;
         control.Enabled = false;
         UseWaitCursor = true;
+        UpdateNavigationState();
         try { await action(); }
-        catch (Exception ex) { AppendLog("ERROR: " + ex); MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Operation failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-        finally { _operationRunning = false; control.Enabled = true; UseWaitCursor = false; UpdateNavigationState(); }
+        catch (Exception ex)
+        {
+            AppendLog("ERROR: " + ex);
+            if (!IsDisposed && !Disposing)
+                MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Operation failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            // A page operation must not reset the deployment-owned flag.
+            _pageActionRunning = false;
+            if (!control.IsDisposed && !control.Disposing) control.Enabled = true;
+            if (!IsDisposed && !Disposing) { UseWaitCursor = false; UpdateNavigationState(); }
+        }
     }
 
     private static FlowLayoutPanel VerticalPanel() => new() { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
@@ -3829,17 +2354,22 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
     private static GroupBox StatusCard(string title, string detail, bool ok)
     {
         var box = new GroupBox { Text = title, Dock = DockStyle.Fill, Margin = new Padding(7), Padding = new Padding(12) };
-        var status = new Label { Text = ok ? "● Ready" : "● Action required", AutoSize = true, ForeColor = ok ? Color.ForestGreen : Color.Firebrick, Font = new Font("Segoe UI Semibold", 9.5F) };
-        var detailLabel = new Label { Text = detail, AutoSize = false, Dock = DockStyle.Fill, Padding = new Padding(0, 26, 0, 0), ForeColor = Color.FromArgb(55, 55, 55) };
+        var status = new Label { Name = "StatusText", Text = ok ? "● Ready" : "● Action required", AutoSize = true, ForeColor = ok ? Color.ForestGreen : Color.Firebrick, Font = new Font("Segoe UI Semibold", 9.5F) };
+        var detailLabel = new Label { Name = "StatusDetail", Text = detail, AutoSize = false, Dock = DockStyle.Fill, Padding = new Padding(0, 26, 0, 0), ForeColor = Color.FromArgb(55, 55, 55) };
         box.Controls.Add(detailLabel); box.Controls.Add(status);
         return box;
     }
 
-    private static void ReplaceCard(TableLayoutPanel grid, int column, int row, Control newCard)
+    private static void UpdateStatusCard(GroupBox card, string title, string detail, bool ok)
     {
-        var old = grid.GetControlFromPosition(column, row);
-        if (old is not null) { grid.Controls.Remove(old); old.Dispose(); }
-        grid.Controls.Add(newCard, column, row);
+        if (card.IsDisposed) return;
+        card.Text = title;
+        if (card.Controls["StatusText"] is Label status)
+        {
+            status.Text = ok ? "● Ready" : "● Action required";
+            status.ForeColor = ok ? Color.ForestGreen : Color.Firebrick;
+        }
+        if (card.Controls["StatusDetail"] is Label description) description.Text = detail;
     }
 
     private static string GenerateStrongPassword()
@@ -4040,12 +2570,13 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
 
     private void WizardForm_FormClosing(object? sender, FormClosingEventArgs e)
     {
-        var warning = _operationRunning
+        var warning = !CanNavigateInteractively()
             ? "A deployment/install operation is currently running. Closing now may interrupt it.\r\n\r\nDo you want to exit?"
             : "Do you want to close Deployment Manager?";
         if (MessageBox.Show(this, warning, "Confirm exit", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
         { e.Cancel = true; return; }
         CancelNavigationSourceProbe();
+        CancelBackgroundVerification();
         _acceptUiLogLines = false;
         _uiLogFlushTimer.Stop();
         _uiLogFlushTimer.Dispose();

@@ -1,0 +1,115 @@
+{
+  "baseline": "V268",
+  "commit": "5f709d4129304a5cb902205e0b3cf8f53db097a7",
+  "normalization": "Git blob SHA-1; raw bytes or newline-only LF/CRLF checkout conversion",
+  "files": [
+    {
+      "file": "src/DeploymentManager.Cli/Program.cs",
+      "blobSha": "f5e47bf6a77796a82af330d5fa51871b1213679c"
+    },
+    {
+      "file": "src/DeploymentManager/Models/DeploymentHistoryModels.cs",
+      "blobSha": "5b548f86b2114216086abb52fe87f0409fe7a0dd"
+    },
+    {
+      "file": "src/DeploymentManager/Models/DeploymentProfile.cs",
+      "blobSha": "223d8c018cc27fac2d5987c2a385ab290c58dee2"
+    },
+    {
+      "file": "src/DeploymentManager/Services/AppDataService.cs",
+      "blobSha": "48b5e5070667fff6cf5d235e154bb842196ad576"
+    },
+    {
+      "file": "src/DeploymentManager/Services/BackgroundHealthMonitor.cs",
+      "blobSha": "72f2a7122ab259bc26f76991192be3c0d082e786"
+    },
+    {
+      "file": "src/DeploymentManager/Services/BackupIntegrity.cs",
+      "blobSha": "9eeedbf3f2c65459d38872f45f93868a40950ada"
+    },
+    {
+      "file": "src/DeploymentManager/Services/BuildPerformanceTrace.cs",
+      "blobSha": "1b212f460da5b3ec9265e785e9a7e3ffb303c8a9"
+    },
+    {
+      "file": "src/DeploymentManager/Services/CodeQualitySession.cs",
+      "blobSha": "11ead276283023a52e26383d4b6c2b7e5d2f721f"
+    },
+    {
+      "file": "src/DeploymentManager/Services/CommandResult.cs",
+      "blobSha": "eef837594884c37fd5ca24f561056f96c0ed4a67"
+    },
+    {
+      "file": "src/DeploymentManager/Services/CommandRunner.cs",
+      "blobSha": "65812bf895c460709a39f6866a74d235290195be"
+    },
+    {
+      "file": "src/DeploymentManager/Services/DeploymentLogTailReader.cs",
+      "blobSha": "824e8ce3b1db422481911d5d9bbf87e4cdd67b87"
+    },
+    {
+      "file": "src/DeploymentManager/Services/DeploymentPathSafety.cs",
+      "blobSha": "fea0fa5ca9ae8102a6317504c68a4ccc2d126840"
+    },
+    {
+      "file": "src/DeploymentManager/Services/DeploymentService.cs",
+      "blobSha": "afc7931585eef8b5f49ae7625315f6ad86e01d02"
+    },
+    {
+      "file": "src/DeploymentManager/Services/EmailNotificationService.cs",
+      "blobSha": "5adbb7e91e439be61cac0f30a4d2ac78e73f5d4b"
+    },
+    {
+      "file": "src/DeploymentManager/Services/EmailProviderPresets.cs",
+      "blobSha": "3b2bc531de660aab96471a071c9ed40fe34c637a"
+    },
+    {
+      "file": "src/DeploymentManager/Services/IisDeploymentAttempt.cs",
+      "blobSha": "2575c29d0602576973685d3976682d1431b693bd"
+    },
+    {
+      "file": "src/DeploymentManager/Services/IisDiagnostics.cs",
+      "blobSha": "b12a373a94a01aebe536ec8afc9f0aa348da90d5"
+    },
+    {
+      "file": "src/DeploymentManager/Services/IisSafety.cs",
+      "blobSha": "0fac721dbd30f2d82ef8c4aa3e46d6a4fac6f933"
+    },
+    {
+      "file": "src/DeploymentManager/Services/InternalDiagnostics.cs",
+      "blobSha": "9f09714d6a61826f9b8b404b72406173070af4fe"
+    },
+    {
+      "file": "src/DeploymentManager/Services/LogService.cs",
+      "blobSha": "01bd08b5f21748e36b01e09eb78080a715b0f118"
+    },
+    {
+      "file": "src/DeploymentManager/Services/PrerequisiteService.cs",
+      "blobSha": "97bcb72bc9f31776b4722e4e51783fc5e19e3677"
+    },
+    {
+      "file": "src/DeploymentManager/Services/ReleaseVersionContract.cs",
+      "blobSha": "89cf9baf0e803d176fe5ca71f118d37a7690b548"
+    },
+    {
+      "file": "src/DeploymentManager/Services/RemoteDeploymentService.cs",
+      "blobSha": "703585e6fd79a93ad1f2dcf4e21a34923e018203"
+    },
+    {
+      "file": "src/DeploymentManager/Services/RetentionPlanner.cs",
+      "blobSha": "8c1b21e3e191a2217e8c08aec83fe91b3e1c1f05"
+    },
+    {
+      "file": "src/DeploymentManager/Services/SecretRedactor.cs",
+      "blobSha": "d36df8e281d4825adcc378a7655d58d6e5266ab6"
+    },
+    {
+      "file": "src/DeploymentManager/Services/SqlConnectionStrategy.cs",
+      "blobSha": "8e664241952f609d84b4b2d9042154acc15ca514"
+    },
+    {
+      "file": "src/DeploymentManager/Services/WorkspaceSynchronizer.cs",
+      "blobSha": "fc9d5f7a0d3b67fbde84271244aabb8a04c5e2bc"
+    }
+  ]
+}

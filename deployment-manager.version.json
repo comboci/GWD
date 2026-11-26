@@ -1,6 +1,6 @@
 {
-  "version": "268.0.0",
+  "version": "269.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V268 — preserve structured history and export active session logs"
+  "commitNote": "V269-R — UI performance/UX source candidate; Windows build and runtime review pending"
 }

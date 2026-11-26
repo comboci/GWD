@@ -1930,6 +1930,16 @@ public sealed class DeploymentService
         DeploymentPathSafety.RequireSeparate(rollback, stagingFolder);
         foreach (var relative in profile.PreserveProductionFiles ?? Array.Empty<string>())
             if (!string.IsNullOrWhiteSpace(relative)) DeploymentPathSafety.RelativeFile(target, relative);
+        // Estimate capacity before IIS STOP, including the staged sibling and
+        // a potential rollback copy. Never delete existing releases to make room.
+        var stagedBytes = DeploymentCapacityGuard.EstimateCopyBytes(stagingFolder, ct);
+        var previousBytes = DeploymentCapacityGuard.EstimateCopyBytes(target, ct);
+        var backupBytes = profile.CreateBackupBeforeDeployment && string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) ? previousBytes : 0;
+        var rollbackReserve = profile.KeepPreviousDeploymentForRollback && backupBytes > 0 ? previousBytes : 0;
+        var preservedReserve = (profile.PreserveProductionFiles?.Any(x => !string.IsNullOrWhiteSpace(x)) ?? false) ? previousBytes : 0;
+        var targetBytes = checked(stagedBytes + rollbackReserve + preservedReserve);
+        DeploymentCapacityGuard.Check(target, targetBytes, backupBytes > 0 ? rollback : null, backupBytes);
+        _runner.Report("[CAPACITY] Estimated activation and recovery space available; recheck before copying. Concurrent disk use remains possible.");
         // Stop and verify before taking the deployable snapshot. A backup taken while
         // the application is writing files cannot establish a coherent rollback version.
         IisStage("STOP", "RUNNING");
@@ -2002,6 +2012,8 @@ public sealed class DeploymentService
             // Copy the entire staged release to a sibling directory before touching the live folder.
             // This prevents a staging-copy failure from destroying the currently hosted files.
             IisStage("FILE_DEPLOY", "RUNNING");
+            // Backup may have consumed space on this volume (or an alias).
+            DeploymentCapacityGuard.Check(target, targetBytes, null, 0);
             var fullTarget = Path.GetFullPath(target).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var parentFolder = Path.GetDirectoryName(fullTarget) ?? throw new IOException("Hosted path has no parent directory.");
             var preparedRelease = Path.Combine(parentFolder, Path.GetFileName(fullTarget) + ".gwd-new-" + Guid.NewGuid().ToString("N"));
@@ -2083,7 +2095,10 @@ public sealed class DeploymentService
             catch { }
             // Recovery is a compensating operation: never reuse a cancelled deployment token.
             // Keep the original activation failure if recovery also fails, and report both.
-            if (profile.KeepPreviousDeploymentForRollback && string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) && Directory.Exists(rollback))
+            // Before the first live-folder mutation, a failed prepared copy or
+            // capacity check needs only original IIS-state recovery, not a second
+            // payload copy that may fail for the same disk-space reason.
+            if (_filesChanged && profile.KeepPreviousDeploymentForRollback && string.Equals(profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) && Directory.Exists(rollback))
             {
                 try
                 {

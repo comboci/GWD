@@ -90,6 +90,8 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         Save();
     }
 
+    private double _reviewSplitRatio = 0.42;
+
     private void BuildReviewPage()
     {
         _pageTitle.Text = "Review and deploy";
@@ -122,6 +124,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             if (!sourceBuildMode) return;
             _profile.BuildMode = deployMode.SelectedIndex switch { 1 => "Fast IIS Update", 2 => "Full IIS Deploy", _ => "Fast Local Test" };
             deployModeHelp.Text = BuildModeHelp(deployMode.SelectedIndex);
+            UpdateDashboard();
         };
         deployModePanel.Controls.Add(deployModeLabel);
         deployModePanel.Controls.Add(deployMode);
@@ -155,10 +158,23 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             ForeColor = recoveryWarning ? Color.Firebrick : (_deploymentStatus.Contains("SUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.ForestGreen : Color.DimGray) };
         reviewRoot.Controls.Add(statusBanner, 0, 1);
         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 210, FixedPanel = FixedPanel.None };
-        void KeepHalfSplit() { if (split.Height > 160) split.SplitterDistance = Math.Max(80, (split.Height - split.SplitterWidth) / 2); }
-        split.Resize += (_, _) => KeepHalfSplit();
-        split.HandleCreated += (_, _) => BeginInvoke(() => KeepHalfSplit());
-        var summary = new TextBox { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, Font = new Font("Consolas", 9.5F) };
+        // Initialize the splitter once; subsequent resizes retain the user's ratio.
+        var initialized = false;
+        void InitializeSplit()
+        {
+            if (initialized || split.IsDisposed || split.Height <= split.Panel1MinSize + split.Panel2MinSize + split.SplitterWidth) return;
+            initialized = true;
+            split.SplitterDistance = Math.Clamp((int)((split.Height - split.SplitterWidth) * _reviewSplitRatio),
+                split.Panel1MinSize, split.Height - split.SplitterWidth - split.Panel2MinSize);
+        }
+        split.Resize += (_, _) => InitializeSplit();
+        split.HandleCreated += (_, _) => BeginInvoke(() => InitializeSplit());
+        split.SplitterMoved += (_, _) =>
+        {
+            if (initialized && split.Height > split.SplitterWidth)
+                _reviewSplitRatio = Math.Clamp(split.SplitterDistance / (double)(split.Height - split.SplitterWidth), 0.1, 0.9);
+        };
+        var summary = new TextBox { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Both, WordWrap = false, Font = new Font("Consolas", 9.5F) };
         summary.Text = $"Application: {_profile.ApplicationName}\r\nBuild mode (selected on Project Source): {_profile.BuildMode}\r\nHosted website action: {(_profile.BuildMode == "Fast Local Test" ? "UNCHANGED — compile only" : "UPDATE after successful build")}\r\nDependency mode: {_profile.DependencyResolutionMode}\r\nOffline build: {_profile.OfflineBuild}\r\nTarget mode: {_profile.TargetMode}\r\nTarget: {_profile.TargetHost}\r\nDeployment Repository: {_profile.DeploymentRepositoryFolder}\r\nStable Build Workspace: {_profile.WorkspaceRoot}\r\nIncoming Source: {_profile.SourceFolder}\r\nReady publish folder: {_profile.ReadyPublishFolder}\r\nAPI project: {_profile.ApiProjectPath}\r\nTarget framework: .NET {_profile.TargetFrameworkMajor}\r\nNode required: {_profile.RequiresNode}\r\nSQL: {_profile.SqlInstance}\r\nDatabase: {_profile.DatabaseName}\r\nHosted site folder: {_profile.HostingRoot}\r\nDeployment layout: {_profile.DeploymentLayout}\r\nDefault IIS website: {_profile.UseDefaultIisWebsite}\r\nPersistent data root: {_profile.DeploymentRoot}\r\nIIS site: {_profile.SiteName}\r\nApp pool: {_profile.AppPoolName}\r\nPort: {_profile.HttpPort}\r\nHealth: {_profile.HealthPath}";
         split.Panel1.Controls.Add(summary); split.Panel2.Controls.Add(_log); reviewRoot.Controls.Add(split, 0, 2);
         _reviewActivity = new Label { Text = _activity.Text, Dock = DockStyle.Fill, AutoEllipsis = true, Height = 32, Padding = new Padding(4, 6, 4, 0), ForeColor = Color.DimGray, Font = new Font("Segoe UI Semibold", 9.5F) };

@@ -53,7 +53,7 @@ public sealed partial class WizardForm : Form
         "SQL Server & Database", "Deployment Location", "Review & Deploy"
     };
 
-    private readonly List<Label> _stepLabels = new();
+    private readonly List<Button> _stepLabels = new();
     private readonly FlowLayoutPanel _stepPanel = new();
     private readonly Panel _content = new();
     private readonly Button _back = new() { Text = "< Back", Width = 135, Height = 40 };
@@ -134,6 +134,7 @@ public sealed partial class WizardForm : Form
             // A persisted InProgress result survives a crash and is not proof of a clean start.
             "InProgress" => InterruptedDeploymentStatus,
             "Failed" => "PREVIOUS DEPLOYMENT UNSUCCESSFUL",
+            "Cancelled" => "PREVIOUS DEPLOYMENT CANCELLED",
             "Successful" => "PREVIOUS DEPLOYMENT SUCCESSFUL",
             _ => "Not started"
         };
@@ -178,9 +179,7 @@ public sealed partial class WizardForm : Form
         MinimumSize = new Size(1080, 740);
         StartPosition = FormStartPosition.CenterScreen;
         WindowState = FormWindowState.Maximized;
-        Font = new Font("Segoe UI", 9.5F);
-        // Scale controls consistently when Windows display DPI is changed.
-        AutoScaleMode = AutoScaleMode.Dpi;
+        GwdUi.ConfigureForm(this);
 
         BuildShell();
         _settingsSaveTimer.Tick += (_, _) => FlushDeferredSettingsSaves();
@@ -211,6 +210,7 @@ public sealed partial class WizardForm : Form
             await UpdateRuntimeMetricsAsync();
         };
         Disposed += (_, _) => StopRuntimeMetrics();
+        Disposed += (_, _) => StopVisualResources();
         FormClosing += WizardForm_FormClosing;
         Shown += (_, _) => UpdateNavigationState();
         Disposed += (_, _) => CancelNavigationSourceProbe();
@@ -278,6 +278,8 @@ public sealed partial class WizardForm : Form
         _healthTip.SetToolTip(_deploymentIndicator, needsReview
             ? "Do not infer successful recovery from IIS status or HTTP response. Review the attempt Journal, recovery markers, backups and actual site/API/frontend state before retrying."
             : "Recorded process outcome only; check actual IIS target, HTTP endpoint and running release identity independently.");
+        ObserveRecordedStatus(needsReview);
+        UpdateDashboard();
     }
 
     private void BuildShell()
@@ -285,44 +287,50 @@ public sealed partial class WizardForm : Form
         // Independent health/status row and full-width action footer avoid the
         // old competition for horizontal space at 125%/150% DPI.
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 3 };
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 250));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 246));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         _stepPanel.Dock = DockStyle.Fill;
         _stepPanel.FlowDirection = FlowDirection.TopDown;
         _stepPanel.WrapContents = false;
         _stepPanel.AutoScroll = true;
-        _stepPanel.BackColor = Color.FromArgb(245, 247, 250);
-        _stepPanel.Padding = new Padding(14, 20, 10, 10);
+        _stepPanel.BackColor = GwdUi.HighContrast ? SystemColors.Control : GwdUi.Surface;
+        _stepPanel.Padding = new Padding(10, 16, 10, 8);
+        _stepPanel.Controls.Add(new Label { Text = "GWD / " + ProductInfo.DisplayVersion, AutoSize = true, Font = GwdUi.Section, Margin = new Padding(8, 3, 3, 8) });
+        _stepPanel.Controls.Add(new Label { Text = "DEPLOYMENT WORKFLOW", AutoSize = true, Font = GwdUi.Small, Margin = new Padding(8, 5, 3, 7) });
         foreach (var step in _steps)
         {
-            var label = new Label
+            var label = new Button
             {
-                Text = step,
-                AutoSize = false,
-                Width = 215,
-                Height = 48,
-                Padding = new Padding(12, 12, 4, 0),
-                Font = new Font("Segoe UI Semibold", 10.5F),
-                ForeColor = Color.Gray,
-                BackColor = Color.Transparent,
-                Cursor = Cursors.Hand
+                Text = step, AccessibleName = step, TabStop = true, AutoSize = false,
+                Width = 212, Height = 52, Padding = new Padding(8, 3, 5, 3),
+                Margin = new Padding(2, 2, 2, 4), TextAlign = ContentAlignment.MiddleLeft,
+                Font = GwdUi.Body, Cursor = Cursors.Hand
             };
             var stepIndex = _stepLabels.Count;
             label.Click += (_, _) => { if (CanNavigateInteractively()) ShowPage(stepIndex); };
             _stepLabels.Add(label);
             _stepPanel.Controls.Add(label);
         }
+        _stepPanel.ClientSizeChanged += (_, _) =>
+        {
+            var width = _stepPanel.ClientSize.Width - _stepPanel.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 6;
+            if (width > 0) foreach (var button in _stepLabels) button.Width = width;
+        };
         root.Controls.Add(_stepPanel, 0, 0);
         root.SetRowSpan(_stepPanel, 2);
 
-        var right = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, Padding = new Padding(26, 18, 26, 0) };
+        var right = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Padding = new Padding(18, 14, 18, 4) };
+        right.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         right.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        right.Controls.Add(BuildDashboard(), 0, 0);
+        _pageTitle.Font = GwdUi.Heading;
 
         var header = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2 };
         header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
@@ -331,27 +339,40 @@ public sealed partial class WizardForm : Form
         _stepIndicator.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         header.Controls.Add(_stepIndicator, 1, 0);
 
-        right.Controls.Add(header, 0, 0);
-        right.Controls.Add(_pageDescription, 0, 1);
+        right.Controls.Add(header, 0, 1);
+        right.Controls.Add(_pageDescription, 0, 2);
+        right.ClientSizeChanged += (_, _) =>
+        {
+            var width = Math.Max(160, right.ClientSize.Width - right.Padding.Horizontal - 16);
+            _pageDescription.MaximumSize = new Size(width, 0);
+            _pageTitle.MaximumSize = new Size(Math.Max(140, width - _stepIndicator.PreferredSize.Width - 16), 0);
+        };
         _content.Dock = DockStyle.Fill;
         // Auto-sized wizard rows can exceed the available height, especially at 125%/150% DPI.
         // Keep the footer visible and scroll the page instead of clipping/overlapping fields.
         _content.AutoScroll = true;
         _content.Padding = new Padding(0, 18, 0, 0);
-        right.Controls.Add(_content, 0, 2);
+        right.Controls.Add(_content, 0, 3);
         root.Controls.Add(right, 1, 0);
 
         // These health labels were updated by OnHealthUpdated but were never
         // parented to a visible control. Keep the recovery warning in the top
         // line, with horizontally scrollable status details below it.
-        var healthBar = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, Padding = new Padding(12, 0, 12, 0), Margin = new Padding(0) };
-        healthBar.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        healthBar.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var healthBar = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 1, RowCount = 2, Padding = new Padding(12, 4, 12, 6), Margin = new Padding(0) };
+        healthBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        healthBar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        healthBar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        _deploymentIndicator.AutoSize = true;
+        _deploymentIndicator.AutoEllipsis = false;
+        _deploymentIndicator.Dock = DockStyle.Top;
+        _deploymentIndicator.Font = GwdUi.Section;
         healthBar.Controls.Add(_deploymentIndicator, 0, 0);
+        healthBar.ClientSizeChanged += (_, _) =>
+            _deploymentIndicator.MaximumSize = new Size(Math.Max(160, healthBar.ClientSize.Width - healthBar.Padding.Horizontal - 8), 0);
         var healthDetails = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false, AutoScroll = true, Margin = new Padding(0), Padding = new Padding(3, 0, 3, 0)
+            WrapContents = true, AutoSize = true, Margin = new Padding(0), Padding = new Padding(3, 0, 3, 0)
         };
         healthDetails.Controls.Add(_iisHealth);
         healthDetails.Controls.Add(_sqlHealth);
@@ -359,18 +380,24 @@ public sealed partial class WizardForm : Form
         healthDetails.Controls.Add(_healthChecked);
         healthBar.Controls.Add(healthDetails, 0, 1);
         root.Controls.Add(healthBar, 1, 1);
-        UpdateDeploymentIndicator();
-
-        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, Padding = new Padding(10, 8, 14, 8) };
+        var footer = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 1, RowCount = 4, Padding = new Padding(10, 4, 10, 6) };
         footer.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        footer.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        var statusPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, WrapContents = false };
+        for (var i = 0; i < 4; i++) footer.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _activity.AutoEllipsis = true;
-        statusPanel.Controls.Add(_activity);
-        statusPanel.Controls.Add(_resourceUsage);
-        footer.Controls.Add(statusPanel, 0, 0);
+        _activity.Dock = DockStyle.Top;
+        _activity.Height = 28;
+        footer.Controls.Add(_activity, 0, 0);
+        _resourceUsage.Padding = new Padding(8, 2, 0, 2);
+        footer.Controls.Add(_resourceUsage, 0, 1);
+        footer.Controls.Add(BuildNotificationBar(), 0, 2);
 
-        var footerButtons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(8, 0, 0, 0) };
+        var footerButtons = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = true, Margin = new Padding(0) };
+        foreach (var button in new[] { _next, _back, _autoDeploy })
+        {
+            button.AutoSize = true;
+            button.MinimumSize = new Size(108, 36);
+            button.Padding = new Padding(8, 3, 8, 3);
+        }
         footerButtons.Controls.Add(_next);
         footerButtons.Controls.Add(_back);
         var resetWizard = new Button { Text = "Start Over", Width = 125, Height = 36 };
@@ -378,27 +405,27 @@ public sealed partial class WizardForm : Form
         resetWizard.ContextMenuStrip = startOverMenu;
         startOverMenu.Items.Add("Start Over — Clear Log", null, (_, _) => ResetWizard(clearLog: true));
         startOverMenu.Items.Add("Start Over — Keep Log", null, (_, _) => ResetWizard(clearLog: false));
-        resetWizard.Click += (_, _) => startOverMenu.Show(resetWizard, new Point(0, resetWizard.Height));
+        resetWizard.Click += (_, _) => { if (CanNavigateInteractively()) startOverMenu.Show(resetWizard, new Point(0, resetWizard.Height)); };
         footerButtons.Controls.Add(resetWizard);
         footerButtons.Controls.Add(_autoDeploy);
-        var viewLogs = new Button { Text = "Diagnostics Center", Width = 145, Height = 36 };
-        viewLogs.Click += (_, _) =>
-        {
-            using var dialog = new DiagnosticsCenterForm(_appData, _history, _profile, _deployment, _logService.LogFile, _runtimeMetrics);
-            dialog.ShowDialog(this);
-        };
-        // Diagnostics Center is accessed from the Actions menu, not the wizard footer.
-        footer.Controls.Add(footerButtons, 1, 0);
+        var viewLogs = new Button { Text = "Diagnostics", AccessibleName = "Diagnostics Center", AutoSize = true, MinimumSize = new Size(108, 36) };
+        viewLogs.Click += (_, _) => OpenDiagnostics();
+        footerButtons.Controls.Add(viewLogs);
+        var liveLog = new Button { Text = "Live log", AutoSize = true, MinimumSize = new Size(90, 36) };
+        liveLog.Click += (_, _) => OpenLiveLog();
+        footerButtons.Controls.Add(liveLog);
+        footer.Controls.Add(footerButtons, 0, 3);
         root.Controls.Add(footer, 0, 2);
         root.SetColumnSpan(footer, 2);
 
         Controls.Add(root);
         Controls.Add(_progress);
+        _progress.AccessibleName = "Wizard position (not deployment completion)";
         var menu = new MenuStrip { Dock = DockStyle.Top };
-        var fileMenu = new ToolStripMenuItem("File");
-        var saveMenu = new ToolStripMenuItem("Save Profile");
+        var fileMenu = new ToolStripMenuItem("&File");
+        var saveMenu = new ToolStripMenuItem("Save Profile") { ShortcutKeys = Keys.Control | Keys.S };
         saveMenu.Click += (_, _) => { if (!CanNavigateInteractively()) return; ShowPage(0); _saveProfileAction?.PerformClick(); };
-        var loadMenu = new ToolStripMenuItem("Load Profile");
+        var loadMenu = new ToolStripMenuItem("Load Profile") { ShortcutKeys = Keys.Control | Keys.O };
         loadMenu.Click += (_, _) => { if (!CanNavigateInteractively()) return; ShowPage(0); _loadProfileAction?.PerformClick(); };
         fileMenu.DropDownItems.Add(saveMenu);
         fileMenu.DropDownItems.Add(loadMenu);
@@ -414,6 +441,7 @@ public sealed partial class WizardForm : Form
                 _profile.DeploymentRepositoryFolder = _appData.GetDeploymentRepositoryFolder();
                 _profile.WorkspaceRoot = _appData.GetWorkspaceRoot();
                 AppendLog("Settings updated. Release output: " + _appData.GetManagerReleaseRoot());
+                NotifyUi(UiNoticeKind.Info, "Settings saved.");
                 // These views display the settings that just changed.
                 if (_pageIndex == 0 || _pageIndex == 4) RebuildCurrentPage();
             }
@@ -436,7 +464,7 @@ public sealed partial class WizardForm : Form
         };
         fileMenu.DropDownItems.Add(databaseMenu);
         menu.Items.Add(fileMenu);
-        var actionsMenu = new ToolStripMenuItem("Actions");
+        var actionsMenu = new ToolStripMenuItem("&Actions");
         var cleanupMenu = new ToolStripMenuItem("Clean Previous Versions");
         cleanupMenu.Click += async (_, _) => { if (CanNavigateInteractively()) await CleanupPreviousVersionsAsync(); };
         actionsMenu.DropDownItems.Add(cleanupMenu);
@@ -452,7 +480,7 @@ public sealed partial class WizardForm : Form
         exportSourceMenu.Click += (_, _) => { if (!CanNavigateInteractively()) return; if (_pageIndex != 0) ShowPage(0); _exportSourceAction?.PerformClick(); };
         actionsMenu.DropDownItems.Add(exportSourceMenu);
         var diagnosticsMenu = new ToolStripMenuItem("Diagnostics Center");
-        diagnosticsMenu.Click += (_, _) => viewLogs.PerformClick();
+        diagnosticsMenu.Click += (_, _) => OpenDiagnostics();
         actionsMenu.DropDownItems.Add(diagnosticsMenu);
         actionsMenu.DropDownItems.Add(new ToolStripSeparator());
         var emailNotificationsMenu = new ToolStripMenuItem("Email Notifications...");
@@ -474,8 +502,18 @@ public sealed partial class WizardForm : Form
             }
         };
         actionsMenu.DropDownItems.Add(emailNotificationsMenu);
+        var viewMenu = new ToolStripMenuItem("&View");
+        viewMenu.DropDownItems.Add(new ToolStripMenuItem("Live Log", null, (_, _) => OpenLiveLog()) { ShortcutKeys = Keys.Control | Keys.L });
+        viewMenu.DropDownItems.Add(new ToolStripMenuItem("Diagnostics Center", null, (_, _) => OpenDiagnostics()) { ShortcutKeys = Keys.Control | Keys.Shift | Keys.D });
+        viewMenu.DropDownItems.Add(new ToolStripMenuItem("Deployment History", null, (_, _) => OpenHistory()) { ShortcutKeys = Keys.Control | Keys.Shift | Keys.H });
+        viewMenu.DropDownItems.Add(new ToolStripMenuItem("Notifications", null, (_, _) => OpenNotifications()) { ShortcutKeys = Keys.Control | Keys.Shift | Keys.N });
+        menu.Items.Add(viewMenu);
         MainMenuStrip = menu;
         Controls.Add(menu);
+        GwdUi.StyleTree(root);
+        GwdUi.StyleTree(menu);
+        GwdUi.ButtonStyle(_next, primary: true);
+        UpdateDeploymentIndicator();
 
 
         _back.Click += (_, _) => { if (CanNavigateInteractively() && _pageIndex > 0) ShowPage(_pageIndex - 1); };
@@ -652,7 +690,15 @@ public sealed partial class WizardForm : Form
         _lastErrorReportPath = null;
         _lastSuccessfulPublishPath = null;
         // Start Over must not erase an unresolved prior deployment warning.
-        _deploymentStatus = _persistentState.LastResult == "InProgress" ? InterruptedDeploymentStatus : "Not started";
+        _deploymentStatus = _persistentState.LastResult switch
+        {
+            "InProgress" => InterruptedDeploymentStatus,
+            "RecoveryFailed" => "PREVIOUS DEPLOYMENT — RECOVERY FAILED",
+            "Failed" => "PREVIOUS DEPLOYMENT UNSUCCESSFUL",
+            "Cancelled" => "PREVIOUS DEPLOYMENT CANCELLED",
+            "Successful" => "PREVIOUS DEPLOYMENT SUCCESSFUL",
+            _ => "Not started"
+        };
         _deploymentElapsedText = "Elapsed: 00:00:00";
         _activity.Text = "Ready";
         _progress.Value = 0;
@@ -739,6 +785,7 @@ public sealed partial class WizardForm : Form
                 case 7: BuildReviewPage(); break;
             }
             _renderedPageIndex = _pageIndex;
+            GwdUi.StyleTree(_content);
             ApplyInteractiveCursors(_content);
         }
         finally { _content.ResumeLayout(true); }
@@ -802,25 +849,22 @@ public sealed partial class WizardForm : Form
     {
         for (var i = 0; i < _stepLabels.Count; i++)
         {
-            var label = _stepLabels[i];
-            if (i < _pageIndex)
+            var button = _stepLabels[i];
+            var current = i == _pageIndex;
+            var checkedState = (i == 2 && _scanCompleted) || (i == 3 && _iisAutoVerified) ||
+                (i == 4 && _runtimesAutoVerified) || (i == 5 && _sqlDatabaseAutoVerified) ||
+                (i == 6 && _deploymentLocationAutoVerified);
+            var state = current ? "Current" : checkedState ? "Checked" : i < _pageIndex ? "Earlier" : "Pending";
+            var caption = $"{i + 1:00}  {_steps[i]}";
+            // Never label an earlier step as passed solely because of position.
+            if (button.Text != caption) button.Text = caption;
+            button.AccessibleDescription = state + "; checks are not deployment authorization.";
+            _healthTip.SetToolTip(button, state);
+            if (!GwdUi.HighContrast)
             {
-                label.Text = $"✓  {_steps[i]}";
-                label.ForeColor = Color.ForestGreen;
-                label.BackColor = Color.Transparent;
-            }
-            else if (i == _pageIndex)
-            {
-                label.Text = $"▶  {_steps[i]}";
-                label.ForeColor = Color.FromArgb(25, 75, 145);
-                label.BackColor = Color.FromArgb(225, 235, 248);
-            }
-            else
-            {
-                var autoVerified = (i == 2 && _scanCompleted) || (i == 3 && _iisAutoVerified) || (i == 4 && _runtimesAutoVerified) || (i == 5 && _sqlDatabaseAutoVerified) || (i == 6 && _deploymentLocationAutoVerified);
-                label.Text = autoVerified ? $"✓  {_steps[i]} — Auto verified" : $"○  {_steps[i]}";
-                label.ForeColor = autoVerified ? Color.ForestGreen : Color.Gray;
-                label.BackColor = Color.Transparent;
+                button.FlatAppearance.BorderColor = current ? GwdUi.Accent : GwdUi.Border;
+                button.BackColor = current ? GwdUi.AccentSoft : GwdUi.Surface;
+                button.ForeColor = current ? GwdUi.Accent : checkedState ? GwdUi.Success : GwdUi.Ink;
             }
         }
     }
@@ -934,6 +978,8 @@ public sealed partial class WizardForm : Form
             _autoDeploy.Enabled = _autoDeployCts?.IsCancellationRequested != true;
         else
             _autoDeploy.Enabled = CanNavigateInteractively() && CanAutoDeployStart();
+        foreach (var button in _stepLabels) button.Enabled = CanNavigateInteractively();
+        UpdateDashboard();
     }
 
     private bool CanLeaveTargetPage()
@@ -2311,6 +2357,7 @@ public sealed partial class WizardForm : Form
             DisposeContentControls();
             BuildReviewPage();
             _renderedPageIndex = _pageIndex;
+            GwdUi.StyleTree(_content);
             ApplyInteractiveCursors(_content);
         }
         finally { _content.ResumeLayout(true); }
@@ -2328,7 +2375,10 @@ public sealed partial class WizardForm : Form
         {
             AppendLog("ERROR: " + ex);
             if (!IsDisposed && !Disposing)
+            {
+                NotifyUi(UiNoticeKind.Error, SecretRedactor.Redact(ex.Message));
                 MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Operation failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
         finally
         {
@@ -2649,6 +2699,7 @@ public sealed partial class WizardForm : Form
         StopRuntimeMetrics();
         _healthMonitor.Updated -= OnHealthUpdated;
         _healthMonitor.Dispose();
+        StopVisualResources();
         _healthTip.Dispose();
         // Commit pending edits before closing and before any later state I/O
         // can fail, then tear down the idle-save timer.

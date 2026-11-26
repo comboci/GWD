@@ -14,6 +14,11 @@ internal static class Program
 
         try
         {
+            if (args.Contains("--diagnostic-findings"))
+            {
+                DiagnosticFindingsTests.RunAsync(testRoot).GetAwaiter().GetResult();
+                return 0;
+            }
             if (args.Contains("--diagnostic-history"))
             {
                 DiagnosticHistoryTests.Run(testRoot);
@@ -56,6 +61,18 @@ internal static class Program
             for (var cycle = 1; cycle <= 3; cycle++)
             {
                 showPage.Invoke(form, [9]);
+                var bannerField = type.GetField("_reviewStatusBanner", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                var banner = (Label)bannerField.GetValue(form)!;
+                var statusField = type.GetField("_deploymentStatus", BindingFlags.Instance | BindingFlags.NonPublic)!;
+                var previousStatus = statusField.GetValue(form);
+                statusField.SetValue(form, "DEPLOYMENT UNSUCCESSFUL");
+                type.GetMethod("UpdateDeploymentIndicator", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(form, null);
+                if (banner.Text != "DEPLOYMENT UNSUCCESSFUL" || banner.ForeColor != System.Drawing.Color.Firebrick)
+                    throw new InvalidOperationException("Review status banner failed to update.");
+                statusField.SetValue(form, previousStatus);
+                type.GetMethod("BuildReviewPageRefresh", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(form, null);
+                if (!banner.IsDisposed || log.IsDisposed)
+                    throw new InvalidOperationException("Review refresh must dispose old controls but preserve live log.");
                 if (log.IsDisposed) throw new InvalidOperationException($"Log TextBox was disposed while entering Review on cycle {cycle}.");
 
                 disposeContent.Invoke(form, null);

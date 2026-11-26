@@ -522,6 +522,13 @@ public sealed partial class WizardForm : Form
         {
             if (_autoDeployRunning)
             {
+                // Once automatic navigation enters DeployAsync, cancellation
+                // belongs to the actual deployment token and confirmation.
+                if (_operationRunning && _pageIndex == _steps.Length - 1)
+                {
+                    RequestDeploymentCancellation();
+                    return;
+                }
                 _autoDeployCts?.Cancel();
                 _autoDeploy.Text = "Cancelling Deploy...";
                 _autoDeploy.Enabled = false;
@@ -950,6 +957,7 @@ public sealed partial class WizardForm : Form
 
     private void UpdateNavigationState()
     {
+        if (IsDisposed || Disposing || _visualResourcesStopped) return;
         _back.Enabled = _pageIndex > 0;
         var navigationSourceReady = EnsureNavigationSourceReadiness();
         var localOnly = string.Equals(_profile.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase);
@@ -980,6 +988,9 @@ public sealed partial class WizardForm : Form
         else
             _autoDeploy.Enabled = CanNavigateInteractively() && CanAutoDeployStart();
         var canNavigate = CanNavigateInteractively();
+        // The active operation owns the mutable profile. Freeze page inputs,
+        // while keeping the shell's cancellation and log commands available.
+        _content.Enabled = canNavigate;
         foreach (var button in _stepLabels) button.Enabled = canNavigate;
         foreach (var action in new Control?[] { _saveProfileAction, _loadProfileAction, _lockSourceAction, _exportSourceAction })
             if (action is { IsDisposed: false }) action.Enabled = canNavigate;
@@ -1063,6 +1074,7 @@ public sealed partial class WizardForm : Form
         _autoDeployCts = new CancellationTokenSource();
         var ct = _autoDeployCts.Token;
         _autoDeployRunning = true;
+        UpdateNavigationState();
         _next.Enabled = false;
         _back.Enabled = false;
         var originalText = _autoDeploy.Text;
@@ -1124,8 +1136,8 @@ public sealed partial class WizardForm : Form
                         if (string.IsNullOrWhiteSpace(_profile.SqlInstance) && _sqlInstances.Count > 0) _profile.SqlInstance = _sqlInstances[0].ServerName;
                         if (string.IsNullOrWhiteSpace(_profile.SqlInstance)) throw new InvalidOperationException("No SQL Server instance is selected.");
                         if (string.IsNullOrWhiteSpace(_profile.DatabaseName)) throw new InvalidOperationException("Database name is required.");
-                        await _sql.TestConnectionWithSafeFallbackAsync(_profile);
-                        
+                        await _sql.TestConnectionWithSafeFallbackAsync(_profile, ct);
+                        ct.ThrowIfCancellationRequested();
                         break;
 
                     case 6:
@@ -1135,8 +1147,11 @@ public sealed partial class WizardForm : Form
                         break;
 
                     case 7:
+                        // Direct navigation to Review is not validation evidence.
+                        ValidateTargetPage();
+                        ct.ThrowIfCancellationRequested();
                         if (!string.Equals(_profile.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase)) ValidateIisSitePage();
-                        AppendLog("[AUTO] All pre-deployment stages passed. Starting deployment automatically.");
+                        AppendLog("[AUTO] Starting deployment after target validation; engine safety checks remain authoritative.");
                         await DeployAsync();
                         return;
                 }
@@ -1309,6 +1324,7 @@ public sealed partial class WizardForm : Form
                     if (!_scanCompleted) throw new InvalidOperationException("Run the environment scan before continuing.");
                     break;
                 case 3:
+                    if (string.Equals(_profile.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase)) break;
                     _iisState = await _environment.CheckIisAsync();
                     if (!_iisState.Installed) throw new InvalidOperationException("IIS must be installed before continuing.");
                     break;
@@ -1316,21 +1332,25 @@ public sealed partial class WizardForm : Form
                     await RefreshRuntimeStatesAsync();
                     var needsSdk = _profile.BuildMode != "Prepared IIS Publish";
                     var needsNode = needsSdk && _profile.RequiresNode;
-                    if (!_hostingState.Installed || (needsSdk && !_sdkState.Installed) || (needsNode && !_nodeState.Installed))
+                    var localOnly = string.Equals(_profile.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase);
+                    if ((!localOnly && !_hostingState.Installed) || (needsSdk && !_sdkState.Installed) || (needsNode && !_nodeState.Installed))
                         throw new InvalidOperationException("Install all prerequisites required by the selected build mode before continuing.");
-                    if (_sqlInstances.Count == 0 && !File.Exists(_profile.SqlInstallerPath))
+                    if (!localOnly && _sqlInstances.Count == 0 && !File.Exists(_profile.SqlInstallerPath))
                         throw new InvalidOperationException("No SQL Server engine is installed. Download or choose a SQL Server Express installer before continuing.");
                     break;
                 case 5:
+                    if (string.Equals(_profile.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase)) break;
                     if (string.IsNullOrWhiteSpace(_profile.SqlInstance)) throw new InvalidOperationException("Select or install a SQL Server instance.");
                     if (string.IsNullOrWhiteSpace(_profile.DatabaseName)) throw new InvalidOperationException("Database name is required.");
                     if (!_sqlAdminConnectionVerified || !_databaseConnectionVerified) throw new InvalidOperationException("Verify SQL Server and database connectivity before continuing.");
                     await _sql.TestConnectionWithSafeFallbackAsync(_profile);
                     break;
                 case 6:
+                    if (string.Equals(_profile.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase)) break;
                     ValidateDeploymentLocationPage();
                     break;
                 case 7:
+                    ValidateTargetPage();
                     if (!string.Equals(_profile.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase)) ValidateIisSitePage();
                     await DeployAsync();
                     return;
@@ -1395,6 +1415,14 @@ public sealed partial class WizardForm : Form
         _profile.ApiProjectPath = _environment.DetectApiProject(_profile.SourceFolder) ?? throw new InvalidOperationException("No ASP.NET Core Web .csproj was found under the selected source folder.");
         _profile.TargetFrameworkMajor = _environment.DetectTargetFrameworkMajor(_profile.ApiProjectPath);
         _profile.RequiresNode = _environment.DetectNodeRequirement(_profile.SourceFolder, _profile.ApiProjectPath);
+    }
+
+    private void InvalidateEnvironmentEvidence()
+    {
+        CancelBackgroundVerification();
+        _scanCompleted = false;
+        _iisAutoVerified = _runtimesAutoVerified = _deploymentLocationAutoVerified = false;
+        UpdateStepIndicator();
     }
 
     private void CancelBackgroundVerification()
@@ -1494,6 +1522,8 @@ public sealed partial class WizardForm : Form
         var mode = _profile.BuildMode;
         var source = _profile.SourceFolder;
         var prepared = _profile.ReadyPublishFolder;
+        var targetMode = _profile.TargetMode;
+        var targetHost = _profile.TargetHost;
         var major = _profile.TargetFrameworkMajor;
         var requiresNode = _profile.RequiresNode;
         var readyPublish = mode == "Prepared IIS Publish";
@@ -1510,7 +1540,8 @@ public sealed partial class WizardForm : Form
         var sqlInstances = await _sql.DetectInstancesAsync(ct);
         ct.ThrowIfCancellationRequested();
         if (IsDisposed || Disposing || mode != _profile.BuildMode || source != _profile.SourceFolder ||
-            prepared != _profile.ReadyPublishFolder || major != _profile.TargetFrameworkMajor || requiresNode != _profile.RequiresNode)
+            prepared != _profile.ReadyPublishFolder || targetMode != _profile.TargetMode || targetHost != _profile.TargetHost ||
+            major != _profile.TargetFrameworkMajor || requiresNode != _profile.RequiresNode)
             throw new OperationCanceledException("Environment selection changed during scan.");
 
         _iisState = iisState; _hostingState = hostingState; _sdkState = sdkState; _nodeState = nodeState; _sqlInstances = sqlInstances;
@@ -1929,6 +1960,7 @@ public sealed partial class WizardForm : Form
             if (protectionDialog.ShowDialog(this) != DialogResult.Yes) return;
         }
         _operationRunning = true;
+        UpdateNavigationState();
         AcknowledgeTrayAlert();
         _deploymentCts?.Dispose();
         _deploymentCts = new CancellationTokenSource();

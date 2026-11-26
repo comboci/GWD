@@ -123,6 +123,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         {
             if (!sourceBuildMode) return;
             _profile.BuildMode = deployMode.SelectedIndex switch { 1 => "Fast IIS Update", 2 => "Full IIS Deploy", _ => "Fast Local Test" };
+            InvalidateEnvironmentEvidence();
             deployModeHelp.Text = BuildModeHelp(deployMode.SelectedIndex);
             UpdateDashboard();
         };

@@ -39,9 +39,9 @@ public sealed partial class WizardForm
         sourceRow.Controls.Add(source, 0, 0); sourceRow.Controls.Add(browse, 1, 0);
 
         var detectedRoot = new Label { AutoSize = true, MaximumSize = new Size(850, 0), ForeColor = Color.DimGray };
-        var app = new TextBox { Width = 260 };
-        var site = new TextBox { Width = 260 };
-        var database = new TextBox { Width = 260 };
+        var app = new TextBox { Text = _profile.ApplicationName, Width = 260 };
+        var site = new TextBox { Text = _profile.SiteName, Width = 260 };
+        var database = new TextBox { Text = _profile.DatabaseName, Width = 260 };
         var buildMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 };
         buildMode.Items.AddRange(new object[] { "Fast Local Test", "Fast IIS Update", "Full IIS Deploy", "Visual Studio prepared", "Prepared IIS Publish" });
         buildMode.SelectedItem = buildMode.Items.Cast<object>().FirstOrDefault(x => string.Equals(x.ToString(), _profile.BuildMode, StringComparison.OrdinalIgnoreCase)) ?? buildMode.Items[0];
@@ -94,7 +94,11 @@ public sealed partial class WizardForm
         AddRow(form, "Dependency status", offlineState);
         AddRow(form, "Dependency sync", Wrap(dependencySyncProgress, dependencySyncActivity));
         var sourceTestResult = new Label { AutoSize = true, MaximumSize = new Size(800, 0), ForeColor = Color.DimGray, Text = "Automatic source preflight starts as soon as a valid source folder is selected." };
-        AddRow(form, "Automatic source preflight", sourceTestResult);
+        var recheckSource = new Button { Text = "Re-check source / publish", AutoSize = true };
+        var preflightPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
+        preflightPanel.Controls.Add(recheckSource);
+        preflightPanel.Controls.Add(sourceTestResult);
+        AddRow(form, "Automatic source preflight", preflightPanel);
         _content.Controls.Add(form);
 
         void RefreshPreparedPublishValidation()
@@ -123,13 +127,23 @@ public sealed partial class WizardForm
         void Detect(bool preserveIdentity = false)
         {
             _profile.SourceFolder = source.Text.Trim();
+            if (string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
+            {
+                // A prebuilt artifact does not require a source project.
+                // Do not erase or infer deployment identity from an absent source.
+                detectedRoot.Text = "Source project not required in Prepared IIS Publish mode.";
+                detectedRoot.ForeColor = Color.DimGray;
+                RefreshPreparedPublishValidation();
+                UpdateNavigationState();
+                return;
+            }
             var api = Directory.Exists(_profile.SourceFolder) ? _environment.DetectApiProject(_profile.SourceFolder) : null;
             RememberNavigationSourceReadiness(false, _profile.SourceFolder, !string.IsNullOrWhiteSpace(api));
             if (api is null)
             {
                 _profile.ApiProjectPath = string.Empty;
                 detectedRoot.Text = "No ASP.NET Core Web project detected."; detectedRoot.ForeColor = Color.Firebrick;
-                app.Text = site.Text = database.Text = string.Empty;
+                if (!preserveIdentity) app.Text = site.Text = database.Text = string.Empty;
             }
             else
             {
@@ -277,12 +291,16 @@ public sealed partial class WizardForm
             return (lines.ToArray(), failures);
         }
 
-        void ApplyDependencyMode()
+        void ApplyDependencyMode(bool invalidate = true)
         {
             _profile.DependencyResolutionMode = NormalizeDependencyMode(dependencyMode.SelectedItem?.ToString());
             _profile.OfflineBuild = string.Equals(_profile.DependencyResolutionMode, "Offline Only", StringComparison.OrdinalIgnoreCase);
             _appData.SaveDependencyResolutionMode(_profile.DependencyResolutionMode);
-            _offlineDependenciesReady = false;
+            if (invalidate)
+            {
+                _offlineDependenciesReady = false;
+                _offlineDependenciesDetail = "Dependency readiness must be checked again.";
+            }
             offlineState.ForeColor = Color.DimGray;
             offlineState.Text = _profile.DependencyResolutionMode switch
             {
@@ -291,6 +309,11 @@ public sealed partial class WizardForm
                 _ => "Online mode: package restore may use Internet sources; offline readiness is not required."
             };
             var sourceBuild = !string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase);
+            if (!invalidate && sourceBuild && _offlineDependenciesReady)
+            {
+                offlineState.ForeColor = Color.ForestGreen;
+                offlineState.Text = "OFFLINE REPOSITORY READY — " + _offlineDependenciesDetail;
+            }
             offlineAction.Enabled = sourceBuild && _profile.DependencyResolutionMode != "Online" && !_dependencySyncRunning;
             offlineTest.Enabled = sourceBuild && _profile.DependencyResolutionMode == "Offline Only" && !_dependencySyncRunning;
             UpdateNavigationState();
@@ -323,12 +346,21 @@ public sealed partial class WizardForm
             try
             {
                 var dto = JsonSerializer.Deserialize<DeploymentProfileSnapshot>(File.ReadAllText(dialog.FileName)) ?? throw new InvalidDataException("Profile is empty.");
+                // Validate required serialized fields before mutating the live profile.
+                if (dto.ApplicationName is null || dto.SiteName is null || dto.DatabaseName is null ||
+                    dto.SourceFolder is null || dto.ReadyPublishFolder is null || dto.BuildMode is null ||
+                    dto.DependencyResolutionMode is null || dto.DeploymentRepositoryFolder is null || dto.WorkspaceRoot is null)
+                    throw new InvalidDataException("Profile is missing required fields.");
+                FlushDeferredSettingsSaves();
                 dto.ApplyTo(_profile);
-                source.Text = _profile.SourceFolder; app.Text = _profile.ApplicationName; site.Text = _profile.SiteName; database.Text = _profile.DatabaseName;
-                repository.Text = _profile.DeploymentRepositoryFolder; workspace.Text = _profile.WorkspaceRoot; preparedPublish.Text = _profile.ReadyPublishFolder;
-                buildMode.SelectedItem = buildMode.Items.Cast<object>().FirstOrDefault(x => string.Equals(x.ToString(), _profile.BuildMode, StringComparison.OrdinalIgnoreCase)) ?? buildMode.Items[0];
-                dependencyMode.SelectedItem = NormalizeDependencyMode(_profile.DependencyResolutionMode);
-                lockSource.Checked = dto.SourceLocked;
+                _sourceLocked = dto.SourceLocked;
+                _profile.InstallerCacheFolder = Path.Combine(_profile.DeploymentRepositoryFolder, "Installers");
+                _offlineDependenciesReady = false;
+                InvalidateEnvironmentEvidence();
+                InvalidateNavigationSourceReadiness();
+                // Reconstruct once from the complete snapshot. Intermediate
+                // TextChanged events must not overwrite imported identity.
+                RebuildCurrentPage();
                 AppendLog("[PROFILE] Loaded: " + dialog.FileName + " (secrets remain session-only)");
                 NotifyUi(UiNoticeKind.Info, "Profile loaded.");
             }
@@ -360,6 +392,8 @@ public sealed partial class WizardForm
             var generation = ++_preparedValidationGeneration;
             var selected = preparedPublish.Text.Trim();
             try { selected = string.IsNullOrWhiteSpace(selected) ? string.Empty : Path.GetFullPath(selected); } catch { }
+            if (!string.Equals(_profile.ReadyPublishFolder, selected, StringComparison.Ordinal))
+                InvalidateEnvironmentEvidence();
             _profile.ReadyPublishFolder = selected;
             if (preparedPublish.Text != selected) { preparedPublish.Text = selected; return; }
             RefreshPreparedPublishValidation();
@@ -383,10 +417,7 @@ public sealed partial class WizardForm
             Detect();
             _offlineDependenciesReady = false;
             _offlineDependenciesDetail = "Source changed; dependency readiness must be rechecked if required.";
-            CancelBackgroundVerification();
-            _scanCompleted = false;
-            _iisAutoVerified = _runtimesAutoVerified = _deploymentLocationAutoVerified = false;
-            UpdateStepIndicator();
+            InvalidateEnvironmentEvidence();
             if (Directory.Exists(source.Text.Trim()))
             {
                 RunSourceTests();
@@ -418,6 +449,7 @@ public sealed partial class WizardForm
         workspace.TextChanged += (_, _) =>
         {
             _profile.WorkspaceRoot = workspace.Text.Trim();
+            _offlineDependenciesReady = false;
             if (!string.IsNullOrWhiteSpace(_profile.WorkspaceRoot))
                 QueueDeferredSettingsSave("workspace", () => _appData.SaveWorkspaceRoot(_profile.WorkspaceRoot));
             UpdateNavigationState();
@@ -435,15 +467,25 @@ public sealed partial class WizardForm
             "Prepared IIS Publish" => "Direct deploy of an already-built IIS publish. npm, frontend build, dotnet restore/build/publish and dependency sync are bypassed.",
             _ => "Uses the selected prepared-source/publish workflow."
         };
-        buildMode.SelectedIndexChanged += (_, _) => { _profile.BuildMode = buildMode.SelectedItem?.ToString() ?? "Fast Local Test"; RefreshModeMeaning(); ApplyDependencyMode(); if (_profile.BuildMode == "Prepared IIS Publish") CommitAndValidatePreparedPublish(); else { RefreshPreparedPublishValidation(); UpdateNavigationState(); RunSourceTests(); } };
+        buildMode.SelectedIndexChanged += (_, _) => { _profile.BuildMode = buildMode.SelectedItem?.ToString() ?? "Fast Local Test"; InvalidateEnvironmentEvidence(); RefreshModeMeaning(); ApplyDependencyMode(); if (_profile.BuildMode == "Prepared IIS Publish") CommitAndValidatePreparedPublish(); else { RefreshPreparedPublishValidation(); Detect(preserveIdentity: true); RunSourceTests(); } };
+        recheckSource.Click += (_, _) =>
+        {
+            if (!CanNavigateInteractively()) return;
+            InvalidateNavigationSourceReadiness();
+            InvalidateEnvironmentEvidence();
+            Detect(preserveIdentity: true);
+            RunSourceTests();
+        };
         dependencyMode.SelectedIndexChanged += (_, _) => ApplyDependencyMode();
         RefreshModeMeaning();
         RefreshPreparedPublishValidation();
 
         offlineAction.Click += async (_, _) =>
         {
-            if (_dependencySyncRunning) return;
+            if (!CanNavigateInteractively()) return;
+            CancelBackgroundVerification();
             _dependencySyncRunning = true;
+            UpdateNavigationState();
             try
             {
                 _profile.SourceFolder = source.Text.Trim();
@@ -475,14 +517,24 @@ public sealed partial class WizardForm
             }
             finally
             {
-                _dependencySyncRunning = false; dependencySyncProgress.Visible = false;
-                ApplyDependencyMode();
-                _activity.Text = _offlineDependenciesReady ? "Offline repository ready." : "Dependency sync finished; repository needs attention.";
-                ApplyInteractiveCursors(this);
+                _dependencySyncRunning = false;
+                if (!IsDisposed && !Disposing && !form.IsDisposed)
+                {
+                    dependencySyncProgress.Visible = false;
+                    offlineAction.Enabled = _profile.DependencyResolutionMode != "Online";
+                    offlineTest.Enabled = _profile.DependencyResolutionMode == "Offline Only";
+                    UpdateNavigationState();
+                    _activity.Text = _offlineDependenciesReady ? "Offline repository ready." : "Dependency sync finished; repository needs attention.";
+                    ApplyInteractiveCursors(this);
+                }
             }
         };
         offlineTest.Click += async (_, _) =>
         {
+            if (!CanNavigateInteractively()) return;
+            CancelBackgroundVerification();
+            _dependencySyncRunning = true;
+            UpdateNavigationState();
             try
             {
                 _profile.SourceFolder = source.Text.Trim();
@@ -503,11 +555,20 @@ public sealed partial class WizardForm
                 offlineState.Text = "OFFLINE BUILD FAILED ✕ — " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message); offlineState.ForeColor = Color.Firebrick;
                 AppendLog("[OFFLINE-TEST] FAILED: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message)); InternalDiagnostics.Record(ex, "Source page offline dependency test");
             }
-            finally { ApplyDependencyMode(); }
+            finally
+            {
+                _dependencySyncRunning = false;
+                if (!IsDisposed && !Disposing && !form.IsDisposed)
+                {
+                    offlineAction.Enabled = _profile.DependencyResolutionMode != "Online";
+                    offlineTest.Enabled = _profile.DependencyResolutionMode == "Offline Only";
+                    UpdateNavigationState();
+                }
+            }
         };
 
         RefreshModeMeaning();
-        ApplyDependencyMode();
+        ApplyDependencyMode(invalidate: false);
         // Returning to a selected valid source must preserve custom names.
         Detect(preserveIdentity: true);
         if (Directory.Exists(source.Text.Trim()) || string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
@@ -642,6 +703,7 @@ public sealed partial class WizardForm
             // The remote host control is cleared in Local mode. Commit any
             // pending remote credentials while their original host is visible.
             FlushDeferredSettingsSaves();
+            InvalidateEnvironmentEvidence();
             ApplyTargetModeState();
             UpdateNavigationState();
         };
@@ -707,6 +769,7 @@ public sealed partial class WizardForm
         databaseName.Leave += (_, _) => FlushDeferredSettingsSaves();
         host.TextChanged += (_, _) =>
         {
+            if (!string.Equals(_profile.TargetHost, host.Text.Trim(), StringComparison.Ordinal)) InvalidateEnvironmentEvidence();
             _profile.TargetHost = host.Text.Trim();
             if (string.Equals(targetMode.SelectedItem?.ToString(), "Remote IIS Server", StringComparison.OrdinalIgnoreCase))
             {
@@ -716,7 +779,7 @@ public sealed partial class WizardForm
             QueueRememberedRemoteCredential();
             UpdateNavigationState();
         };
-        publish.TextChanged += (_, _) => { _profile.ReadyPublishFolder = publish.Text.Trim(); UpdateNavigationState(); };
+        publish.TextChanged += (_, _) => { InvalidateEnvironmentEvidence(); _profile.ReadyPublishFolder = publish.Text.Trim(); UpdateNavigationState(); };
         RefreshDetected();
     }
 

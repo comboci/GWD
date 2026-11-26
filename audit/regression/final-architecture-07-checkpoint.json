@@ -4,7 +4,7 @@
   "baselineVersion": "V269-R",
   "baselineCommit": "0121217a13057d7c832a9a9ddd7aa9acf5a099cc",
   "candidate": "V289-R",
-  "state": "IN_PROGRESS",
+  "state": "SOURCE_COMPLETE / RUNTIME_PENDING",
   "packs": {
     "GWD-A01": "TEST_PENDING",
     "GWD-A02": "TEST_PENDING",
@@ -16,8 +16,8 @@
     "GWD-A07": "TEST_PENDING",
     "GWD-A08": "TEST_PENDING",
     "GWD-A10": "TEST_PENDING",
-    "GWD-A11": "PENDING",
-    "GWD-A12": "PENDING"
+    "GWD-A11": "TEST_PENDING",
+    "GWD-A12": "TEST_PENDING"
   },
   "completedSourceSlices": [
     "A02.1 - Environment Scan view and Source initial subscription",
@@ -39,7 +39,7 @@
     "A10 - priority notifications, deduplication and visible diagnostics",
     "A01.3 - final regression source review for A03/A05/A06"
   ],
-  "nextSourcePackage": "GWD-A11",
+  "nextSourcePackage": null,
   "build": "NOT_RUN_POLICY",
   "tests": "NOT_RUN_POLICY",
   "windowsRuntime": "NOT_RUN_OWNER",
@@ -47,5 +47,19 @@
   "merged": false,
   "sourceCorrectionsAfterA02Start": [
     "A01.2 - release operation owner before rebuilding Review"
-  ]
+  ],
+  "sourceCandidateCommit": "8e7c3f5722f19d17546344314a1b70070119f9bd",
+  "nextOwnerAction": "Isolated Windows acceptance: Build, smoke, regression/DPI matrix, and performance compare; no release/merge/deployment.",
+  "acceptanceArtifacts": [
+    "audit/regression/GWD-FINAL-ARCHITECTURE-07-RUNTIME-fa.md",
+    "audit/regression/GWD-FINAL-ARCHITECTURE-07-PERFORMANCE-fa.md",
+    "tests/verify-gwd-final-architecture-07.cjs"
+  ],
+  "sourceStaticEvidence": {
+    "method": "Source reading, pinned Git blobs/paths/ancestry; owner-only verification script not executed",
+    "preservationBaseline": "5f709d4129304a5cb902205e0b3cf8f53db097a7",
+    "preservedHistoricalBlobs": 24,
+    "historicalManifestCount": 27,
+    "windowsVisual": "NOT_RUN_OWNER"
+  }
 }

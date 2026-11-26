@@ -1,6 +1,6 @@
 {
-  "version": "276.0.0",
+  "version": "277.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V276-R — GWD-A02.5 Source view source candidate; Windows acceptance pending"
+  "commitNote": "V277-R — A02.6 - IIS management view and dedicated presenter partial; Windows acceptance pending"
 }

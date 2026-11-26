@@ -14,6 +14,11 @@ internal static class Program
 
         try
         {
+            if (args.Contains("--ui-performance-phase-02"))
+            {
+                UiPerformancePhase02Tests.Run(testRoot);
+                return 0;
+            }
             if (args.Contains("--diagnostic-history"))
             {
                 DiagnosticHistoryTests.Run(testRoot);

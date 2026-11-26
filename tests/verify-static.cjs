@@ -15,7 +15,12 @@ function canonical(text) {
 }
 let count = 0;
 function check(ok, name) { if (!ok) throw Error(name); console.log('PASS: ' + name); count++; }
-const wizard = read('src/DeploymentManager/WizardForm.cs');
+const wizard = [
+    'src/DeploymentManager/WizardForm.cs',
+    'src/DeploymentManager/WizardForm.SourceAndTarget.cs',
+    'src/DeploymentManager/WizardForm.InstallersAndSql.cs',
+    'src/DeploymentManager/WizardForm.ReviewAndLocation.cs'
+].map(read).join('\n');
 const sql = read('src/DeploymentManager/Services/SqlServerService.cs');
 const strategy = read('src/DeploymentManager/Services/SqlConnectionStrategy.cs');
 const deploy = read('src/DeploymentManager/Services/DeploymentService.cs');

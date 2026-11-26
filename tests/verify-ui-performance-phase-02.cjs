@@ -3,7 +3,12 @@ const root = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(root,p),'utf8');
 const env = read('src/DeploymentManager/Services/EnvironmentService.cs');
 const sql = read('src/DeploymentManager/Services/SqlServerService.cs');
-const wizard = read('src/DeploymentManager/WizardForm.cs');
+const wizard = [
+    'src/DeploymentManager/WizardForm.cs',
+    'src/DeploymentManager/WizardForm.SourceAndTarget.cs',
+    'src/DeploymentManager/WizardForm.InstallersAndSql.cs',
+    'src/DeploymentManager/WizardForm.ReviewAndLocation.cs'
+].map(read).join('\n');
 const parser = read('src/DeploymentManager/Services/IisInventoryParser.cs');
 const section = (s,a,b) => { const i=s.indexOf(a), j=s.indexOf(b,i+a.length); assert(i>=0&&j>i,a); return s.slice(i,j); };
 const checks = [

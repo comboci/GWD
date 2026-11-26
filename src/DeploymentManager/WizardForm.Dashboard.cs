@@ -93,7 +93,7 @@ public sealed partial class WizardForm
                     "Sample time: " + At(resource?.At.LocalDateTime),
                     "Current session's last error: " + (string.IsNullOrWhiteSpace(_lastErrorReportPath)
                         ? "No report recorded in this session" : "A diagnostic report is recorded; see Diagnostics (session scope)."),
-                    "Active notifications: " + (_activeNotice is null ? 0 : 1),
+                    "Active notifications: " + VisibleNotificationCount,
                     "Session notification history: " + _notices.Count
                 };
                 box.Lines = lines.ToArray();

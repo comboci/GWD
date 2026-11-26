@@ -1,6 +1,6 @@
 {
-  "version": "287.0.0",
+  "version": "288.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V287-R — A08 - read-only evidence dashboard for the selected project; Windows acceptance pending"
+  "commitNote": "V288-R — A10 - priority notifications, deduplication and visible diagnostics; Windows acceptance pending"
 }

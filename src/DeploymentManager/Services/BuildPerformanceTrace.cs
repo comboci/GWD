@@ -30,7 +30,16 @@ public sealed class BuildPerformanceTrace
     public T Measure<T>(string name, Func<T> action, string detail = "")
     {
         var sw = Stopwatch.StartNew();
-        try { var result = action(); sw.Stop(); Add(name, sw.Elapsed, detail); return result; }
+        try
+        {
+            var result = action();
+            sw.Stop();
+            if (result is CommandResult command && command.ExitCode != 0)
+                Add(name, sw.Elapsed, detail + $" Process exit code: {command.ExitCode}.", "FAILED");
+            else
+                Add(name, sw.Elapsed, detail);
+            return result;
+        }
         catch (Exception ex) { sw.Stop(); Add(name, sw.Elapsed, AppendError(detail, ex), "FAILED"); throw; }
     }
 
@@ -44,7 +53,18 @@ public sealed class BuildPerformanceTrace
     public async Task<T> MeasureAsync<T>(string name, Func<Task<T>> action, string detail = "")
     {
         var sw = Stopwatch.StartNew();
-        try { var result = await action(); sw.Stop(); Add(name, sw.Elapsed, detail); return result; }
+        try
+        {
+            var result = await action();
+            sw.Stop();
+            // RunAsync returns nonzero exit codes instead of throwing (including retryable failures).
+            // Preserve the result for the caller's retry/error policy, but never label it DONE.
+            if (result is CommandResult command && command.ExitCode != 0)
+                Add(name, sw.Elapsed, detail + $" Process exit code: {command.ExitCode}.", "FAILED");
+            else
+                Add(name, sw.Elapsed, detail);
+            return result;
+        }
         catch (Exception ex) { sw.Stop(); Add(name, sw.Elapsed, AppendError(detail, ex), "FAILED"); throw; }
     }
 

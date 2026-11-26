@@ -81,7 +81,7 @@ public sealed partial class WizardForm
             UpdateNavigationState();
         }
 
-        cacheText.TextChanged += (_, _) => { _profile.InstallerCacheFolder = cacheText.Text.Trim(); if (!string.IsNullOrWhiteSpace(_profile.InstallerCacheFolder)) _appData.SaveInstallerCacheFolder(_profile.InstallerCacheFolder); AutoLocateCachedInstallers(); RebuildCards(); };
+        cacheText.TextChanged += (_, _) => { _profile.InstallerCacheFolder = cacheText.Text.Trim(); if (!string.IsNullOrWhiteSpace(_profile.InstallerCacheFolder)) SaveFolderSetting("repository", _profile.InstallerCacheFolder, _appData.SaveInstallerCacheFolder, defer: true); AutoLocateCachedInstallers(); RebuildCards(); };
         browseCache.Click += (_, _) =>
         {
             using var dialog = new FolderBrowserDialog { Description = "Choose a reusable installer cache folder", SelectedPath = BrowseStartFolder(cacheText.Text, BrowseContext.Repository) };

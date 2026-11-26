@@ -29,7 +29,7 @@ public sealed partial class WizardForm
             _profile.DeploymentLayout = choice.Layout;
             _profile.CleanupPreviousDeployments = choice.CleanupOlder;
             if (_profile.UseDefaultIisWebsite) { _profile.HttpPort = 80; _profile.HostHeader = string.Empty; }
-            QueueDeferredSettingsSave("hosting", () => _appData.SaveHostingSettings(_profile.HostingRoot, _profile.DeploymentLayout, _profile.CleanupPreviousDeployments, _profile.UseDefaultIisWebsite));
+            SaveHostingSettings(defer: true);
             UpdateNavigationState();
         }, FlushDeferredSettingsSaves);
         view.PublishCurrent();

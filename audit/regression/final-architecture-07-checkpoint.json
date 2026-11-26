@@ -3,12 +3,12 @@
   "branch": "fix/ui-performance-phase-01",
   "baselineVersion": "V269-R",
   "baselineCommit": "0121217a13057d7c832a9a9ddd7aa9acf5a099cc",
-  "candidate": "V280-R",
+  "candidate": "V281-R",
   "state": "IN_PROGRESS",
   "packs": {
     "GWD-A01": "TEST_PENDING",
     "GWD-A02": "TEST_PENDING",
-    "GWD-A03": "PENDING",
+    "GWD-A03": "TEST_PENDING",
     "GWD-A04": "PENDING",
     "GWD-A05": "PENDING",
     "GWD-A06": "PENDING",
@@ -28,9 +28,10 @@
     "A02.6 - IIS management view and dedicated presenter partial",
     "A02.7 - Installers and SQL views",
     "A02.8 - Central Wizard stage registry and page lifetime",
-    "A03.1 - ordered cross-instance settings mutation and credential generations"
+    "A03.1 - ordered cross-instance settings mutation and credential generations",
+    "A03.2 - background queue with debounce, immutable changes and explicit opt-out fencing"
   ],
-  "nextSourcePackage": "GWD-A03",
+  "nextSourcePackage": "GWD-A04",
   "build": "NOT_RUN_POLICY",
   "tests": "NOT_RUN_POLICY",
   "windowsRuntime": "NOT_RUN_OWNER",

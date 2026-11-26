@@ -247,7 +247,7 @@ public sealed partial class WizardForm
         {
             _profile.DependencyResolutionMode = NormalizeDependencyMode(dependencyMode.SelectedItem?.ToString());
             _profile.OfflineBuild = string.Equals(_profile.DependencyResolutionMode, "Offline Only", StringComparison.OrdinalIgnoreCase);
-            _appData.SaveDependencyResolutionMode(_profile.DependencyResolutionMode);
+            SaveDependencyMode(_profile.DependencyResolutionMode);
             if (invalidate)
             {
                 _offlineDependenciesReady = false;
@@ -316,9 +316,9 @@ public sealed partial class WizardForm
                 _sourceLocked = dto.SourceLocked;
                 _profile.InstallerCacheFolder = Path.Combine(_profile.DeploymentRepositoryFolder, "Installers");
                 if (!string.IsNullOrWhiteSpace(_profile.DeploymentRepositoryFolder))
-                    _appData.SaveDeploymentRepositoryFolder(_profile.DeploymentRepositoryFolder);
+                    SaveFolderSetting("repository", _profile.DeploymentRepositoryFolder, _appData.SaveDeploymentRepositoryFolder, defer: false);
                 if (!string.IsNullOrWhiteSpace(_profile.WorkspaceRoot))
-                    _appData.SaveWorkspaceRoot(_profile.WorkspaceRoot);
+                    SaveFolderSetting("workspace", _profile.WorkspaceRoot, _appData.SaveWorkspaceRoot, defer: false);
                 _offlineDependenciesReady = false;
                 InvalidateEnvironmentEvidence();
                 InvalidateNavigationSourceReadiness();
@@ -406,7 +406,7 @@ public sealed partial class WizardForm
             _profile.DeploymentRepositoryFolder = repository.Text.Trim();
             _profile.InstallerCacheFolder = Path.Combine(_profile.DeploymentRepositoryFolder, "Installers");
             if (!string.IsNullOrWhiteSpace(_profile.DeploymentRepositoryFolder))
-                QueueDeferredSettingsSave("repository", () => _appData.SaveDeploymentRepositoryFolder(_profile.DeploymentRepositoryFolder));
+                SaveFolderSetting("repository", _profile.DeploymentRepositoryFolder, _appData.SaveDeploymentRepositoryFolder, defer: true);
             _offlineDependenciesReady = false;
             UpdateNavigationState();
         };
@@ -415,7 +415,7 @@ public sealed partial class WizardForm
             _profile.WorkspaceRoot = workspace.Text.Trim();
             _offlineDependenciesReady = false;
             if (!string.IsNullOrWhiteSpace(_profile.WorkspaceRoot))
-                QueueDeferredSettingsSave("workspace", () => _appData.SaveWorkspaceRoot(_profile.WorkspaceRoot));
+                SaveFolderSetting("workspace", _profile.WorkspaceRoot, _appData.SaveWorkspaceRoot, defer: true);
             UpdateNavigationState();
         };
         app.TextChanged += (_, _) => { _profile.ApplicationName = app.Text.Trim(); UpdateNavigationState(); };
@@ -557,10 +557,17 @@ public sealed partial class WizardForm
     {
         _pageTitle.Text = "Target and deployment identity";
         _pageDescription.Text = "Configure deployment identity, local/remote target, and prepared publish input when applicable.";
+        var savedCredential = _appData.GetRemoteCredential(out var savedCredentialGeneration);
+        Guid? generation = savedCredential.Remember &&
+            string.Equals(savedCredential.UserName, _profile.RemoteUserName, StringComparison.Ordinal) &&
+            string.Equals(savedCredential.Password, _profile.RemotePassword, StringComparison.Ordinal) &&
+            (!string.Equals(_profile.TargetMode, "Remote IIS Server", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(savedCredential.Host, _profile.TargetHost, StringComparison.Ordinal))
+            ? savedCredentialGeneration : null;
         var view = new UI.Pages.DeploymentTargetView(Directory.Exists(_profile.SourceFolder),
             _profile.ApplicationName, _profile.SiteName, _profile.DatabaseName, _profile.TargetMode,
             _profile.TargetHost, _profile.RemoteUserName, _profile.RemotePassword, _profile.RemoteWinRmPort,
-            _profile.RemoteUseSsl, _appData.GetRemoteCredential().Remember, _profile.ReadyPublishFolder);
+            _profile.RemoteUseSsl, savedCredential.Remember, _profile.ReadyPublishFolder);
         var appName = view.AppName;
         var siteName = view.SiteName;
         var databaseName = view.DatabaseName;
@@ -653,21 +660,42 @@ public sealed partial class WizardForm
         {
             // Host is not a credential when the Local Server mode is selected.
             // Do not overwrite a stored remote host with the cleared local UI.
-            if (rememberRemote.Checked &&
+            if (rememberRemote.Checked && generation is Guid currentGeneration &&
                 string.Equals(targetMode.SelectedItem?.ToString(), "Remote IIS Server", StringComparison.OrdinalIgnoreCase))
-                QueueDeferredSettingsSave("remote-credential",
-                    () => _appData.SaveRemoteCredential(host.Text.Trim(), remoteUser.Text.Trim(), remotePassword.Text, true));
+            {
+                var values = (Host: host.Text.Trim(), User: remoteUser.Text.Trim(), Password: remotePassword.Text);
+                QueueDeferredSettingsSave("remote-credential", () =>
+                {
+                    // A different instance or an explicit opt-out can retire this generation.
+                    _appData.SaveRememberedRemoteCredential(currentGeneration, values.Host, values.User, values.Password);
+                });
+            }
         }
         remoteUser.TextChanged += (_, _) => { _profile.RemoteUserName = remoteUser.Text.Trim(); QueueRememberedRemoteCredential(); UpdateNavigationState(); };
         remotePassword.TextChanged += (_, _) => { _profile.RemotePassword = remotePassword.Text; QueueRememberedRemoteCredential(); UpdateNavigationState(); };
         remotePort.ValueChanged += (_, _) => _profile.RemoteWinRmPort = (int)remotePort.Value;
         remoteSsl.CheckedChanged += (_, _) => _profile.RemoteUseSsl = remoteSsl.Checked;
+        var changingRememberState = false;
         rememberRemote.CheckedChanged += (_, _) =>
         {
-            // Opting out must revoke the persisted secret immediately; do not
-            // allow a queued Save(true) to re-create it after the checkbox is off.
+            if (changingRememberState) return;
             CancelDeferredSettingsSave("remote-credential");
-            _appData.SaveRemoteCredential(host.Text.Trim(), remoteUser.Text.Trim(), remotePassword.Text, rememberRemote.Checked);
+            var remember = rememberRemote.Checked;
+            try
+            {
+                // Immediate barrier under the same persistent writer. Already
+                // enqueued older edits cannot write back after this returns.
+                var saved = _appData.SetRemoteCredentialPreference(host.Text.Trim(), remoteUser.Text.Trim(), remotePassword.Text, remember);
+                generation = remember ? saved : null;
+            }
+            catch (Exception ex)
+            {
+                changingRememberState = true;
+                try { rememberRemote.Checked = !remember; }
+                finally { changingRememberState = false; }
+                InternalDiagnostics.Record(new IOException("Remote preference write failed (" + ex.GetType().Name + ")."), "Save Settings");
+                NotifyUi(UiNoticeKind.Warning, "The remote credential preference was not saved.");
+            }
         };
         remoteUser.Leave += (_, _) => FlushDeferredSettingsSaves();
         remotePassword.Leave += (_, _) => FlushDeferredSettingsSaves();
@@ -703,11 +731,11 @@ public sealed partial class WizardForm
         {
             var previousApplicationName = _profile.ApplicationName; _profile.ApplicationName = appName.Text.Trim();
             _profile.HostingRoot = UpdateAutoHostingRootForApplicationName(_profile.HostingRoot, previousApplicationName, _profile.ApplicationName);
-            QueueDeferredSettingsSave("identity", () => _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName));
-            QueueDeferredSettingsSave("hosting", () => _appData.SaveHostingSettings(_profile.HostingRoot, _profile.DeploymentLayout, _profile.CleanupPreviousDeployments, _profile.UseDefaultIisWebsite));
+            SaveIdentitySettings(defer: true);
+            SaveHostingSettings(defer: true);
         };
-        siteName.TextChanged += (_, _) => { _profile.SiteName = siteName.Text.Trim(); _profile.AppPoolName = _profile.SiteName; QueueDeferredSettingsSave("identity", () => _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName)); UpdateNavigationState(); };
-        databaseName.TextChanged += (_, _) => { _profile.DatabaseName = databaseName.Text.Trim(); QueueDeferredSettingsSave("identity", () => _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName)); UpdateNavigationState(); };
+        siteName.TextChanged += (_, _) => { _profile.SiteName = siteName.Text.Trim(); _profile.AppPoolName = _profile.SiteName; SaveIdentitySettings(defer: true); UpdateNavigationState(); };
+        databaseName.TextChanged += (_, _) => { _profile.DatabaseName = databaseName.Text.Trim(); SaveIdentitySettings(defer: true); UpdateNavigationState(); };
         appName.Leave += (_, _) => FlushDeferredSettingsSaves();
         siteName.Leave += (_, _) => FlushDeferredSettingsSaves();
         databaseName.Leave += (_, _) => FlushDeferredSettingsSaves();

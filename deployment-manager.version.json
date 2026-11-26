@@ -1,6 +1,6 @@
 {
-  "version": "280.0.0",
+  "version": "281.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V280-R — A03.1 - ordered cross-instance settings mutation and credential generations; Windows acceptance pending"
+  "commitNote": "V281-R — A03.2 - background queue with debounce, immutable changes and explicit opt-out fencing; Windows acceptance pending"
 }

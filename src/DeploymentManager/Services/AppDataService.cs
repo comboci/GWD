@@ -192,7 +192,7 @@ public sealed class AppDataService
         return string.Empty;
     }
 
-    public void SaveLastBrowseFolder(string selectedPath, BrowseContext context = BrowseContext.General)
+    public void SaveLastBrowseFolder(string selectedPath, BrowseContext context = BrowseContext.General, bool throwOnFailure = false)
     {
         if (string.IsNullOrWhiteSpace(selectedPath)) return;
         try
@@ -215,7 +215,7 @@ public sealed class AppDataService
                 }
             });
         }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, $"Save browse folder ({context})"); }
+        catch (Exception ex) when (!throwOnFailure) { InternalDiagnostics.Record(ex, $"Save browse folder ({context})"); }
     }
 
     public static string ResolveExistingFolder(string? path)
@@ -242,11 +242,16 @@ public sealed class AppDataService
         return string.Empty;
     }
 
-    public (string Host, string UserName, string Password, bool Remember) GetRemoteCredential()
+    public (string Host, string UserName, string Password, bool Remember) GetRemoteCredential() =>
+        GetRemoteCredential(out _);
+
+    public (string Host, string UserName, string Password, bool Remember) GetRemoteCredential(out Guid generation)
     {
+        generation = Guid.Empty;
         try
         {
-            var settings = LoadSettings();
+            var settings = ReadSettingsCore();
+            generation = settings.RemoteCredentialGeneration;
             if (!settings.RememberRemoteCredential || string.IsNullOrWhiteSpace(settings.RemotePasswordProtected))
                 return (settings.RemoteHost, settings.RemoteUserName, "", false);
             var protectedBytes = Convert.FromBase64String(settings.RemotePasswordProtected);
@@ -255,6 +260,7 @@ public sealed class AppDataService
         }
         catch (Exception ex)
         {
+            generation = Guid.Empty;
             InternalDiagnostics.Record(ex, "Read remote credential");
             return ("", "", "", false);
         }
@@ -276,8 +282,6 @@ public sealed class AppDataService
             SaveSettingsCore(settings);
             return settings.RemoteCredentialGeneration;
         });
-
-    public Guid GetRememberedRemoteCredentialGeneration() => LoadSettings().RemoteCredentialGeneration;
 
     public bool SaveRememberedRemoteCredential(Guid generation, string host, string userName, string password) =>
         WithSettingsWriter(() =>
@@ -341,7 +345,7 @@ public sealed class AppDataService
         return (defaultRoot, defaultLayout, cleanup, useDefaultIisWebsite);
     }
 
-    public void SaveHostingSettings(string hostingRoot, string deploymentLayout, bool cleanupPreviousDeployments, bool useDefaultIisWebsite = false)
+    public void SaveHostingSettings(string hostingRoot, string deploymentLayout, bool cleanupPreviousDeployments, bool useDefaultIisWebsite = false, bool throwOnFailure = false)
     {
         if (string.IsNullOrWhiteSpace(hostingRoot)) return;
         try
@@ -356,7 +360,7 @@ public sealed class AppDataService
                 return true;
             });
         }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Write hosting settings registry"); }
+        catch (Exception ex) when (!throwOnFailure) { InternalDiagnostics.Record(ex, "Write hosting settings registry"); }
     }
 
     public (string ApplicationName, string SiteName, string DatabaseName) GetDeploymentIdentitySettings()
@@ -375,7 +379,7 @@ public sealed class AppDataService
         return (app, site, db);
     }
 
-    public void SaveDeploymentIdentitySettings(string applicationName, string siteName, string databaseName)
+    public void SaveDeploymentIdentitySettings(string applicationName, string siteName, string databaseName, bool throwOnFailure = false)
     {
         try
         {
@@ -388,7 +392,7 @@ public sealed class AppDataService
                 return true;
             });
         }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Write deployment identity registry"); }
+        catch (Exception ex) when (!throwOnFailure) { InternalDiagnostics.Record(ex, "Write deployment identity registry"); }
     }
 
     public string SaveErrorReport(string content)

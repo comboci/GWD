@@ -48,7 +48,9 @@ public sealed partial class WizardForm : Form
     // Persistent settings are coalesced on the UI thread, not written for each
     // TextChanged character. Flush before a page's controls are disposed.
     private readonly System.Windows.Forms.Timer _settingsSaveTimer = new() { Interval = 650 };
-    private readonly Dictionary<string, Action> _deferredSettingsSaves = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (long Order, Action Save)> _deferredSettingsSaves = new(StringComparer.Ordinal);
+    private readonly OrderedSettingsWriter _settingsWriter = new();
+    private long _settingsWriteOrder;
 
 
     private readonly List<Button> _stepLabels = new();
@@ -434,7 +436,7 @@ public sealed partial class WizardForm : Form
         settingsMenu.Click += (_, _) =>
         {
             if (!CanNavigateInteractively()) return;
-            FlushDeferredSettingsSaves();
+            if (!DrainSettingsSaves()) return;
             using var dialog = new SettingsForm(_appData);
             if (dialog.ShowDialog(this) == DialogResult.OK)
             {
@@ -674,9 +676,9 @@ public sealed partial class WizardForm : Form
         _profile.ReadyPublishFolder = string.Empty;
         _profile.BuildMode = "Fast Local Test";
         _sourceLocked = false;
-        _profile.DependencyResolutionMode = NormalizeDependencyMode(_appData.GetDependencyResolutionMode());
+        _profile.DependencyResolutionMode = NormalizeDependencyMode(_profile.DependencyResolutionMode);
         _profile.OfflineBuild = string.Equals(_profile.DependencyResolutionMode, "Offline Only", StringComparison.OrdinalIgnoreCase);
-        _appData.SaveDependencyResolutionMode(_profile.DependencyResolutionMode);
+        SaveDependencyMode(_profile.DependencyResolutionMode);
         _profile.SqlInstance = string.Empty;
         _profile.HostingBundleInstallerPath = string.Empty;
         _profile.DotNetSdkInstallerPath = string.Empty;
@@ -734,37 +736,6 @@ public sealed partial class WizardForm : Form
         _healthMonitor.Start();
         ShowPage(0);
         // Allow normal GC scheduling; Start Over need not trigger a full-generation collection.
-    }
-
-    private void QueueDeferredSettingsSave(string key, Action save)
-    {
-        _deferredSettingsSaves[key] = save;
-        _settingsSaveTimer.Stop();
-        _settingsSaveTimer.Start();
-    }
-
-    private void CancelDeferredSettingsSave(string key)
-    {
-        _deferredSettingsSaves.Remove(key);
-        if (_deferredSettingsSaves.Count == 0) _settingsSaveTimer.Stop();
-    }
-
-    private void FlushDeferredSettingsSaves()
-    {
-        _settingsSaveTimer.Stop();
-        if (_deferredSettingsSaves.Count == 0) return;
-        var saves = _deferredSettingsSaves.ToArray();
-        _deferredSettingsSaves.Clear();
-        foreach (var (key, save) in saves)
-        {
-            try { save(); }
-            catch (Exception ex)
-            {
-                // Settings failures must not block closing the window or
-                // unexpectedly trigger deployment; preserve diagnostic detail.
-                InternalDiagnostics.Record(ex, "Persist deferred setting: " + key);
-            }
-        }
     }
 
     private void UpdateStepIndicator()
@@ -1324,7 +1295,7 @@ public sealed partial class WizardForm : Form
         if (string.IsNullOrWhiteSpace(_profile.SiteName)) throw new InvalidOperationException("IIS site name is required.");
         if (string.IsNullOrWhiteSpace(_profile.DatabaseName)) throw new InvalidOperationException("Database name is required.");
         _profile.AppPoolName = _profile.SiteName;
-        _appData.SaveDeploymentIdentitySettings(_profile.ApplicationName, _profile.SiteName, _profile.DatabaseName);
+        SaveIdentitySettings(defer: false);
         if (string.Equals(_profile.TargetMode, "Remote IIS Server", StringComparison.OrdinalIgnoreCase))
         {
             if (!IPAddress.TryParse(_profile.TargetHost, out var ip) || ip.AddressFamily != AddressFamily.InterNetwork)
@@ -1507,7 +1478,7 @@ public sealed partial class WizardForm : Form
         if (string.IsNullOrWhiteSpace(_profile.HostingRoot)) throw new InvalidOperationException("Choose a hosted site folder before continuing.");
         if (!Path.IsPathRooted(_profile.HostingRoot)) throw new InvalidOperationException("The hosted site folder must be an absolute Windows path.");
         if (_profile.UseDefaultIisWebsite) { _profile.HostingRoot = @"C:\inetpub\wwwroot"; _profile.DeploymentLayout = "Single Folder"; _profile.HttpPort = 80; _profile.HostHeader = string.Empty; }
-        _appData.SaveHostingSettings(_profile.HostingRoot, _profile.DeploymentLayout, _profile.CleanupPreviousDeployments, _profile.UseDefaultIisWebsite);
+        SaveHostingSettings(defer: false);
     }
 
     private void BuildIisSitePage()
@@ -2158,7 +2129,8 @@ public sealed partial class WizardForm : Form
         return _appData.GetLastBrowseFolder(context);
     }
 
-    private void RememberBrowseSelection(string path, BrowseContext context = BrowseContext.General) => _appData.SaveLastBrowseFolder(path, context);
+    private void RememberBrowseSelection(string path, BrowseContext context = BrowseContext.General) =>
+        PostSettingsSave("browse:" + context, () => _appData.SaveLastBrowseFolder(path, context, throwOnFailure: true));
 
     private static GroupBox InfoBox(string title, string text)
     {
@@ -2393,6 +2365,11 @@ public sealed partial class WizardForm : Form
             : "Do you want to close Deployment Manager?";
         if (MessageBox.Show(this, warning, "Confirm exit", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
         { e.Cancel = true; return; }
+        if (!DrainSettingsSaves()) { e.Cancel = true; return; }
+        if (_settingsWriter.FailureCount > 0 && MessageBox.Show(this,
+            "Some settings could not be saved. Check Diagnostics. Close without those changes?",
+            "Settings not fully saved", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+        { e.Cancel = true; return; }
         CancelNavigationSourceProbe();
         CancelBackgroundVerification();
         _acceptUiLogLines = false;
@@ -2409,9 +2386,6 @@ public sealed partial class WizardForm : Form
         _healthMonitor.Dispose();
         StopVisualResources();
         _healthTip.Dispose();
-        // Commit pending edits before closing and before any later state I/O
-        // can fail, then tear down the idle-save timer.
-        FlushDeferredSettingsSaves();
         _settingsSaveTimer.Dispose();
         _persistentState.LastStage = _steps[Math.Clamp(_pageIndex,0,_steps.Length-1)];
         _persistentState.LastSourceFolder = _profile.SourceFolder;

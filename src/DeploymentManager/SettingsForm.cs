@@ -11,10 +11,12 @@ public sealed class SettingsForm : Form
 
     public SettingsForm(AppDataService appData)
     {
+        GwdUi.ConfigureForm(this);
         _appData = appData;
         Text = $"Deployment Manager Settings — {ProductInfo.DisplayVersion}";
         Width = 900;
-        Height = 420;
+        Height = 460;
+        MinimumSize = new Size(560, 330);
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
         MaximizeBox = false;
@@ -24,7 +26,7 @@ public sealed class SettingsForm : Form
         _repository.Text = appData.GetDeploymentRepositoryFolder();
         _workspace.Text = appData.GetWorkspaceRoot();
 
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 1, RowCount = 3 };
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(18), ColumnCount = 1, RowCount = 3 };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -55,6 +57,8 @@ public sealed class SettingsForm : Form
         buttons.Controls.Add(cancel);
         root.Controls.Add(buttons, 0, 2);
         Controls.Add(root);
+        GwdUi.StyleTree(this);
+        GwdUi.ButtonStyle(save, primary: true);
     }
 
     private void AddPathRow(TableLayoutPanel grid, string label, TextBox text, BrowseContext context)

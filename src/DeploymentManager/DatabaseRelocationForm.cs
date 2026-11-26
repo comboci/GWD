@@ -23,11 +23,12 @@ internal sealed class DatabaseRelocationForm : Form
 
     internal DatabaseRelocationForm(DeploymentProfile profile, SqlServerService sql)
     {
+        GwdUi.ConfigureForm(this);
         _profile = profile;
         _sql = sql;
         Text = "Database size and relocation";
         Width = 850; Height = 560; StartPosition = FormStartPosition.CenterParent;
-        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 48, FlowDirection = FlowDirection.LeftToRight };
+        var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, FlowDirection = FlowDirection.LeftToRight };
         var browse = new Button { Text = "Destination...", Width = 130 };
         browse.Click += (_, _) =>
         {
@@ -38,6 +39,8 @@ internal sealed class DatabaseRelocationForm : Form
         _details.Font = new Font("Segoe UI", 11F);
         _details.WordWrap = true;
         Controls.Add(_details); Controls.Add(_relocationProgress); Controls.Add(_stage); Controls.Add(_destination); Controls.Add(toolbar);
+        GwdUi.StyleTree(this);
+        GwdUi.ButtonStyle(_move, danger: true);
         _inspect.Click += async (_, _) => await InspectAsync();
         _move.Click += async (_, _) => await RelocateAsync();
         Shown += async (_, _) => await InspectAsync();

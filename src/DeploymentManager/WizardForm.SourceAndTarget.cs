@@ -19,7 +19,8 @@ public sealed partial class WizardForm
         var form = FormGrid();
         var source = new TextBox { Text = _profile.SourceFolder, Dock = DockStyle.Fill, ReadOnly = true, TabStop = false, BackColor = SystemColors.Window };
         var browse = new Button { Text = "Browse source...", AutoSize = true };
-        var lockSource = new CheckBox { Text = "Lock source", AutoSize = true, Checked = false, Margin = new Padding(8, 7, 3, 3) };
+        var lockSource = new CheckBox { Text = _sourceLocked ? "Source locked" : "Lock source", AutoSize = true, Checked = _sourceLocked, Margin = new Padding(8, 7, 3, 3) };
+        browse.Enabled = !_sourceLocked;
         var saveProfile = new Button { Text = "Save Profile", AutoSize = true };
         var loadProfile = new Button { Text = "Load Profile", AutoSize = true };
         _saveProfileAction = saveProfile;
@@ -298,6 +299,7 @@ public sealed partial class WizardForm
         lockSource.CheckedChanged += (_, _) =>
         {
             // The path is always browse-only; locking also prevents folder changes.
+            _sourceLocked = lockSource.Checked;
             browse.Enabled = !lockSource.Checked;
             lockSource.Text = lockSource.Checked ? "Source locked" : "Lock source";
         };

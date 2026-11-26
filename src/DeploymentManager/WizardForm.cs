@@ -73,6 +73,7 @@ public sealed partial class WizardForm : Form
     private Button? _saveProfileAction;
     private Button? _loadProfileAction;
     private CheckBox? _lockSourceAction;
+    private bool _sourceLocked;
     private Button? _exportSourceAction;
     private int _pageIndex;
     private int _renderedPageIndex = -1;
@@ -176,7 +177,7 @@ public sealed partial class WizardForm : Form
         Text = $"Generic Web Deployment Manager {ProductInfo.DisplayVersion} — Unified Diagnostics & Smart Settings";
         Width = 1280;
         Height = 860;
-        MinimumSize = new Size(1080, 740);
+        MinimumSize = new Size(800, 480);
         StartPosition = FormStartPosition.CenterScreen;
         WindowState = FormWindowState.Maximized;
         GwdUi.ConfigureForm(this);
@@ -474,6 +475,7 @@ public sealed partial class WizardForm : Form
         var lockSourceMenu = new ToolStripMenuItem("Lock Source") { CheckOnClick = false };
         lockSourceMenu.Click += (_, _) => { if (!CanNavigateInteractively()) return; if (_pageIndex != 0) ShowPage(0); if (_lockSourceAction is { IsDisposed: false } control) { control.Checked = !control.Checked; lockSourceMenu.Checked = control.Checked; } };
         actionsMenu.DropDownItems.Add(lockSourceMenu);
+        actionsMenu.DropDownOpening += (_, _) => lockSourceMenu.Checked = _sourceLocked;
         var exportSourceMenu = new ToolStripMenuItem("Export Clean Source ZIP");
         exportSourceMenu.Click += (_, _) => { if (!CanNavigateInteractively()) return; if (_pageIndex != 0) ShowPage(0); _exportSourceAction?.PerformClick(); };
         actionsMenu.DropDownItems.Add(exportSourceMenu);
@@ -665,6 +667,7 @@ public sealed partial class WizardForm : Form
         // Keep the selected project so Start Over returns to Project Source ready for confirmation/change.
         _profile.ReadyPublishFolder = string.Empty;
         _profile.BuildMode = "Fast Local Test";
+        _sourceLocked = false;
         _profile.DependencyResolutionMode = NormalizeDependencyMode(_appData.GetDependencyResolutionMode());
         _profile.OfflineBuild = string.Equals(_profile.DependencyResolutionMode, "Offline Only", StringComparison.OrdinalIgnoreCase);
         _appData.SaveDependencyResolutionMode(_profile.DependencyResolutionMode);

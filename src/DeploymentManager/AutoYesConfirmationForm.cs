@@ -10,6 +10,7 @@ public sealed class AutoYesConfirmationForm : Form
 
     public AutoYesConfirmationForm(string title, string message, int seconds = 5)
     {
+        GwdUi.ConfigureForm(this);
         _remainingSeconds = Math.Max(1, seconds);
         Text = title;
         StartPosition = FormStartPosition.CenterParent;
@@ -30,6 +31,9 @@ public sealed class AutoYesConfirmationForm : Form
         root.Controls.Add(_countdown, 0, 1);
         root.Controls.Add(actions, 0, 2);
         Controls.Add(root);
+        GwdUi.StyleTree(this);
+        // The original countdown and Yes/No behavior are untouched.
+        GwdUi.ButtonStyle(_no, primary: true);
 
         AcceptButton = _yes;
         CancelButton = _no;
@@ -45,6 +49,7 @@ public sealed class AutoYesConfirmationForm : Form
         };
         Shown += (_, _) => { RefreshCountdown(); _yes.Focus(); _timer.Start(); };
         FormClosed += (_, _) => _timer.Stop();
+        Disposed += (_, _) => _timer.Dispose();
     }
 
     private void RefreshCountdown()

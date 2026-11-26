@@ -24,6 +24,7 @@ public sealed class EmailNotificationSettingsForm : Form
 
     public EmailNotificationSettingsForm()
     {
+        GwdUi.ConfigureForm(this);
         Text = "GWD — Email Notifications";
         ClientSize = new Size(760, 570);
         MinimumSize = new Size(640, 500);
@@ -106,6 +107,8 @@ public sealed class EmailNotificationSettingsForm : Form
         buttons.Controls.AddRange(new Control[] { _save, _cancel, _test });
         AddWide(buttons);
         Controls.Add(root);
+        GwdUi.StyleTree(this);
+        GwdUi.ButtonStyle(_save, primary: true);
         _save.Click += (_, _) => Save();
         _test.Click += async (_, _) => await TestAsync();
         _cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };

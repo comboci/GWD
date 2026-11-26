@@ -5,7 +5,7 @@ namespace GenericWeb.DeploymentManager;
 public sealed partial class WizardForm
 {
     private sealed record SourcePreview(bool Ready, string Detail, string[] Lines, int Failures, string? ProjectFile = null,
-        string? SourceRoot = null, string? SuggestedIdentity = null, int FrameworkMajor = 0, bool RequiresNode = false);
+        string? SourceRoot = null, string? SuggestedIdentity = null, int FrameworkMajor = 0, bool RequiresNode = false, bool CanWatch = false);
 
     // Preview never substitutes for the deployment engine's full validation.
     private static readonly HashSet<string> PreviewIgnoredDirectories = new(StringComparer.OrdinalIgnoreCase)
@@ -29,7 +29,7 @@ public sealed partial class WizardForm
             if (app is not null && app.EndsWith(".Api", StringComparison.OrdinalIgnoreCase)) app = app[..^4];
             return new(validation.Ok, validation.Detail,
                 [validation.Ok ? "PASS — " + validation.Detail : "FAIL — " + validation.Detail], validation.Ok ? 0 : 1,
-                SuggestedIdentity: app);
+                SuggestedIdentity: app, CanWatch: Directory.Exists(folder));
         }
 
         if (!Directory.Exists(folder)) return new(false, "Select an existing source folder first.", ["FAIL — Source folder is unavailable."], 1);
@@ -60,8 +60,14 @@ public sealed partial class WizardForm
         }
 
         if (api is null)
-            return new(false, "No ASP.NET Core Web project detected in the source preview.",
-                ["FAIL — ASP.NET Core Web .csproj not found."], 1);
+        {
+            ct.ThrowIfCancellationRequested();
+            api = environment.DetectApiProject(folder);
+            ct.ThrowIfCancellationRequested();
+            if (api is null)
+                return new(false, "No ASP.NET Core Web project detected in the source preview.",
+                    ["FAIL — ASP.NET Core Web .csproj not found."], 1, CanWatch: true);
+        }
         ct.ThrowIfCancellationRequested();
         var content = File.ReadAllText(api);
         var major = environment.DetectTargetFrameworkMajor(api);
@@ -83,7 +89,7 @@ public sealed partial class WizardForm
             "PASS — Source access/readability" };
         if (requiresNode) lines.Add(frontendRoot is null ? "FAIL — Frontend detected but no complete source frontend root was found in the preview." : "PASS — Frontend root: " + frontendRoot);
         return new(true, "Source preview ready.", lines.ToArray(), requiresNode && frontendRoot is null ? 1 : 0,
-            api, sourceRoot, name, major, requiresNode);
+            api, sourceRoot, name, major, requiresNode, CanWatch: true);
     }
 
     private readonly SemaphoreSlim _sourcePreviewSlots = new(2, 2);

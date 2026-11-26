@@ -178,7 +178,7 @@ public sealed partial class WizardForm
                     await Task.Delay(200, request.Token);
                     var result = await InspectSourcePreviewAsync(prepared, input, request.Token);
                     if (!Current()) return;
-                    if (result.Ready) ResetWatcher(input, prepared);
+                    if (result.CanWatch) ResetWatcher(input, prepared);
                     if (prepared)
                     {
                         preparedValidation.Text = result.Detail;
@@ -336,7 +336,16 @@ public sealed partial class WizardForm
             var startingFolder = await ResolveBrowseStartAsync(source.Text, BrowseContext.Source);
             if (view.IsDisposed || view.Disposing || !CanNavigateInteractively()) return;
             using var dialog = new FolderBrowserDialog { Description = "Select the new project release/source folder", SelectedPath = startingFolder };
-            if (dialog.ShowDialog(this) == DialogResult.OK) { source.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Source); }
+            if (dialog.ShowDialog(this) == DialogResult.OK && !view.IsDisposed && !view.Disposing)
+            {
+                if (source.Text == dialog.SelectedPath)
+                {
+                    InvalidateEnvironmentEvidence();
+                    RunSourcePreflight();
+                }
+                else source.Text = dialog.SelectedPath;
+                RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Source);
+            }
         };
         browsePreparedPublish.Click += async (_, _) =>
         {
@@ -344,7 +353,16 @@ public sealed partial class WizardForm
             var startingFolder = await ResolveBrowseStartAsync(preparedPublish.Text, BrowseContext.Publish);
             if (view.IsDisposed || view.Disposing || !CanNavigateInteractively()) return;
             using var dialog = new FolderBrowserDialog { Description = "Select the final prepared ASP.NET Core IIS publish folder", SelectedPath = startingFolder };
-            if (dialog.ShowDialog(this) == DialogResult.OK) { preparedPublish.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Publish); }
+            if (dialog.ShowDialog(this) == DialogResult.OK && !view.IsDisposed && !view.Disposing)
+            {
+                if (preparedPublish.Text == dialog.SelectedPath)
+                {
+                    InvalidateEnvironmentEvidence();
+                    CommitAndValidatePreparedPublish();
+                }
+                else preparedPublish.Text = dialog.SelectedPath;
+                RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Publish);
+            }
         };
         void CommitAndValidatePreparedPublish()
         {

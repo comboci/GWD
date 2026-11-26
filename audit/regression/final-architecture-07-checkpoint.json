@@ -3,7 +3,7 @@
   "branch": "fix/ui-performance-phase-01",
   "baselineVersion": "V269-R",
   "baselineCommit": "0121217a13057d7c832a9a9ddd7aa9acf5a099cc",
-  "candidate": "V288-R",
+  "candidate": "V289-R",
   "state": "IN_PROGRESS",
   "packs": {
     "GWD-A01": "TEST_PENDING",
@@ -36,7 +36,8 @@
     "A09 - adaptive Wizard and dialogs / PerMonitorV2 working bounds",
     "A07 - semantic roles, accessibility and shared visual resources",
     "A08 - read-only evidence dashboard for the selected project",
-    "A10 - priority notifications, deduplication and visible diagnostics"
+    "A10 - priority notifications, deduplication and visible diagnostics",
+    "A01.3 - final regression source review for A03/A05/A06"
   ],
   "nextSourcePackage": "GWD-A11",
   "build": "NOT_RUN_POLICY",

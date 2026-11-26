@@ -338,8 +338,8 @@ public sealed partial class WizardForm
             }
         }
 
-        existingRadio.CheckedChanged += (_, _) => SyncSelection();
-        installRadio.CheckedChanged += (_, _) => SyncSelection();
+        existingRadio.CheckedChanged += (_, _) => { SyncSelection(); InvalidateSqlVerification(); };
+        installRadio.CheckedChanged += (_, _) => { SyncSelection(); InvalidateSqlVerification(); };
         existing.SelectedIndexChanged += (_, _) =>
         {
             if (existing.SelectedItem is SqlInstanceInfo info)

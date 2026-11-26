@@ -67,7 +67,7 @@ public sealed partial class WizardForm
         };
         targetPort.ValueChanged += (_, _) => { _profile.HttpPort = _profile.UseDefaultIisWebsite ? 80 : (int)targetPort.Value; UpdateNavigationState(); };
         targetHost.TextChanged += (_, _) => _profile.HostHeader = _profile.UseDefaultIisWebsite ? string.Empty : targetHost.Text.Trim();
-        targetHealth.TextChanged += (_, _) => _profile.HealthPath = targetHealth.Text.Trim();
+        targetHealth.TextChanged += (_, _) => { _profile.HealthPath = targetHealth.Text.Trim(); _healthMonitor.SubmitProfile(_profile); };
         _content.Controls.Add(view);
 
         async Task RefreshIisStatus()

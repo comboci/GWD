@@ -540,16 +540,22 @@ public sealed class AppDataService
     private void SaveSettingsCore(DeploymentManagerSettings settings)
     {
         settings.Revision = Guid.NewGuid();
-        WriteJsonAtomic(SettingsFile, settings);
+        WriteJsonAtomic(SettingsFile, settings, flushToDisk: true);
     }
 
-    private static void WriteJsonAtomic<T>(string path, T value)
+    private static void WriteJsonAtomic<T>(string path, T value, bool flushToDisk = false)
     {
         var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(temp, JsonSerializer.Serialize(value, JsonOptions));
+            if (flushToDisk)
+            {
+                using var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                JsonSerializer.Serialize(output, value, JsonOptions);
+                output.Flush(flushToDisk: true);
+            }
+            else File.WriteAllText(temp, JsonSerializer.Serialize(value, JsonOptions));
             File.Move(temp, path, true);
         }
         catch (Exception ex) { InternalDiagnostics.Record(ex, "Atomic JSON save: " + path); throw; }

@@ -1,6 +1,6 @@
 {
-  "version": "288.0.0",
+  "version": "289.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V288-R — A10 - priority notifications, deduplication and visible diagnostics; Windows acceptance pending"
+  "commitNote": "V289-R — A01.3 - final regression source review for A03/A05/A06; Windows acceptance pending"
 }

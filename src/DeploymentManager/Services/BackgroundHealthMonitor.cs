@@ -16,13 +16,11 @@ public sealed record HealthSnapshot(DateTime CheckedAt, bool IisInstalled, int S
 
 public sealed class BackgroundHealthMonitor : IDisposable
 {
-    private sealed record ProbeScope(string TargetMode, string TargetHost, string SiteName, int Port, string HealthPath, string SqlFingerprint);
     private readonly EnvironmentService _environment;
     private readonly SqlServerService _sql;
     private readonly CancellationTokenSource _stop = new();
     private readonly HttpClient _http = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = TimeSpan.FromSeconds(8) };
     private readonly object _gate = new();
-    private ProbeScope _scope;
     private DeploymentProfile _input;
     private long _generation;
     private long _sequence;
@@ -30,6 +28,7 @@ public sealed class BackgroundHealthMonitor : IDisposable
     private Task? _flight;
     private CancellationTokenSource? _inFlight;
     private bool _pending;
+    private long _inFlightGeneration = -1;
     private bool _disposed;
     private HealthSnapshot? _latest;
 
@@ -41,37 +40,36 @@ public sealed class BackgroundHealthMonitor : IDisposable
         _environment = environment;
         _sql = sql;
         _input = profile.SnapshotForHealth();
-        _scope = Key(_input);
     }
 
     // Called by the owner thread. Background work never reads the live profile.
     public void SubmitProfile(DeploymentProfile profile)
     {
-        var input = profile.SnapshotForHealth();
-        var key = Key(input);
         CancellationTokenSource? cancel = null;
         HealthSnapshot? invalidated = null;
         lock (_gate)
         {
-            if (_disposed || key == _scope) return;
-            _scope = key;
-            _input = input;
+            if (_disposed || SameInput(_input, profile)) return;
+            _input = profile.SnapshotForHealth();
             _generation++;
             invalidated = Empty(_generation, ++_sequence, "Configuration changed; not checked.");
             _latest = invalidated;
-            if (_loop is not null)
-            {
-                _pending = true;
-                cancel = _inFlight;
-                StartFlightLocked();
-            }
+            // Edits invalidate current evidence without making a new SQL probe
+            // on a partially typed credential. Only explicit or periodic checks request work.
+            _pending = false;
+            cancel = _inFlight;
         }
         TryCancel(cancel);
         Updated?.Invoke(invalidated!);
     }
 
-    private ProbeScope Key(DeploymentProfile profile) => new(profile.TargetMode, profile.TargetHost, profile.SiteName,
-        profile.HttpPort, profile.HealthPath, _sql.Connections.Fingerprint(profile));
+    private static bool SameInput(DeploymentProfile current, DeploymentProfile submitted) =>
+        current.TargetMode == submitted.TargetMode && current.TargetHost == submitted.TargetHost &&
+        current.SiteName == submitted.SiteName && current.HttpPort == submitted.HttpPort &&
+        current.HealthPath == (submitted.HealthPath ?? "") && current.SqlInstance == (submitted.SqlInstance ?? "") &&
+        current.DatabaseName == (submitted.DatabaseName ?? "") && current.SqlUserName == submitted.SqlUserName &&
+        current.SqlPassword == submitted.SqlPassword && current.UseWindowsAuthentication == submitted.UseWindowsAuthentication &&
+        current.SqlCredentialConfigured == submitted.SqlCredentialConfigured;
 
     public bool IsCurrent(HealthSnapshot snapshot)
     {
@@ -94,7 +92,7 @@ public sealed class BackgroundHealthMonitor : IDisposable
         lock (_gate)
         {
             if (_disposed) return Task.CompletedTask;
-            if (_flight is null)
+            if (_flight is null || _inFlightGeneration != _generation)
             {
                 _pending = true;
                 StartFlightLocked();
@@ -179,6 +177,7 @@ public sealed class BackgroundHealthMonitor : IDisposable
                 _pending = false;
                 source = _input;
                 generation = _generation;
+                _inFlightGeneration = generation;
                 sqlSequence = _sequence;
                 request = _inFlight = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
             }

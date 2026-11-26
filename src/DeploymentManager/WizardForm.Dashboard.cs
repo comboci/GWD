@@ -28,10 +28,12 @@ public sealed partial class WizardForm
         table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         var toolbar = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
         var refresh = new Button { Text = "Refresh evidence", AutoSize = true };
+        var checkHealth = new Button { Text = "Check configured health", AutoSize = true,
+            AccessibleDescription = "Read-only: local IIS and HTTP plus the configured administrative SQL connection." };
         var diagnostics = new Button { Text = "Diagnostics", AutoSize = true };
         var box = new TextBox { Dock = DockStyle.Fill, Font = GwdUi.MonoReading, Multiline = true,
             ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, AccessibleName = "Deployment evidence" };
-        toolbar.Controls.AddRange([refresh, diagnostics]);
+        toolbar.Controls.AddRange([refresh, checkHealth, diagnostics]);
         table.Controls.Add(toolbar, 0, 0);
         table.Controls.Add(box, 0, 1);
         window.Controls.Add(table);
@@ -39,14 +41,24 @@ public sealed partial class WizardForm
         var lifetime = new CancellationTokenSource();
         Task? loading = null;
 
-        async Task RefreshEvidence()
+        async Task RefreshEvidence(bool probeHealth = false)
         {
             var ct = lifetime.Token;
-            var scope = DashboardScope();
-            refresh.Enabled = false;
-            box.Text = "Reading the selected project's history…";
+            refresh.Enabled = checkHealth.Enabled = false;
+            box.Text = probeHealth ? "Checking the configured health scope…" : "Reading the selected project's history…";
             try
             {
+                var scope = DashboardScope();
+                if (probeHealth)
+                {
+                    if (!CanNavigateInteractively())
+                    {
+                        box.Text = "Health refresh is available after the current operation finishes.";
+                        return;
+                    }
+                    _healthMonitor.SubmitProfile(_profile);
+                    await _healthMonitor.RefreshNowAsync(ct);
+                }
                 DashboardHistoryEvidence? history = scope.Project is null ? null :
                     await Task.Run(() => _history.ReadDashboardHistory(scope.Project, ct), ct);
                 if (ct.IsCancellationRequested || IsDisposed || Disposing || window.IsDisposed) return;
@@ -105,16 +117,17 @@ public sealed partial class WizardForm
                 if (!window.IsDisposed && !ct.IsCancellationRequested)
                     box.Text = "Could not read dashboard evidence. See Diagnostics.";
             }
-            finally { if (!refresh.IsDisposed) refresh.Enabled = true; }
+            finally { if (!refresh.IsDisposed) refresh.Enabled = checkHealth.Enabled = true; }
         }
 
-        void BeginRefresh()
+        void BeginRefresh(bool probeHealth = false)
         {
-            if (loading is null || loading.IsCompleted) loading = RefreshEvidence();
+            if (loading is null || loading.IsCompleted) loading = RefreshEvidence(probeHealth);
         }
 
         diagnostics.Click += (_, _) => { if (!_visualResourcesStopped) OpenDiagnostics(); };
         refresh.Click += (_, _) => BeginRefresh();
+        checkHealth.Click += (_, _) => BeginRefresh(probeHealth: true);
         window.Shown += (_, _) => BeginRefresh();
         window.FormClosed += (_, _) =>
         {

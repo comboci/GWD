@@ -17,90 +17,41 @@ public sealed partial class WizardForm
     {
         _pageTitle.Text = "Select source and dependency strategy";
         _pageDescription.Text = "Choose the incoming source and all build/dependency settings here. Source preflight runs automatically. Persistent dependencies and stable build workspaces stay outside the versioned source folder.";
-        var form = FormGrid();
-        var source = new TextBox { Text = _profile.SourceFolder, Dock = DockStyle.Fill, ReadOnly = true, TabStop = false, BackColor = SystemColors.Window };
-        var browse = new Button { Text = "Browse source...", AutoSize = true };
-        var lockSource = new CheckBox { Text = _sourceLocked ? "Source locked" : "Lock source", AutoSize = true, Checked = _sourceLocked, Margin = new Padding(8, 7, 3, 3) };
-        browse.Enabled = !_sourceLocked;
-        var saveProfile = new Button { Text = "Save Profile", AutoSize = true };
-        var loadProfile = new Button { Text = "Load Profile", AutoSize = true };
+        var view = new UI.Pages.DeploymentSourceView(_profile.SourceFolder, _sourceLocked, _profile.ApplicationName,
+            _profile.SiteName, _profile.DatabaseName, _profile.BuildMode, NormalizeDependencyMode(_profile.DependencyResolutionMode),
+            _profile.ReadyPublishFolder, _profile.DeploymentRepositoryFolder, _profile.WorkspaceRoot);
+        var source = view.Source;
+        var browse = view.Browse;
+        var lockSource = view.LockSource;
+        var saveProfile = view.SaveProfile;
+        var loadProfile = view.LoadProfile;
+        var exportSource = view.ExportSource;
+        var detectedRoot = view.DetectedRoot;
+        var app = view.App;
+        var site = view.SiteInput;
+        var database = view.Database;
+        var buildMode = view.BuildMode;
+        var dependencyMode = view.DependencyMode;
+        var modeMeaning = view.ModeMeaning;
+        var preparedPublish = view.PreparedPublish;
+        var browsePreparedPublish = view.BrowsePreparedPublish;
+        var preparedValidation = view.PreparedValidation;
+        var repository = view.Repository;
+        var browseRepository = view.BrowseRepository;
+        var workspace = view.Workspace;
+        var browseWorkspace = view.BrowseWorkspace;
+        var offlineAction = view.OfflineAction;
+        var offlineTest = view.OfflineTest;
+        var offlineState = view.OfflineState;
+        var dependencySyncProgress = view.DependencySyncProgress;
+        var dependencySyncActivity = view.DependencySyncActivity;
+        var sourceTestResult = view.SourceTestResult;
+        var recheckSource = view.RecheckSource;
         _saveProfileAction = saveProfile;
         _loadProfileAction = loadProfile;
-        var exportSource = new Button { Text = "Export Clean Source ZIP", AutoSize = true };
         _lockSourceAction = lockSource;
         _exportSourceAction = exportSource;
-        // The quick actions and menu commands invoke the same live controls.
-        // Parenting them also gives them normal focus and disposal lifetimes.
-        foreach (var action in new Control[] { saveProfile, loadProfile, lockSource, exportSource })
-            action.Margin = new Padding(2, 1, 3, 3);
-        var profileActions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, FlowDirection = FlowDirection.LeftToRight };
-        profileActions.Controls.AddRange(new Control[] { saveProfile, loadProfile, lockSource, exportSource });
-        var sourceRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
-        sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        sourceRow.Controls.Add(source, 0, 0); sourceRow.Controls.Add(browse, 1, 0);
-
-        var detectedRoot = new Label { AutoSize = true, MaximumSize = new Size(850, 0), ForeColor = Color.DimGray };
-        var app = new TextBox { Text = _profile.ApplicationName, Width = 260 };
-        var site = new TextBox { Text = _profile.SiteName, Width = 260 };
-        var database = new TextBox { Text = _profile.DatabaseName, Width = 260 };
-        var buildMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 };
-        buildMode.Items.AddRange(new object[] { "Fast Local Test", "Fast IIS Update", "Full IIS Deploy", "Visual Studio prepared", "Prepared IIS Publish" });
-        buildMode.SelectedItem = buildMode.Items.Cast<object>().FirstOrDefault(x => string.Equals(x.ToString(), _profile.BuildMode, StringComparison.OrdinalIgnoreCase)) ?? buildMode.Items[0];
-        var dependencyMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
-        dependencyMode.Items.AddRange(new object[] { "Offline Only", "Hybrid", "Online" });
-        dependencyMode.SelectedItem = NormalizeDependencyMode(_profile.DependencyResolutionMode);
-        var modeMeaning = new Label { AutoSize = true, MaximumSize = new Size(800, 0), ForeColor = Color.DarkOrange };
-        var preparedPublish = new TextBox { Text = _profile.ReadyPublishFolder, Dock = DockStyle.Fill };
-        var browsePreparedPublish = new Button { Text = "Browse prepared publish...", AutoSize = true };
-        var preparedPublishRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
-        preparedPublishRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); preparedPublishRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        preparedPublishRow.Controls.Add(preparedPublish, 0, 0); preparedPublishRow.Controls.Add(browsePreparedPublish, 1, 0);
-        var preparedValidation = new Label { AutoSize = true, MaximumSize = new Size(800, 0), ForeColor = Color.DimGray, Text = "Select Prepared IIS Publish mode to validate a prebuilt IIS artifact." };
-
-        var repository = new TextBox { Text = _profile.DeploymentRepositoryFolder, Dock = DockStyle.Fill };
-        var browseRepository = new Button { Text = "Browse repository...", AutoSize = true };
-        var repositoryRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
-        repositoryRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); repositoryRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        repositoryRow.Controls.Add(repository, 0, 0); repositoryRow.Controls.Add(browseRepository, 1, 0);
-
-        var workspace = new TextBox { Text = _profile.WorkspaceRoot, Dock = DockStyle.Fill };
-        var browseWorkspace = new Button { Text = "Browse workspace...", AutoSize = true };
-        var workspaceRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
-        workspaceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); workspaceRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        workspaceRow.Controls.Add(workspace, 0, 0); workspaceRow.Controls.Add(browseWorkspace, 1, 0);
-
-        var offlineAction = new Button { Text = "Sync Missing Online Once", AutoSize = true };
-        var offlineTest = new Button { Text = "Test Offline Build", AutoSize = true };
-        var offlineState = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(800, 0), Text = "Dependency readiness has not been checked yet." };
-        var dependencySyncProgress = new ProgressBar { Width = 360, Height = 18, Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 28, Visible = false };
-        var dependencySyncActivity = new Label { AutoSize = true, ForeColor = Color.RoyalBlue, MaximumSize = new Size(800, 0), Visible = false, Text = "Checking dependencies..." };
-
-        AddRow(form, "Profile actions", profileActions);
-        AddRow(form, "Source folder", sourceRow);
-
-        AddRow(form, "Detected source root", detectedRoot);
-        AddRow(form, "Application name", app);
-        AddRow(form, "IIS site name", site);
-        AddRow(form, "Database name", database);
-        AddRow(form, "Build / deployment mode", buildMode);
-        AddRow(form, "Dependency mode", dependencyMode);
-        AddRow(form, "Selected behavior", modeMeaning);
-        AddRow(form, "Prepared publish folder", preparedPublishRow);
-        AddRow(form, "Prepared publish validation", preparedValidation);
-        AddRow(form, "Shared Dependency Repository", repositoryRow);
-        AddRow(form, "Repository behavior", new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(800, 0), Text = "Persistent across source versions. NuGet/npm/installers/offline packages live here; the incoming source folder is never used as the dependency repository." });
-        AddRow(form, "Stable Build Workspace", workspaceRow);
-        AddRow(form, "Workspace behavior", new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(800, 0), Text = "Persistent build working area. Versioned incoming sources may be deleted after deployment without losing reusable dependency/build state." });
-        AddRow(form, "Dependency actions", Wrap(offlineAction, offlineTest));
-        AddRow(form, "Dependency status", offlineState);
-        AddRow(form, "Dependency sync", Wrap(dependencySyncProgress, dependencySyncActivity));
-        var sourceTestResult = new Label { AutoSize = true, MaximumSize = new Size(800, 0), ForeColor = Color.DimGray, Text = "Automatic source preflight starts as soon as a valid source folder is selected." };
-        var recheckSource = new Button { Text = "Re-check source / publish", AutoSize = true };
-        var preflightPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-        preflightPanel.Controls.Add(recheckSource);
-        preflightPanel.Controls.Add(sourceTestResult);
-        AddRow(form, "Automatic source preflight", preflightPanel);
-        _content.Controls.Add(form);
+        _content.Controls.Add(view);
 
         void RefreshPreparedPublishValidation()
         {
@@ -531,7 +482,7 @@ public sealed partial class WizardForm
             finally
             {
                 _dependencySyncRunning = false;
-                if (!IsDisposed && !Disposing && !form.IsDisposed)
+                if (!IsDisposed && !Disposing && !view.IsDisposed && !view.Disposing)
                 {
                     dependencySyncProgress.Visible = false;
                     offlineAction.Enabled = _profile.DependencyResolutionMode != "Online";
@@ -571,7 +522,7 @@ public sealed partial class WizardForm
             finally
             {
                 _dependencySyncRunning = false;
-                if (!IsDisposed && !Disposing && !form.IsDisposed)
+                if (!IsDisposed && !Disposing && !view.IsDisposed && !view.Disposing)
                 {
                     offlineAction.Enabled = _profile.DependencyResolutionMode != "Online";
                     offlineTest.Enabled = _profile.DependencyResolutionMode == "Offline Only";

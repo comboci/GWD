@@ -3,7 +3,7 @@
   "branch": "fix/ui-performance-phase-01",
   "baselineVersion": "V269-R",
   "baselineCommit": "0121217a13057d7c832a9a9ddd7aa9acf5a099cc",
-  "candidate": "V275-R",
+  "candidate": "V276-R",
   "state": "IN_PROGRESS",
   "packs": {
     "GWD-A01": "TEST_PENDING",
@@ -23,7 +23,8 @@
     "A02.1 - Environment Scan view and Source initial subscription",
     "A02.2 - Review UserControl and shared log ownership",
     "A02.3 - Deployment Location UserControl and shared form layout",
-    "A02.4 - Target presentation view; mount existing Prepared Publish control without changing validation"
+    "A02.4 - Target presentation view; mount existing Prepared Publish control without changing validation",
+    "A02.5 - Source control tree, reusable quick actions and outgoing view guard"
   ],
   "nextSourcePackage": "GWD-A02",
   "build": "NOT_RUN_POLICY",

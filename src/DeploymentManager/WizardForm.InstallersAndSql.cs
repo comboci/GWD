@@ -19,43 +19,16 @@ public sealed partial class WizardForm
         _pageDescription.Text = "Reuse local/cached installers whenever possible. If a download fails, open the official download page, download the file manually, then choose it here.";
 
         AutoLocateCachedInstallers();
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3 };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var cacheRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false };
-        var cacheText = new TextBox { Text = _profile.InstallerCacheFolder, Width = 570 };
-        var browseCache = new Button { Text = "Choose installer folder...", AutoSize = true };
-        var openCache = new Button { Text = "Open folder", AutoSize = true };
-        cacheRow.Controls.Add(new Label { Text = "Installer cache", AutoSize = true, Padding = new Padding(0, 7, 8, 0) });
-        cacheRow.Controls.Add(cacheText); cacheRow.Controls.Add(browseCache); cacheRow.Controls.Add(openCache);
-        root.Controls.Add(cacheRow, 0, 0);
-
-        var versionRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(0, 8, 0, 4) };
-        var sqlVersion = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
-        sqlVersion.Items.AddRange(CompatibleSqlVersions().Cast<object>().ToArray());
-        var currentIndex = sqlVersion.Items.IndexOf(_profile.SqlExpressVersion);
-        sqlVersion.SelectedIndex = currentIndex >= 0 ? currentIndex : 0;
         var sqlInstalled = _sqlInstances.Count > 0;
-        sqlVersion.Enabled = !sqlInstalled;
-        versionRow.Controls.Add(new Label { Text = "SQL Express package", AutoSize = true, Padding = new Padding(0, 7, 8, 0) });
-        versionRow.Controls.Add(sqlVersion);
-        versionRow.Controls.Add(new Label
-        {
-            Text = sqlInstalled ? "Already Installed — " + InstalledSqlSummary() + "; SQL download is skipped." : "Not installed — select the package to download.",
-            AutoSize = true,
-            ForeColor = sqlInstalled ? Color.ForestGreen : Color.DimGray,
-            Padding = new Padding(10, 7, 0, 0)
-        });
-        var downloadAll = new Button { Text = "Download all missing installers", AutoSize = true, Margin = new Padding(18, 3, 3, 3) };
-        versionRow.Controls.Add(downloadAll);
-        root.Controls.Add(versionRow, 0, 1);
-
-        var list = VerticalPanel();
-        list.AutoScroll = true;
-        root.Controls.Add(list, 0, 2);
-        _content.Controls.Add(root);
+        var view = new UI.Pages.InstallerStageView(_profile.InstallerCacheFolder, CompatibleSqlVersions().Cast<object>().ToArray(),
+            _profile.SqlExpressVersion, sqlInstalled, sqlInstalled ? InstalledSqlSummary() : string.Empty);
+        var cacheText = view.CacheText;
+        var browseCache = view.BrowseCache;
+        var openCache = view.OpenCache;
+        var sqlVersion = view.SqlVersion;
+        var downloadAll = view.DownloadAll;
+        var list = view.List;
+        _content.Controls.Add(view);
 
         void RebuildCards()
         {
@@ -272,102 +245,44 @@ public sealed partial class WizardForm
         _pageTitle.Text = "SQL Server & Database";
         _pageDescription.Text = "Configure and verify SQL Server and the application database in one place. Healthy connections are verified automatically; repair and recovery tools remain available under troubleshooting.";
         
-        var body = VerticalPanel();
-
-        var existingRadio = new RadioButton { Text = "Use an existing SQL Server instance", AutoSize = true, Checked = _sqlInstances.Count > 0 };
-        var existing = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 700 };
-        foreach (var item in _sqlInstances) existing.Items.Add(item);
-        if (existing.Items.Count > 0) existing.SelectedIndex = Math.Max(0, _sqlInstances.FindIndex(x => string.Equals(x.ServerName, _profile.SqlInstance, StringComparison.OrdinalIgnoreCase)));
-
-        var installRadio = new RadioButton { Text = "Install SQL Server Express", AutoSize = true, Checked = _sqlInstances.Count == 0 };
-        var installer = new TextBox { Text = _profile.SqlInstallerPath, Width = 670, ReadOnly = true };
-        var browse = new Button { Text = "Choose installer...", AutoSize = true };
-        var instanceName = new TextBox { Text = "NSPOFFICE", Width = 220 };
-        var install = new Button { Text = "Run SQL Server installer", AutoSize = true };
-        var rescan = new Button { Text = "Re-scan SQL Server", AutoSize = true };
-
-        body.Controls.Add(existingRadio);
-        body.Controls.Add(existing);
-        body.Controls.Add(new Label { Height = 8 });
-        body.Controls.Add(installRadio);
-        body.Controls.Add(Wrap(installer, browse));
-        body.Controls.Add(Wrap(new Label { Text = "New instance name", AutoSize = true, Padding = new Padding(0, 7, 8, 0) }, instanceName));
-        body.Controls.Add(Wrap(install, rescan));
-        body.Controls.Add(new Label { Height = 10 });
-
-        var diagnosticsBox = new GroupBox { Text = "Selected instance diagnostics", Width = 850, Height = 190, Padding = new Padding(12) };
-        var diagnosticsPanel = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2, ColumnCount = 1 };
-        diagnosticsPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        diagnosticsPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        var diagnostics = new TextBox
-        {
-            Multiline = true,
-            ReadOnly = true,
-            ScrollBars = ScrollBars.Vertical,
-            Dock = DockStyle.Fill,
-            Font = new Font("Consolas", 9F),
-            Text = "Select an instance, then click Refresh diagnostics."
-        };
-        var refreshDiagnostics = new Button { Text = "Refresh diagnostics", AutoSize = true };
-        var repairConnectivity = new Button { Text = "Repair local SQL connectivity", AutoSize = true };
-        diagnosticsPanel.Controls.Add(diagnostics, 0, 0);
-        diagnosticsPanel.Controls.Add(Wrap(refreshDiagnostics, repairConnectivity), 0, 1);
-        diagnosticsBox.Controls.Add(diagnosticsPanel);
-        body.Controls.Add(diagnosticsBox);
-        body.Controls.Add(new Label { Height = 8 });
-
-        var authBox = new GroupBox { Text = "Administrative connection", Width = 850, Height = 320, Padding = new Padding(14) };
-        var authPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = false };
-        var windowsAuth = new RadioButton { Text = "Windows Authentication", AutoSize = true, Checked = _profile.UseWindowsAuthentication };
-        var sqlAuth = new RadioButton { Text = "SQL Authentication", AutoSize = true, Checked = !_profile.UseWindowsAuthentication };
-        var user = new TextBox { Text = _profile.SqlUserName, Width = 170, Enabled = true };
-        var passwordWasSuggested = false;
-        var password = new TextBox { Text = _profile.SqlPassword, UseSystemPasswordChar = !passwordWasSuggested, Width = 260, Enabled = true };
-        var generate = new Button { Text = "Generate strong password", AutoSize = true, Enabled = true };
-        var copy = new Button { Text = "Copy password", AutoSize = true, Enabled = true };
-        var showPassword = new CheckBox { Text = "Show password", AutoSize = true, Enabled = true, Checked = passwordWasSuggested };
-        var resetSa = new Button { Text = "Configure / Reset sa", AutoSize = true, Enabled = existing.Items.Count > 0 };
-        var emergency = new Button { Text = "Emergency recover SQL access", AutoSize = true, Enabled = existing.Items.Count > 0 };
-        var test = new Button { Text = "Test administrative connection", AutoSize = true };
         var recentSql = _healthMonitor.HasRecentSuccessfulSql(TimeSpan.FromMinutes(10));
-        var verified = new Label { Text = recentSql ? _sql.Connections.State(_profile).Detail : "Not verified", AutoSize = true, ForeColor = recentSql ? Color.ForestGreen : Color.Firebrick, Padding = new Padding(8, 7, 0, 0) };
-
-        authPanel.Controls.Add(windowsAuth);
-        authPanel.Controls.Add(sqlAuth);
-        authPanel.Controls.Add(new Label
-        {
-            Text = "SQL user/password remain editable in both modes. Normal SA reset requires Windows Authentication to already be SQL sysadmin; emergency recovery is for a local instance when that SQL sysadmin access has been lost.",
-            AutoSize = true,
-            MaximumSize = new Size(790, 0),
-            ForeColor = Color.DimGray
-        });
-        authPanel.Controls.Add(Wrap(
-            new Label { Text = "SQL user", AutoSize = true, Padding = new Padding(0, 7, 8, 0) }, user,
-            new Label { Text = "Password", AutoSize = true, Padding = new Padding(12, 7, 8, 0) }, password,
-            showPassword, generate, copy));
-        authPanel.Controls.Add(new Label { Text = "Enter an existing SQL credential, or generate a password and apply Configure / Reset sa. Passwords are session-only and excluded from profiles and diagnostics.", AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(790, 0) });
-        authPanel.Controls.Add(Wrap(resetSa, emergency));
-        authPanel.Controls.Add(Wrap(test, verified));
-        authBox.Controls.Add(authPanel);
-        body.Controls.Add(authBox);
-        var databaseBox = new GroupBox { Text = "Application database", Width = 850, Height = 105, Padding = new Padding(14) };
-        var databasePanel = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
-        var databaseName = new TextBox { Text = _profile.DatabaseName, Width = 250 };
-        var verifyDatabase = new Button { Text = "Verify database", AutoSize = true };
-        var databaseState = new Label { Text = _databaseConnectionVerified ? "✓ SQL preflight verified" : "Auto verification pending", AutoSize = true, ForeColor = _databaseConnectionVerified ? Color.ForestGreen : Color.DimGray, Padding = new Padding(10,7,0,0) };
-        databasePanel.Controls.Add(new Label { Text = "Database name", AutoSize = true, Padding = new Padding(0,7,8,0) });
-        databasePanel.Controls.Add(databaseName); databasePanel.Controls.Add(verifyDatabase); databasePanel.Controls.Add(databaseState);
-        databaseBox.Controls.Add(databasePanel); body.Controls.Add(databaseBox);
+        var view = new UI.Pages.SqlConfigurationView(_sqlInstances.Cast<object>().ToArray(),
+            _sqlInstances.FindIndex(x => string.Equals(x.ServerName, _profile.SqlInstance, StringComparison.OrdinalIgnoreCase)),
+            _profile.SqlInstallerPath, _profile.UseWindowsAuthentication, _profile.SqlUserName, _profile.SqlPassword,
+            recentSql, recentSql ? _sql.Connections.State(_profile).Detail : "Not verified",
+            _profile.DatabaseName, _databaseConnectionVerified);
+        var body = view.Body;
+        var existingRadio = view.ExistingRadio;
+        var existing = view.Existing;
+        var installRadio = view.InstallRadio;
+        var installer = view.Installer;
+        var browse = view.Browse;
+        var instanceName = view.InstanceName;
+        var install = view.Install;
+        var rescan = view.Rescan;
+        var diagnosticsBox = view.DiagnosticsBox;
+        var diagnostics = view.Diagnostics;
+        var refreshDiagnostics = view.RefreshDiagnostics;
+        var repairConnectivity = view.RepairConnectivity;
+        var authBox = view.AuthBox;
+        var windowsAuth = view.WindowsAuth;
+        var sqlAuth = view.SqlAuth;
+        var user = view.User;
+        var password = view.Password;
+        var generate = view.Generate;
+        var copy = view.Copy;
+        var showPassword = view.ShowPassword;
+        var resetSa = view.ResetSa;
+        var emergency = view.Emergency;
+        var test = view.Test;
+        var verified = view.Verified;
+        var databaseBox = view.DatabaseBox;
+        var databaseName = view.DatabaseName;
+        var verifyDatabase = view.VerifyDatabase;
+        var databaseState = view.DatabaseState;
         databaseName.TextChanged += (_, _) => { _profile.DatabaseName = databaseName.Text.Trim();   databaseState.Text = "Not verified"; databaseState.ForeColor = Color.Firebrick; UpdateNavigationState(); };
         verifyDatabase.Click += async (_, _) => await BusyAsync(verifyDatabase, async () => { await _sql.TestConnectionWithSafeFallbackAsync(_profile);  databaseState.Text = "✓ Administrative SQL verified; database prepared at deploy"; databaseState.ForeColor = Color.ForestGreen; UpdateStepIndicator(); UpdateNavigationState(); });
-        body.Controls.Add(new Label
-        {
-            AutoSize = true,
-            MaximumSize = new Size(820, 0),
-            ForeColor = Color.DimGray,
-            Text = "Emergency recovery temporarily restarts the selected local SQL Server service in restricted single-user mode, grants the current Windows account SQL sysadmin, enables Mixed Mode/sa, then returns SQL Server to normal multi-user mode. Close SSMS and other SQL tools before using it."
-        });
-        _content.Controls.Add(body);
+        _content.Controls.Add(view);
 
         void FitSqlPanels()
         {

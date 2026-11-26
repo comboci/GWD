@@ -1,6 +1,6 @@
 {
-  "version": "277.0.0",
+  "version": "278.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V277-R — A02.6 - IIS management view and dedicated presenter partial; Windows acceptance pending"
+  "commitNote": "V278-R — A02.7 - Installers and SQL views; Windows acceptance pending"
 }

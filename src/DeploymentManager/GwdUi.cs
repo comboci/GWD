@@ -26,6 +26,7 @@ public static class GwdUi
         form.AutoScaleDimensions = new SizeF(96F, 96F);
         form.AutoScaleMode = AutoScaleMode.Dpi;
         form.Font = Body;
+        UI.Controls.ResponsiveLayout.FitWorkingArea(form);
         if (!HighContrast) { form.BackColor = Canvas; form.ForeColor = Ink; }
     }
 

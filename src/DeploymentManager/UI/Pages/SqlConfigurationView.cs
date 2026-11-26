@@ -84,7 +84,7 @@ internal sealed class SqlConfigurationView : UserControl
         Body.Controls.Add(new Label { Height = 8 });
 
         AuthBox = new GroupBox { Text = "Administrative connection", Width = 850, Height = 320, Padding = new Padding(14) };
-        var authPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = false };
+        var authPanel = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         WindowsAuth = new RadioButton { Text = "Windows Authentication", AutoSize = true, Checked = useWindowsAuthentication };
         SqlAuth = new RadioButton { Text = "SQL Authentication", AutoSize = true, Checked = !useWindowsAuthentication };
         User = new TextBox { Text = userName, Width = 170, Enabled = true };
@@ -117,7 +117,7 @@ internal sealed class SqlConfigurationView : UserControl
         AuthBox.Controls.Add(authPanel);
         Body.Controls.Add(AuthBox);
         DatabaseBox = new GroupBox { Text = "Application database", Width = 850, Height = 105, Padding = new Padding(14) };
-        var databasePanel = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false };
+        var databasePanel = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
         DatabaseName = new TextBox { Text = targetDatabaseName, Width = 250 };
         VerifyDatabase = new Button { Text = "Verify database", AutoSize = true };
         DatabaseState = new Label { Text = databaseVerified ? "✓ SQL preflight verified" : "Auto verification pending", AutoSize = true, ForeColor = databaseVerified ? Color.ForestGreen : Color.DimGray, Padding = new Padding(10,7,0,0) };
@@ -132,5 +132,26 @@ internal sealed class SqlConfigurationView : UserControl
             Text = "Emergency recovery temporarily restarts the selected local SQL Server service in restricted single-user mode, grants the current Windows account SQL sysadmin, enables Mixed Mode/sa, then returns SQL Server to normal multi-user mode. Close SSMS and other SQL tools before using it."
         });
         Controls.Add(Body);
+        Body.ClientSizeChanged += (_, _) =>
+        {
+            if (Body.ClientSize.Width <= 0) return;
+            var available = Math.Max(120, Body.ClientSize.Width - Body.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 12);
+            var content = Math.Max(100, available - AuthBox.Padding.Horizontal - 10);
+            foreach (var panel in new[] { DiagnosticsBox, AuthBox, DatabaseBox })
+            {
+                if (panel.Width != available) panel.Width = available;
+            }
+            foreach (var input in new[] { (Control)Existing, Installer })
+            {
+                var width = Math.Min(available - 12, UI.Controls.ResponsiveLayout.Pixels(this, 700));
+                if (input.Width != width) input.Width = width;
+            }
+            foreach (Control item in authPanel.Controls)
+            {
+                if (item is Label or FlowLayoutPanel) item.MaximumSize = new Size(content, 0);
+            }
+            AuthBox.Height = Math.Max(UI.Controls.ResponsiveLayout.Pixels(this, 180), authPanel.PreferredSize.Height + AuthBox.Padding.Vertical + 30);
+            DatabaseBox.Height = Math.Max(UI.Controls.ResponsiveLayout.Pixels(this, 72), databasePanel.PreferredSize.Height + DatabaseBox.Padding.Vertical + 30);
+        };
     }
 }

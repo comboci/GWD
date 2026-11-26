@@ -29,7 +29,7 @@ internal sealed class DeploymentLocationView : UserControl
         _lastCustomRoot = IsDefaultRoot(folder) ? fallbackRoot : folder;
         _useDefault = new CheckBox { Text = @"Use IIS default web root (C:\inetpub\wwwroot) and port 80 — replace the existing IIS site/content on port 80",
             AutoSize = true, Checked = defaultSite, ForeColor = GwdUi.HighContrast ? SystemColors.ControlText : Color.DarkRed };
-        _hostingRoot = new TextBox { Text = folder, Dock = DockStyle.Fill, MinimumSize = new Size(650, 38), Font = GwdUi.Body };
+        _hostingRoot = new TextBox { Text = folder, Dock = DockStyle.Fill, MinimumSize = new Size(150, 0), Font = GwdUi.Body };
         _browse = new Button { Text = "Browse...", Width = 120, Height = 38 };
         var single = string.Equals(layout, "Single Folder", StringComparison.OrdinalIgnoreCase);
         _single = new RadioButton { Text = "Single Folder — always deploy the active site into this exact folder", AutoSize = true, Checked = single };

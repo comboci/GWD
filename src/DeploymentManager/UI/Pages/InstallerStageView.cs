@@ -21,7 +21,7 @@ internal sealed class InstallerStageView : UserControl
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-        var cacheRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false };
+        var cacheRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
         CacheText = new TextBox { Text = installerCache, Width = 570 };
         BrowseCache = new Button { Text = "Choose installer folder...", AutoSize = true };
         OpenCache = new Button { Text = "Open folder", AutoSize = true };
@@ -29,7 +29,7 @@ internal sealed class InstallerStageView : UserControl
         cacheRow.Controls.Add(CacheText); cacheRow.Controls.Add(BrowseCache); cacheRow.Controls.Add(OpenCache);
         root.Controls.Add(cacheRow, 0, 0);
 
-        var versionRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false, Padding = new Padding(0, 8, 0, 4) };
+        var versionRow = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true, Padding = new Padding(0, 8, 0, 4) };
         SqlVersion = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 250 };
         SqlVersion.Items.AddRange(compatibleSqlVersions);
         var currentIndex = SqlVersion.Items.IndexOf(selectedSqlVersion);
@@ -48,9 +48,14 @@ internal sealed class InstallerStageView : UserControl
         versionRow.Controls.Add(DownloadAll);
         root.Controls.Add(versionRow, 0, 1);
 
-        List = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
+        List = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = true, AutoScroll = true };
         List.AutoScroll = true;
         root.Controls.Add(List, 0, 2);
         Controls.Add(root);
+        cacheRow.ClientSizeChanged += (_, _) =>
+        {
+            var width = Math.Max(100, Math.Min(UI.Controls.ResponsiveLayout.Pixels(this, 570), cacheRow.ClientSize.Width - cacheRow.Padding.Horizontal - 18));
+            if (CacheText.Width != width) CacheText.Width = width;
+        };
     }
 }

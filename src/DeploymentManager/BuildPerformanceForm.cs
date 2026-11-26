@@ -11,6 +11,7 @@ public sealed class BuildPerformanceForm : Form
         Height = 720;
         MinimumSize = new Size(820, 560);
         StartPosition = FormStartPosition.CenterParent;
+        GwdUi.ConfigureForm(this);
         KeyPreview = true;
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); } };
         Font = new Font("Segoe UI", 9.5F);

@@ -54,7 +54,7 @@ internal sealed class DeploymentTargetView : UserControl
         Node = new Label { AutoSize = true, ForeColor = Color.DimGray };
         ModeHelp = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(700, 0) };
 
-        var identityRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
+        var identityRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true };
         identityRow.Controls.AddRange(new Control[]
         {
             new Label { Text = "App", AutoSize = true, Padding = new Padding(0, 7, 4, 0) }, AppName,
@@ -64,7 +64,7 @@ internal sealed class DeploymentTargetView : UserControl
         AddRow(form, "Identity", identityRow);
         AddRow(form, "Database behavior", new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(760, 0), Text = "Changing the database name connects the application to a different database; Deployment Manager does not delete or migrate data from the previous database automatically." });
 
-        var targetRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
+        var targetRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = true };
         targetRow.Controls.AddRange(new Control[]
         {
             TargetMode,

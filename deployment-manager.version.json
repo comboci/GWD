@@ -1,6 +1,6 @@
 {
-  "version": "284.0.0",
+  "version": "285.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V284-R — A06 - scoped health snapshot, coalesced single-flight and real evidence time; Windows acceptance pending"
+  "commitNote": "V285-R — A09 - adaptive Wizard and dialogs / PerMonitorV2 working bounds; Windows acceptance pending"
 }

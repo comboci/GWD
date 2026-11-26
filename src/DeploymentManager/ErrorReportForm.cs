@@ -29,15 +29,16 @@ public sealed class ErrorReportForm : Form
         Height = 760;
         MinimumSize = new Size(880, 560);
         StartPosition = FormStartPosition.CenterParent;
+        GwdUi.ConfigureForm(this);
         KeyPreview = true;
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); } };
 
         var top = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
-            Height = 48,
+            AutoSize = true,
             Padding = new Padding(8),
-            WrapContents = false
+            WrapContents = true
         };
         var dump = new Button { Text = "Dump Error Report", AutoSize = true, Height = 30 };
         var openFolder = new Button { Text = "Open Report Folder", AutoSize = true, Height = 30 };

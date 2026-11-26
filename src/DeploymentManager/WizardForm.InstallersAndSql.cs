@@ -260,11 +260,9 @@ public sealed partial class WizardForm
         var instanceName = view.InstanceName;
         var install = view.Install;
         var rescan = view.Rescan;
-        var diagnosticsBox = view.DiagnosticsBox;
         var diagnostics = view.Diagnostics;
         var refreshDiagnostics = view.RefreshDiagnostics;
         var repairConnectivity = view.RepairConnectivity;
-        var authBox = view.AuthBox;
         var windowsAuth = view.WindowsAuth;
         var sqlAuth = view.SqlAuth;
         var user = view.User;
@@ -276,7 +274,6 @@ public sealed partial class WizardForm
         var emergency = view.Emergency;
         var test = view.Test;
         var verified = view.Verified;
-        var databaseBox = view.DatabaseBox;
         var databaseName = view.DatabaseName;
         var verifyDatabase = view.VerifyDatabase;
         var databaseState = view.DatabaseState;
@@ -284,15 +281,7 @@ public sealed partial class WizardForm
         verifyDatabase.Click += async (_, _) => await BusyAsync(verifyDatabase, async () => { await _sql.TestConnectionWithSafeFallbackAsync(_profile);  databaseState.Text = "✓ Administrative SQL verified; database prepared at deploy"; databaseState.ForeColor = Color.ForestGreen; UpdateStepIndicator(); UpdateNavigationState(); });
         _content.Controls.Add(view);
 
-        void FitSqlPanels()
-        {
-            var available = Math.Max(850, body.ClientSize.Width - body.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 12);
-            diagnosticsBox.Width = available;
-            authBox.Width = available;
-            databaseBox.Width = available;
-        }
-        body.ClientSizeChanged += (_, _) => FitSqlPanels();
-        BeginInvoke(FitSqlPanels);
+
 
         void InvalidateSqlVerification()
         {

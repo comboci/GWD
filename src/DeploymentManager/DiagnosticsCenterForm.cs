@@ -517,7 +517,18 @@ public sealed partial class DiagnosticsCenterForm : Form
     private TabPage CreateFilesTab(string title, string folder, string pattern)
     {
         var tab = new TabPage(title);
-        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterDistance = 430 };
+        var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical };
+        var splitterInitialized = false;
+        void FitInitialSplitter()
+        {
+            var available = split.ClientSize.Width - split.SplitterWidth;
+            if (splitterInitialized || !split.IsHandleCreated || available <= split.Panel1MinSize + split.Panel2MinSize) return;
+            var preferred = Math.Min(UI.Controls.ResponsiveLayout.Pixels(split, 430), (int)(available * 0.4));
+            split.SplitterDistance = Math.Clamp(preferred, split.Panel1MinSize, available - split.Panel2MinSize);
+            splitterInitialized = true;
+        }
+        split.HandleCreated += (_, _) => FitInitialSplitter();
+        split.ClientSizeChanged += (_, _) => FitInitialSplitter();
         var list = new ListBox { Dock = DockStyle.Fill, Font = new Font("Consolas", 9F) };
         var preview = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, WordWrap = false, Font = new Font("Consolas", 9F) };
         var listGeneration = 0;

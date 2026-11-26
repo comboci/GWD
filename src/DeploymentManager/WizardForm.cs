@@ -306,7 +306,7 @@ public sealed partial class WizardForm : Form
         {
             var label = new Button
             {
-                Text = step, AccessibleName = step, TabStop = true, AutoSize = false,
+                Text = step, AccessibleName = step, TabStop = true, AutoSize = false, AutoEllipsis = true,
                 Width = 212, Height = 52, Padding = new Padding(8, 3, 5, 3),
                 Margin = new Padding(2, 2, 2, 4), TextAlign = ContentAlignment.MiddleLeft,
                 Font = GwdUi.Body, Cursor = Cursors.Hand
@@ -320,6 +320,13 @@ public sealed partial class WizardForm : Form
         {
             var width = _stepPanel.ClientSize.Width - _stepPanel.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 6;
             if (width > 0) foreach (var button in _stepLabels) button.Width = width;
+        };
+        root.ClientSizeChanged += (_, _) =>
+        {
+            if (root.ClientSize.Width <= 0) return;
+            var sidebar = Math.Clamp(root.ClientSize.Width / 5, UI.Controls.ResponsiveLayout.Pixels(this, 124),
+                UI.Controls.ResponsiveLayout.Pixels(this, 246));
+            if (root.ColumnStyles[0].Width != sidebar) root.ColumnStyles[0].Width = sidebar;
         };
         root.Controls.Add(_stepPanel, 0, 0);
         root.SetRowSpan(_stepPanel, 2);
@@ -751,7 +758,7 @@ public sealed partial class WizardForm : Form
             // Never label an earlier step as passed solely because of position.
             if (button.Text != caption) button.Text = caption;
             button.AccessibleDescription = state + "; checks are not deployment authorization.";
-            _healthTip.SetToolTip(button, state);
+            _healthTip.SetToolTip(button, _steps[i] + " — " + state);
             if (!GwdUi.HighContrast)
             {
                 button.FlatAppearance.BorderColor = current ? GwdUi.Accent : GwdUi.Border;

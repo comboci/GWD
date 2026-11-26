@@ -37,13 +37,21 @@ public sealed partial class WizardForm
         {
             if (_operationRunning || _autoDeployRunning || _dependencySyncRunning) return;
             using var dialog = new Form { Text = "Review previous deployment", Width = 680, Height = 260, StartPosition = FormStartPosition.CenterParent };
-            var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(12) };
+            GwdUi.ConfigureForm(dialog);
+            var layout = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false,
+                AutoScroll = true, Padding = new Padding(12) };
             var explanation = new Label { AutoSize = true, MaximumSize = new Size(620, 0), Text = "Enter the prior resolved attempt ID from the diagnostic report. Independently verify the database and backup before confirming. IIS, HTTP, API and frontend identity will be checked again. Unresolved journals remain blocked." };
             var owner = new TextBox { Width = 580 };
             var verified = new CheckBox { AutoSize = true, Text = "I verified the database and backup/recovery evidence." };
             var confirm = new Button { Text = "Verify and archive markers", AutoSize = true, DialogResult = DialogResult.OK };
             layout.Controls.AddRange(new Control[] { explanation, owner, verified, confirm });
             dialog.Controls.Add(layout);
+            layout.ClientSizeChanged += (_, _) =>
+            {
+                var width = Math.Max(140, layout.ClientSize.Width - layout.Padding.Horizontal - SystemInformation.VerticalScrollBarWidth - 8);
+                explanation.MaximumSize = verified.MaximumSize = new Size(width, 0);
+                owner.Width = Math.Min(UI.Controls.ResponsiveLayout.Pixels(dialog, 580), width);
+            };
             if (dialog.ShowDialog(this) != DialogResult.OK || !verified.Checked || string.IsNullOrWhiteSpace(owner.Text)) return;
             _operationRunning = true;
             recoveryReview.Enabled = false;

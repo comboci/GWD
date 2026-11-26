@@ -1,6 +1,6 @@
 {
-  "version": "268.0.0",
+  "version": "269.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V268 — preserve structured history and export active session logs"
+  "commitNote": "V269 — truthful deployment status, safe SMTP diagnostics, review lifecycle and capacity guard"
 }

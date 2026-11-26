@@ -234,7 +234,7 @@ public sealed partial class WizardForm : Form
             BeginInvoke((Action)(() =>
             {
                 // A scheduled health callback can arrive after the form closes.
-                if (IsDisposed || Disposing || _visualResourcesStopped) return;
+                if (IsDisposed || Disposing || _visualResourcesStopped || !_healthMonitor.IsCurrent(snapshot)) return;
                 _iisHealth.Text = snapshot.IisInstalled ? "✓ IIS installed" : "○ IIS unverified";
                 _iisHealth.ForeColor = snapshot.IisInstalled ? Color.ForestGreen : Color.DarkOrange;
                 var iisDetail = snapshot.IisInstalled
@@ -242,19 +242,19 @@ public sealed partial class WizardForm : Form
                     : "IIS not verified/available. A SQL-only update is not an IIS health check.";
                 _healthTip.SetToolTip(_iisHealth, iisDetail);
 
-                var sqlState = _sql.Connections.State(_profile);
-                var sqlConnected = snapshot.SqlOk == true && sqlState.Verified;
+                var sqlConnected = snapshot.SqlOk == true;
                 _sqlHealth.Text = sqlConnected ? "✓ SQL connected" : snapshot.SqlOk == false ? "✕ SQL unavailable" : "○ SQL unchecked";
                 _sqlHealth.ForeColor = sqlConnected ? Color.ForestGreen : snapshot.SqlOk == false ? Color.Firebrick : Color.DimGray;
-                _healthTip.SetToolTip(_sqlHealth, SecretRedactor.Redact(sqlState.Detail) + " — SQL connection is not proof of database/schema health.");
+                _healthTip.SetToolTip(_sqlHealth, SecretRedactor.Redact(snapshot.SqlDetail) + " — SQL connection is not proof of database/schema health.");
 
-                var httpResponded = snapshot.HttpStatus is >= 200 and < 400;
+                var httpResponded = snapshot.HttpStatus is >= 200 and < 300;
                 _httpHealth.Text = snapshot.HttpStatus is null ? "○ HTTP unchecked" : $"HTTP {snapshot.HttpStatus} (probe)";
                 _httpHealth.ForeColor = snapshot.HttpStatus is null ? Color.Gray : httpResponded ? Color.DarkGreen : Color.Firebrick;
                 _healthTip.SetToolTip(_httpHealth, SecretRedactor.Redact(snapshot.HttpDetail) +
                     " — A localhost HTTP response does NOT verify IIS site ownership, API/frontend version, or release identity.");
-                _healthChecked.Text = $"Checked: {snapshot.CheckedAt:HH:mm:ss}";
-                _healthTip.SetToolTip(_healthChecked, "Timestamp of last health snapshot; results may be stale and are not proof of a successful deployment.");
+                _healthChecked.Text = snapshot.CheckedAt == default ? "Full health: not checked" : $"Checked: {snapshot.CheckedAt:HH:mm:ss}";
+                static string TimeLabel(DateTime? at) => at?.ToString("HH:mm:ss") ?? "not checked";
+                _healthTip.SetToolTip(_healthChecked, $"IIS: {TimeLabel(snapshot.IisCheckedAt)}; SQL: {TimeLabel(snapshot.SqlCheckedAt)}; HTTP: {TimeLabel(snapshot.HttpCheckedAt)}. Health is not deployment/recovery proof.");
                 UpdateStepIndicator();
             }));
         }
@@ -841,6 +841,7 @@ public sealed partial class WizardForm : Form
 
     private void UpdateNavigationState()
     {
+        _healthMonitor.SubmitProfile(_profile);
         if (IsDisposed || Disposing || _visualResourcesStopped) return;
         _back.Enabled = _pageIndex > 0;
         var navigationSourceReady = EnsureNavigationSourceReadiness();
@@ -1340,7 +1341,7 @@ public sealed partial class WizardForm : Form
             if (_sqlInstances.Count > 0 && string.IsNullOrWhiteSpace(_profile.SqlInstance)) _profile.SqlInstance = _sqlInstances[0].ServerName;
             if (!string.IsNullOrWhiteSpace(_profile.SqlInstance) && !string.IsNullOrWhiteSpace(_profile.DatabaseName))
             {
-                try { await _sql.TestConnectionWithSafeFallbackAsync(_profile, ct); ct.ThrowIfCancellationRequested(); _healthMonitor.ReportSqlSuccess("Background SQL/database verification passed"); }
+                try { await _sql.TestConnectionWithSafeFallbackAsync(_profile, ct); ct.ThrowIfCancellationRequested(); _healthMonitor.ReportSqlSuccess("Background SQL administrative connection verified", _profile); }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex) {  AppendLog("[AUTO-VERIFY] SQL/database needs attention: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message)); }
             }

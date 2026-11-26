@@ -249,7 +249,7 @@ public sealed partial class WizardForm
         var view = new UI.Pages.SqlConfigurationView(_sqlInstances.Cast<object>().ToArray(),
             _sqlInstances.FindIndex(x => string.Equals(x.ServerName, _profile.SqlInstance, StringComparison.OrdinalIgnoreCase)),
             _profile.SqlInstallerPath, _profile.UseWindowsAuthentication, _profile.SqlUserName, _profile.SqlPassword,
-            recentSql, recentSql ? _sql.Connections.State(_profile).Detail : "Not verified",
+            recentSql, recentSql ? _healthMonitor.Latest?.SqlDetail ?? "Not verified" : "Not verified",
             _profile.DatabaseName, _databaseConnectionVerified);
         var body = view.Body;
         var existingRadio = view.ExistingRadio;
@@ -466,7 +466,7 @@ public sealed partial class WizardForm
             sqlAuth.Checked = true;
             
             await _sql.TestConnectionWithSafeFallbackAsync(_profile);
-            _healthMonitor.ReportSqlSuccess(_sql.Connections.State(_profile).Detail);
+            _healthMonitor.ReportSqlSuccess(_sql.Connections.State(_profile).Detail, _profile);
             verified.Text = "Verified — sa login works";
             verified.ForeColor = Color.ForestGreen;
             await RefreshDiagnosticsAsync();
@@ -497,7 +497,7 @@ public sealed partial class WizardForm
             sqlAuth.Checked = true;
             
             await _sql.TestConnectionWithSafeFallbackAsync(_profile);
-            _healthMonitor.ReportSqlSuccess("Emergency recovery completed; sa verified");
+            _healthMonitor.ReportSqlSuccess("Emergency recovery completed; sa verified", _profile);
             verified.Text = "Verified — emergency recovery completed; sa works";
             verified.ForeColor = Color.ForestGreen;
             await RefreshDiagnosticsAsync();
@@ -513,7 +513,7 @@ public sealed partial class WizardForm
             _profile.SqlPassword = password.Text;
             await _sql.TestConnectionWithSafeFallbackAsync(_profile);
             
-            _healthMonitor.ReportSqlSuccess(_sql.Connections.State(_profile).Detail);
+            _healthMonitor.ReportSqlSuccess(_sql.Connections.State(_profile).Detail, _profile);
             verified.Text = _sql.Connections.State(_profile).Detail;
             verified.ForeColor = Color.ForestGreen;
             await RefreshDiagnosticsAsync();
@@ -540,7 +540,7 @@ public sealed partial class WizardForm
                 databaseState.Text = _databaseConnectionVerified ? "✓ Administrative SQL verified; database prepared at deploy" : "Database name required";
                 databaseState.ForeColor = _databaseConnectionVerified ? Color.ForestGreen : Color.Firebrick;
                 UpdateStepIndicator();
-                _healthMonitor.ReportSqlSuccess(_sql.Connections.State(_profile).Detail);
+                _healthMonitor.ReportSqlSuccess(_sql.Connections.State(_profile).Detail, _profile);
                 verified.Text = _sql.Connections.State(_profile).Detail;
                 verified.ForeColor = Color.ForestGreen;
                 await RefreshDiagnosticsAsync();

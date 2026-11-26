@@ -3,7 +3,7 @@
   "branch": "fix/ui-performance-phase-01",
   "baselineVersion": "V269-R",
   "baselineCommit": "0121217a13057d7c832a9a9ddd7aa9acf5a099cc",
-  "candidate": "V283-R",
+  "candidate": "V284-R",
   "state": "IN_PROGRESS",
   "packs": {
     "GWD-A01": "TEST_PENDING",
@@ -11,7 +11,7 @@
     "GWD-A03": "TEST_PENDING",
     "GWD-A04": "TEST_PENDING",
     "GWD-A05": "TEST_PENDING",
-    "GWD-A06": "PENDING",
+    "GWD-A06": "TEST_PENDING",
     "GWD-A09": "PENDING",
     "GWD-A07": "PENDING",
     "GWD-A08": "PENDING",
@@ -31,9 +31,10 @@
     "A03.1 - ordered cross-instance settings mutation and credential generations",
     "A03.2 - background queue with debounce, immutable changes and explicit opt-out fencing",
     "A04 - verified source-prefix incremental history index and paging",
-    "A05 - asynchronous source preview, same-path invalidation and generation guards"
+    "A05 - asynchronous source preview, same-path invalidation and generation guards",
+    "A06 - scoped health snapshot, coalesced single-flight and real evidence time"
   ],
-  "nextSourcePackage": "GWD-A06",
+  "nextSourcePackage": "GWD-A09",
   "build": "NOT_RUN_POLICY",
   "tests": "NOT_RUN_POLICY",
   "windowsRuntime": "NOT_RUN_OWNER",

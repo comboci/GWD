@@ -1,6 +1,6 @@
 {
-  "version": "283.0.0",
+  "version": "284.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V283-R — A05 - asynchronous source preview, same-path invalidation and generation guards; Windows acceptance pending"
+  "commitNote": "V284-R — A06 - scoped health snapshot, coalesced single-flight and real evidence time; Windows acceptance pending"
 }

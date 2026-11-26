@@ -71,6 +71,18 @@ public sealed class DeploymentProfile
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GenericWebDeploymentManager", "Repository");
     }
 
+    // The health consumer reads only scalar fields and never gets the UI profile.
+    internal DeploymentProfile SnapshotForHealth()
+    {
+        var copy = (DeploymentProfile)MemberwiseClone();
+        copy.PreserveProductionFiles = PreserveProductionFiles?.ToArray() ?? [];
+        copy.SqlInstance ??= string.Empty;
+        copy.DatabaseName ??= string.Empty;
+        copy.HealthPath ??= string.Empty;
+        copy._remotePassword = string.Empty; // the loopback/SQL monitor never uses remote credentials
+        return copy;
+    }
+
     public string SqlExpressVersion { get; set; } = "SQL Server 2019 Express";
 }
 

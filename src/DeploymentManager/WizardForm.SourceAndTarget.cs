@@ -53,194 +53,183 @@ public sealed partial class WizardForm
         _exportSourceAction = exportSource;
         _content.Controls.Add(view);
 
-        void RefreshPreparedPublishValidation()
-        {
-            var prepared = string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase);
-            preparedPublish.Enabled = browsePreparedPublish.Enabled = prepared;
-            repository.Enabled = browseRepository.Enabled = workspace.Enabled = browseWorkspace.Enabled = dependencyMode.Enabled = !prepared;
-            if (!prepared) { preparedValidation.Text = "Not applicable for source-build mode."; preparedValidation.ForeColor = Color.DimGray; return; }
-            _profile.ReadyPublishFolder = preparedPublish.Text.Trim();
-            var validation = DeploymentService.ValidatePreparedPublish(_profile.ReadyPublishFolder);
-            RememberNavigationSourceReadiness(true, _profile.ReadyPublishFolder, validation.Ok);
-            preparedValidation.Text = validation.Detail;
-            preparedValidation.ForeColor = validation.Ok ? Color.ForestGreen : Color.Firebrick;
-            if (validation.Ok && string.IsNullOrWhiteSpace(app.Text) && !string.IsNullOrWhiteSpace(validation.ApplicationBinary))
-            {
-                var inferred = Path.GetFileNameWithoutExtension(validation.ApplicationBinary);
-                if (inferred.EndsWith(".Api", StringComparison.OrdinalIgnoreCase)) inferred = inferred[..^4];
-                app.Text = inferred;
-                var safe = new string(inferred.Where(char.IsLetterOrDigit).ToArray());
-                if (string.IsNullOrWhiteSpace(site.Text)) site.Text = safe;
-                if (string.IsNullOrWhiteSpace(database.Text)) database.Text = safe;
-            }
-            _profile.RequiresNode = false;
-        }
-
-        void Detect(bool preserveIdentity = false)
-        {
-            _profile.SourceFolder = source.Text.Trim();
-            if (string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
-            {
-                // A prebuilt artifact does not require a source project.
-                // Do not erase or infer deployment identity from an absent source.
-                detectedRoot.Text = "Source project not required in Prepared IIS Publish mode.";
-                detectedRoot.ForeColor = Color.DimGray;
-                RefreshPreparedPublishValidation();
-                UpdateNavigationState();
-                return;
-            }
-            var api = Directory.Exists(_profile.SourceFolder) ? _environment.DetectApiProject(_profile.SourceFolder) : null;
-            RememberNavigationSourceReadiness(false, _profile.SourceFolder, !string.IsNullOrWhiteSpace(api));
-            if (api is null)
-            {
-                _profile.ApiProjectPath = string.Empty;
-                detectedRoot.Text = "No ASP.NET Core Web project detected."; detectedRoot.ForeColor = Color.Firebrick;
-                if (!preserveIdentity) app.Text = site.Text = database.Text = string.Empty;
-            }
-            else
-            {
-                _profile.ApiProjectPath = api;
-                var root = DeploymentService.ResolveCanonicalSourceRoot(_profile.SourceFolder, api);
-                detectedRoot.Text = root + "\r\nWeb project: " + api; detectedRoot.ForeColor = Color.ForestGreen;
-                var inferred = InferApplicationName(_profile.SourceFolder, api);
-                app.Text = preserveIdentity && !string.IsNullOrWhiteSpace(_profile.ApplicationName) ? _profile.ApplicationName : inferred;
-                var safe = new string(inferred.Where(char.IsLetterOrDigit).ToArray());
-                site.Text = preserveIdentity && !string.IsNullOrWhiteSpace(_profile.SiteName) ? _profile.SiteName : safe;
-                database.Text = preserveIdentity && !string.IsNullOrWhiteSpace(_profile.DatabaseName) ? _profile.DatabaseName : safe;
-            }
-            UpdateNavigationState();
-        }
-
-        static bool IsGeneratedFrontendCandidate(string root, string file)
-        {
-            var rel = "/" + Path.GetRelativePath(root, file).Replace('\\','/').Trim('/') + "/";
-            string[] excluded = { "/node_modules/", "/bin/", "/obj/", "/dist/", "/build/", "/out/", "/.vite/", "/iis-publish/", "/publish/" };
-            return excluded.Any(x => rel.Contains(x, StringComparison.OrdinalIgnoreCase));
-        }
-
-        // Only one source preflight may publish results for the current page.
-        // Cancellation does not interrupt every filesystem API, but it prevents stale
-        // results from being applied after a source/mode change or page disposal.
         CancellationTokenSource? sourcePreflightCts = null;
         var sourcePreflightGeneration = 0;
+        FileSystemWatcher? watcher = null;
+        string? watchedPath = null;
+        bool watcherPrepared = false;
+        var watchRefreshQueued = 0;
 
-        void CancelSourcePreflight()
+        void StopSourcePreflight()
         {
             sourcePreflightGeneration++;
             sourcePreflightCts?.Cancel();
         }
 
-        sourceTestResult.Disposed += (_, _) => CancelSourcePreflight();
-
-        void RunSourceTests()
+        void ResetWatcher(string folder, bool prepared)
         {
-            CancelSourcePreflight();
+            if (watchedPath == folder && watcherPrepared == prepared && watcher is not null) return;
+            watcher?.Dispose();
+            watcher = null;
+            watchedPath = folder;
+            watcherPrepared = prepared;
+            if (string.IsNullOrWhiteSpace(folder) || folder.StartsWith(@"\\", StringComparison.Ordinal)) return;
+            void PostRefresh()
+            {
+                if (Interlocked.Exchange(ref watchRefreshQueued, 1) != 0) return;
+                try
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        Interlocked.Exchange(ref watchRefreshQueued, 0);
+                        if (!IsDisposed && !view.IsDisposed && !view.Disposing && _pageIndex == 0 && watchedPath == folder &&
+                            watcherPrepared == prepared && CanNavigateInteractively())
+                            RunSourcePreflight(preserveIdentity: true);
+                    }));
+                }
+                catch (InvalidOperationException) { Interlocked.Exchange(ref watchRefreshQueued, 0); }
+            }
+            try
+            {
+                // Only start after successful background path verification. No
+                // watcher is ever cached across page disposal or path changes.
+                var candidate = new FileSystemWatcher(folder) { IncludeSubdirectories = !prepared,
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.Size };
+                watcher = candidate;
+                void OnChange(object sender, FileSystemEventArgs e)
+                {
+                    if (!ShouldIgnorePreviewChange(folder, e.FullPath) && (prepared || e.ChangeType != WatcherChangeTypes.Changed ||
+                        e.FullPath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
+                        e.FullPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase) ||
+                        e.FullPath.EndsWith("package.json", StringComparison.OrdinalIgnoreCase) ||
+                        e.FullPath.EndsWith("index.html", StringComparison.OrdinalIgnoreCase) ||
+                        Path.GetFileName(e.FullPath).StartsWith("vite.config.", StringComparison.OrdinalIgnoreCase)))
+                        PostRefresh();
+                }
+                candidate.Changed += OnChange;
+                candidate.Created += OnChange;
+                candidate.Deleted += OnChange;
+                candidate.Renamed += (_, _) => PostRefresh();
+                candidate.Error += (_, _) => PostRefresh();
+                candidate.EnableRaisingEvents = true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                watcher?.Dispose();
+                watcher = null;
+                InternalDiagnostics.Record(ex, "Watch current source preview");
+            }
+        }
+
+        view.Disposed += (_, _) =>
+        {
+            StopSourcePreflight();
+            watcher?.Dispose();
+            watcher = null;
+        };
+
+        void RunSourcePreflight(bool preserveIdentity = true, bool followWithEnvironment = false)
+        {
+            StopSourcePreflight();
+            var mode = _profile.BuildMode;
+            var selectedSource = _profile.SourceFolder = source.Text.Trim();
+            var selectedPrepared = _profile.ReadyPublishFolder = preparedPublish.Text.Trim();
+            var prepared = string.Equals(mode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase);
+            var input = prepared ? selectedPrepared : selectedSource;
+            var expected = (App: app.Text, Site: site.Text, Db: database.Text);
+            preparedPublish.Enabled = browsePreparedPublish.Enabled = prepared;
+            repository.Enabled = browseRepository.Enabled = workspace.Enabled = browseWorkspace.Enabled = dependencyMode.Enabled = !prepared;
+            if (watchedPath != input || watcherPrepared != prepared)
+            {
+                watcher?.Dispose();
+                watcher = null;
+                watchedPath = null;
+            }
+            RememberNavigationSourceReadiness(prepared, input, false);
+            preparedValidation.Text = prepared ? "Checking prepared publish..." : "Not applicable for source-build mode.";
+            preparedValidation.ForeColor = Color.DimGray;
+            detectedRoot.Text = prepared ? "Source project not required in Prepared IIS Publish mode." : "Checking the selected source...";
+            detectedRoot.ForeColor = Color.DimGray;
+            // Disable readiness until the newest background result is accepted,
+            // even for a recheck of the same path.
+            UpdateNavigationState();
+            if (input.Length == 0)
+            {
+                sourceTestResult.Text = "Waiting for a source or prepared publish folder...";
+                sourceTestResult.ForeColor = Color.DimGray;
+                return;
+            }
             var request = new CancellationTokenSource();
             sourcePreflightCts = request;
             var generation = sourcePreflightGeneration;
-            var selectedMode = _profile.BuildMode;
-            var selectedSource = source.Text.Trim();
-            var selectedPrepared = preparedPublish.Text.Trim();
-            sourceTestResult.Text = "Running source preflight tests...";
+            sourceTestResult.Text = "Running source preflight checks...";
             sourceTestResult.ForeColor = Color.RoyalBlue;
-            _ = RunSourceTestsAsync(request, generation, selectedMode, selectedSource, selectedPrepared);
-        }
+            _ = RunSourceTestsAsync();
 
-        async Task RunSourceTestsAsync(CancellationTokenSource request, int generation, string mode, string selectedSource, string selectedPrepared)
-        {
-            try
-            {
-                // Coalesce consecutive programmatic TextChanged events and large-folder selections.
-                await Task.Delay(200, request.Token);
-                // Worker code never reads or writes WinForms controls or mutable profile fields.
-                var result = await Task.Run(
-                    () => InspectSourcePreflight(_environment, mode, selectedSource, selectedPrepared, request.Token),
-                    request.Token);
-                if (request.IsCancellationRequested || generation != sourcePreflightGeneration ||
-                    IsDisposed || Disposing || sourceTestResult.IsDisposed || _pageIndex != 0 ||
-                    !string.Equals(mode, _profile.BuildMode, StringComparison.Ordinal) ||
-                    !string.Equals(selectedSource, source.Text.Trim(), StringComparison.Ordinal) ||
-                    (string.Equals(mode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase) &&
-                     !string.Equals(selectedPrepared, preparedPublish.Text.Trim(), StringComparison.Ordinal)))
-                    return;
+            bool Current() => !request.IsCancellationRequested && generation == sourcePreflightGeneration &&
+                !IsDisposed && !Disposing && !view.IsDisposed && !view.Disposing && _pageIndex == 0 &&
+                string.Equals(mode, _profile.BuildMode, StringComparison.Ordinal) &&
+                string.Equals(input, (prepared ? preparedPublish.Text : source.Text).Trim(), StringComparison.Ordinal);
 
-                sourceTestResult.Text = string.Join(Environment.NewLine, result.Lines);
-                sourceTestResult.ForeColor = result.Failures == 0 ? Color.ForestGreen : Color.Firebrick;
-                if (string.Equals(mode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
-                    RefreshPreparedPublishValidation();
-                else
-                    AppendLog($"Source preflight completed: {Math.Max(0, result.Lines.Length - result.Failures)} passed, {result.Failures} failed.");
-            }
-            catch (OperationCanceledException) when (request.IsCancellationRequested) { }
-            catch (Exception ex)
+            async Task RunSourceTestsAsync()
             {
-                InternalDiagnostics.Record(ex, "Source preflight background task");
-                if (!request.IsCancellationRequested && generation == sourcePreflightGeneration &&
-                    !IsDisposed && !Disposing && !sourceTestResult.IsDisposed && _pageIndex == 0)
+                try
                 {
+                    await Task.Delay(200, request.Token);
+                    var result = await InspectSourcePreviewAsync(prepared, input, request.Token);
+                    if (!Current()) return;
+                    if (result.Ready) ResetWatcher(input, prepared);
+                    if (prepared)
+                    {
+                        preparedValidation.Text = result.Detail;
+                        preparedValidation.ForeColor = result.Ready ? Color.ForestGreen : Color.Firebrick;
+                        _profile.RequiresNode = false;
+                    }
+                    else
+                    {
+                        _profile.ApiProjectPath = result.ProjectFile ?? string.Empty;
+                        if (result.ProjectFile is not null) _profile.TargetFrameworkMajor = result.FrameworkMajor;
+                        _profile.RequiresNode = result.RequiresNode;
+                        detectedRoot.Text = result.ProjectFile is null ? result.Detail : result.SourceRoot + "\r\nWeb project: " + result.ProjectFile;
+                        detectedRoot.ForeColor = result.Ready ? Color.ForestGreen : Color.Firebrick;
+                    }
+                    if (result.SuggestedIdentity is { Length: > 0 } inferred)
+                    {
+                        var simple = new string(inferred.Where(char.IsLetterOrDigit).ToArray());
+                        if (app.Text == expected.App && (string.IsNullOrWhiteSpace(app.Text) || (!preserveIdentity && !prepared))) app.Text = inferred;
+                        if (site.Text == expected.Site && (string.IsNullOrWhiteSpace(site.Text) || (!preserveIdentity && !prepared))) site.Text = simple;
+                        if (database.Text == expected.Db && (string.IsNullOrWhiteSpace(database.Text) || (!preserveIdentity && !prepared))) database.Text = simple;
+                    }
+                    sourceTestResult.Text = string.Join(Environment.NewLine, result.Lines);
+                    sourceTestResult.ForeColor = result.Failures == 0 ? Color.ForestGreen : Color.Firebrick;
+                    RememberNavigationSourceReadiness(prepared, input, result.Ready);
+                    UpdateNavigationState();
+                    if (!prepared) AppendLog($"Source preflight completed: {Math.Max(0, result.Lines.Length - result.Failures)} passed, {result.Failures} failed.");
+                    if (followWithEnvironment && result.Ready && Current() && CanNavigateInteractively())
+                    {
+                        CancelBackgroundVerification();
+                        using var verification = CancellationTokenSource.CreateLinkedTokenSource(request.Token);
+                        _backgroundVerifyCts = verification;
+                        try { await RunBackgroundAutoVerificationAsync(verification.Token); }
+                        finally { if (ReferenceEquals(_backgroundVerifyCts, verification)) _backgroundVerifyCts = null; }
+                    }
+                }
+                catch (OperationCanceledException) when (request.IsCancellationRequested) { }
+                catch (Exception ex)
+                {
+                    InternalDiagnostics.Record(ex, "Source preflight background task");
+                    if (!Current()) return;
                     sourceTestResult.Text = "FAIL — " + SecretRedactor.Redact(ex.Message);
                     sourceTestResult.ForeColor = Color.Firebrick;
+                    RememberNavigationSourceReadiness(prepared, input, false);
+                    UpdateNavigationState();
                 }
-            }
-            finally
-            {
-                if (ReferenceEquals(sourcePreflightCts, request)) sourcePreflightCts = null;
-                request.Dispose();
-            }
-        }
-
-        static (string[] Lines, int Failures) InspectSourcePreflight(
-            EnvironmentService environment, string mode, string selectedSource, string selectedPrepared, CancellationToken ct)
-        {
-            var lines = new List<string>();
-            var failures = 0;
-            try
-            {
-                ct.ThrowIfCancellationRequested();
-                if (string.Equals(mode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
+                finally
                 {
-                    var validation = DeploymentService.ValidatePreparedPublish(selectedPrepared);
-                    ct.ThrowIfCancellationRequested();
-                    lines.Add(validation.Ok ? "PASS — " + validation.Detail : "FAIL — " + validation.Detail);
-                    if (!validation.Ok) failures++;
-                    return (lines.ToArray(), failures);
+                    if (ReferenceEquals(sourcePreflightCts, request)) sourcePreflightCts = null;
+                    request.Dispose();
                 }
-                if (!Directory.Exists(selectedSource))
-                    throw new DirectoryNotFoundException("Select an existing source folder first.");
-                var api = environment.DetectApiProject(selectedSource);
-                ct.ThrowIfCancellationRequested();
-                var structureOk = !string.IsNullOrWhiteSpace(api);
-                lines.Add($"{(structureOk ? "PASS" : "FAIL")} — Web project structure: {(structureOk ? api : "ASP.NET Core Web .csproj not found")}");
-                if (!structureOk) failures++;
-                var frameworkOk = structureOk && File.Exists(api);
-                var major = frameworkOk ? environment.DetectTargetFrameworkMajor(api!) : 0;
-                lines.Add($"{(frameworkOk ? "PASS" : "FAIL")} — Target framework: {(frameworkOk ? ".NET " + major : "cannot detect without Web project")}");
-                if (!frameworkOk) failures++;
-                ct.ThrowIfCancellationRequested();
-                var required = environment.DetectNodeRequirement(selectedSource, api ?? string.Empty);
-                var packages = Directory.EnumerateFiles(selectedSource, "package.json", SearchOption.AllDirectories)
-                    .Where(p => { ct.ThrowIfCancellationRequested(); return !IsGeneratedFrontendCandidate(selectedSource, p); })
-                    .Take(10).ToArray();
-                var viteRoots = packages.Select(Path.GetDirectoryName).Where(p => !string.IsNullOrWhiteSpace(p))
-                    .Where(p => File.Exists(Path.Combine(p!, "index.html")) &&
-                        Directory.EnumerateFiles(p!, "vite.config.*", SearchOption.TopDirectoryOnly).Any())
-                    .ToArray();
-                ct.ThrowIfCancellationRequested();
-                lines.Add($"PASS — Frontend / Node assets: {(required ? "detected" : "not required")} ({packages.Length} source package.json candidate(s))");
-                if (required && viteRoots.Length > 0) lines.Add($"PASS — Frontend root: {viteRoots[0]}");
-                else if (required) { lines.Add("FAIL — Frontend detected but no complete source frontend root (index.html + vite.config.*) was found."); failures++; }
-                _ = Directory.EnumerateFileSystemEntries(selectedSource, "*", SearchOption.TopDirectoryOnly).Take(1).ToArray();
-                ct.ThrowIfCancellationRequested();
-                lines.Add("PASS — Source access/readability");
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-            catch (Exception ex)
-            {
-                failures++;
-                InternalDiagnostics.Record(ex, "Source preflight tests");
-                lines.Add("FAIL — " + SecretRedactor.Redact(ex.Message));
-            }
-            return (lines.ToArray(), failures);
         }
 
         void ApplyDependencyMode(bool invalidate = true)
@@ -341,29 +330,32 @@ public sealed partial class WizardForm
             catch (Exception ex) { InternalDiagnostics.Record(ex, "Clean source export"); MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Clean Source Export", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         };
 
-        browse.Click += (_, _) =>
+        browse.Click += async (_, _) =>
         {
-            using var dialog = new FolderBrowserDialog { Description = "Select the new project release/source folder", SelectedPath = BrowseStartFolder(source.Text, BrowseContext.Source) };
+            if (!CanNavigateInteractively()) return;
+            var startingFolder = await ResolveBrowseStartAsync(source.Text, BrowseContext.Source);
+            if (view.IsDisposed || view.Disposing || !CanNavigateInteractively()) return;
+            using var dialog = new FolderBrowserDialog { Description = "Select the new project release/source folder", SelectedPath = startingFolder };
             if (dialog.ShowDialog(this) == DialogResult.OK) { source.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Source); }
         };
-        browsePreparedPublish.Click += (_, _) =>
+        browsePreparedPublish.Click += async (_, _) =>
         {
-            using var dialog = new FolderBrowserDialog { Description = "Select the final prepared ASP.NET Core IIS publish folder", SelectedPath = BrowseStartFolder(preparedPublish.Text, BrowseContext.Publish) };
+            if (!CanNavigateInteractively()) return;
+            var startingFolder = await ResolveBrowseStartAsync(preparedPublish.Text, BrowseContext.Publish);
+            if (view.IsDisposed || view.Disposing || !CanNavigateInteractively()) return;
+            using var dialog = new FolderBrowserDialog { Description = "Select the final prepared ASP.NET Core IIS publish folder", SelectedPath = startingFolder };
             if (dialog.ShowDialog(this) == DialogResult.OK) { preparedPublish.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Publish); }
         };
         void CommitAndValidatePreparedPublish()
         {
-            var generation = ++_preparedValidationGeneration;
             var selected = preparedPublish.Text.Trim();
-            try { selected = string.IsNullOrWhiteSpace(selected) ? string.Empty : Path.GetFullPath(selected); } catch { }
+            try { selected = string.IsNullOrWhiteSpace(selected) ? string.Empty : Path.GetFullPath(selected); } catch (Exception ex) when (ex is ArgumentException or NotSupportedException) { }
+            if (preparedPublish.Text != selected) { preparedPublish.Text = selected; return; }
             if (!string.Equals(_profile.ReadyPublishFolder, selected, StringComparison.Ordinal))
                 InvalidateEnvironmentEvidence();
             _profile.ReadyPublishFolder = selected;
-            if (preparedPublish.Text != selected) { preparedPublish.Text = selected; return; }
-            RefreshPreparedPublishValidation();
-            if (generation != _preparedValidationGeneration) return; // stale UI event must not overwrite newer selection
-            if (string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase)) RunSourceTests();
-            UpdateNavigationState();
+            if (string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
+                RunSourcePreflight();
         }
         preparedPublish.TextChanged += (_, _) => CommitAndValidatePreparedPublish();
         browseRepository.Click += (_, _) =>
@@ -376,30 +368,12 @@ public sealed partial class WizardForm
             using var dialog = new FolderBrowserDialog { Description = "Select the persistent Stable Build Workspace root", SelectedPath = BrowseStartFolder(workspace.Text, BrowseContext.Workspace) };
             if (dialog.ShowDialog(this) == DialogResult.OK) { workspace.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Workspace); }
         };
-        source.TextChanged += async (_, _) =>
+        source.TextChanged += (_, _) =>
         {
-            Detect();
             _offlineDependenciesReady = false;
             _offlineDependenciesDetail = "Source changed; dependency readiness must be rechecked if required.";
             InvalidateEnvironmentEvidence();
-            if (Directory.Exists(source.Text.Trim()))
-            {
-                RunSourceTests();
-                var request = new CancellationTokenSource();
-                _backgroundVerifyCts = request;
-                try
-                {
-                    await Task.Delay(250, request.Token);
-                    await RunBackgroundAutoVerificationAsync(request.Token);
-                }
-                catch (OperationCanceledException) when (request.IsCancellationRequested) { }
-                finally
-                {
-                    if (ReferenceEquals(_backgroundVerifyCts, request)) _backgroundVerifyCts = null;
-                    request.Dispose();
-                }
-            }
-            else { CancelSourcePreflight(); sourceTestResult.Text = "Waiting for a valid source folder..."; sourceTestResult.ForeColor = Color.DimGray; }
+            RunSourcePreflight(preserveIdentity: false, followWithEnvironment: true);
         };
         repository.TextChanged += (_, _) =>
         {
@@ -431,18 +405,16 @@ public sealed partial class WizardForm
             "Prepared IIS Publish" => "Direct deploy of an already-built IIS publish. npm, frontend build, dotnet restore/build/publish and dependency sync are bypassed.",
             _ => "Uses the selected prepared-source/publish workflow."
         };
-        buildMode.SelectedIndexChanged += (_, _) => { _profile.BuildMode = buildMode.SelectedItem?.ToString() ?? "Fast Local Test"; InvalidateEnvironmentEvidence(); RefreshModeMeaning(); ApplyDependencyMode(); if (_profile.BuildMode == "Prepared IIS Publish") CommitAndValidatePreparedPublish(); else { RefreshPreparedPublishValidation(); Detect(preserveIdentity: true); RunSourceTests(); } };
+        buildMode.SelectedIndexChanged += (_, _) => { _profile.BuildMode = buildMode.SelectedItem?.ToString() ?? "Fast Local Test"; InvalidateEnvironmentEvidence(); RefreshModeMeaning(); ApplyDependencyMode(); if (_profile.BuildMode == "Prepared IIS Publish") CommitAndValidatePreparedPublish(); else RunSourcePreflight(); };
         recheckSource.Click += (_, _) =>
         {
             if (!CanNavigateInteractively()) return;
             InvalidateNavigationSourceReadiness();
             InvalidateEnvironmentEvidence();
-            Detect(preserveIdentity: true);
-            RunSourceTests();
+            RunSourcePreflight();
         };
         dependencyMode.SelectedIndexChanged += (_, _) => ApplyDependencyMode();
         RefreshModeMeaning();
-        RefreshPreparedPublishValidation();
 
         offlineAction.Click += async (_, _) =>
         {
@@ -533,23 +505,17 @@ public sealed partial class WizardForm
 
         RefreshModeMeaning();
         ApplyDependencyMode(invalidate: false);
-        // Returning to a selected valid source must preserve custom names.
-        Detect(preserveIdentity: true);
-        if (Directory.Exists(source.Text.Trim()) || string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
+        // Start only with a WinForms message pump; later page visits already have a handle.
+        if (IsHandleCreated) RunSourcePreflight();
+        else
         {
-            // Defer the first asynchronous preflight until the form has a UI
-            // message pump; later page visits already have a window handle.
-            if (IsHandleCreated) RunSourceTests();
-            else
+            void RunInitialSourceTests(object? sender, EventArgs args)
             {
-                void RunInitialSourceTests(object? sender, EventArgs args)
-                {
-                    Shown -= RunInitialSourceTests;
-                    if (!sourceTestResult.IsDisposed && _pageIndex == 0) RunSourceTests();
-                }
-                Shown += RunInitialSourceTests;
-                sourceTestResult.Disposed += (_, _) => Shown -= RunInitialSourceTests;
+                Shown -= RunInitialSourceTests;
+                if (!view.IsDisposed && _pageIndex == 0) RunSourcePreflight();
             }
+            Shown += RunInitialSourceTests;
+            view.Disposed += (_, _) => Shown -= RunInitialSourceTests;
         }
     }
 
@@ -564,7 +530,7 @@ public sealed partial class WizardForm
             (!string.Equals(_profile.TargetMode, "Remote IIS Server", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(savedCredential.Host, _profile.TargetHost, StringComparison.Ordinal))
             ? savedCredentialGeneration : null;
-        var view = new UI.Pages.DeploymentTargetView(Directory.Exists(_profile.SourceFolder),
+        var view = new UI.Pages.DeploymentTargetView(!string.IsNullOrWhiteSpace(_profile.SourceFolder) || _profile.BuildMode == "Prepared IIS Publish",
             _profile.ApplicationName, _profile.SiteName, _profile.DatabaseName, _profile.TargetMode,
             _profile.TargetHost, _profile.RemoteUserName, _profile.RemotePassword, _profile.RemoteWinRmPort,
             _profile.RemoteUseSsl, savedCredential.Remember, _profile.ReadyPublishFolder);
@@ -588,7 +554,7 @@ public sealed partial class WizardForm
         var modeHelp = view.ModeHelp;
         _content.Controls.Add(view);
 
-        void RefreshDetected()
+        async Task RefreshDetectedAsync()
         {
             var ready = _profile.BuildMode == "Prepared IIS Publish";
             publish.Enabled = browsePublish.Enabled = ready;
@@ -602,17 +568,30 @@ public sealed partial class WizardForm
             }
             else
             {
-                var api = _environment.DetectApiProject(_profile.SourceFolder);
-                detected.Text = api ?? "Not detected";
-                if (api is not null)
+                var sourceFolder = _profile.SourceFolder;
+                var buildMode = _profile.BuildMode;
+                using var request = new CancellationTokenSource();
+                void Stop(object? sender, EventArgs args) => request.Cancel();
+                view.Disposed += Stop;
+                detected.Text = "Checking the selected source...";
+                try
                 {
-                    _profile.ApiProjectPath = api;
-                    _profile.TargetFrameworkMajor = _environment.DetectTargetFrameworkMajor(api);
-                    _profile.RequiresNode = _environment.DetectNodeRequirement(_profile.SourceFolder, api);
-                    framework.Text = $".NET {_profile.TargetFrameworkMajor}";
-                    node.Text = _profile.RequiresNode ? "Node.js/npm detected" : "No Node.js frontend detected";
+                    var result = await InspectSourcePreviewAsync(false, sourceFolder, request.Token);
+                    if (request.IsCancellationRequested || view.IsDisposed || view.Disposing || IsDisposed || Disposing ||
+                        _pageIndex != 1 || _profile.SourceFolder != sourceFolder || _profile.BuildMode != buildMode) return;
+                    detected.Text = result.ProjectFile ?? "Not detected";
+                    framework.Text = result.ProjectFile is null ? "—" : $".NET {result.FrameworkMajor}";
+                    node.Text = result.ProjectFile is null ? "—" : result.RequiresNode ? "Node.js/npm detected" : "No Node.js frontend detected";
                 }
-                else { framework.Text = "—"; node.Text = "—"; }
+                catch (OperationCanceledException) when (request.IsCancellationRequested) { return; }
+                catch (Exception ex)
+                {
+                    InternalDiagnostics.Record(ex, "Target source preview");
+                    if (view.IsDisposed || view.Disposing || IsDisposed || Disposing || _pageIndex != 1 ||
+                        _profile.SourceFolder != sourceFolder || _profile.BuildMode != buildMode) return;
+                    detected.Text = "Source preview unavailable.";
+                }
+                finally { view.Disposed -= Stop; }
                 modeHelp.Text = _profile.BuildMode == "Visual Studio prepared"
                     ? "Open/build the solution once in Visual Studio first. Deployment Manager skips dependency restore where possible, but still performs the final frontend build (if needed) and dotnet publish."
                     : _profile.BuildMode == "Fast Local Test"
@@ -722,9 +701,12 @@ public sealed partial class WizardForm
             finally { if (!testRemote.IsDisposed) testRemote.Enabled = string.Equals(targetMode.SelectedItem?.ToString(), "Remote IIS Server", StringComparison.OrdinalIgnoreCase); }
             });
         };
-        browsePublish.Click += (_, _) =>
+        browsePublish.Click += async (_, _) =>
         {
-            using var dialog = new FolderBrowserDialog { Description = "Select the already-published application folder", SelectedPath = BrowseStartFolder(publish.Text, BrowseContext.Publish) };
+            if (!CanNavigateInteractively()) return;
+            var startingFolder = await ResolveBrowseStartAsync(publish.Text, BrowseContext.Publish);
+            if (view.IsDisposed || view.Disposing || !CanNavigateInteractively()) return;
+            using var dialog = new FolderBrowserDialog { Description = "Select the already-published application folder", SelectedPath = startingFolder };
             if (dialog.ShowDialog(this) == DialogResult.OK) { publish.Text = dialog.SelectedPath; RememberBrowseSelection(dialog.SelectedPath, BrowseContext.Publish); }
         };
         appName.TextChanged += (_, _) =>
@@ -752,7 +734,7 @@ public sealed partial class WizardForm
             UpdateNavigationState();
         };
         publish.TextChanged += (_, _) => { InvalidateEnvironmentEvidence(); _profile.ReadyPublishFolder = publish.Text.Trim(); UpdateNavigationState(); };
-        RefreshDetected();
+        _ = RefreshDetectedAsync();
     }
 
 }

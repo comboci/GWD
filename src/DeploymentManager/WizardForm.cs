@@ -94,7 +94,6 @@ public sealed partial class WizardForm : Form
     private bool _sqlDatabaseAutoVerified => _databaseConnectionVerified;
     private bool _deploymentLocationAutoVerified;
     private CancellationTokenSource? _backgroundVerifyCts;
-    private int _preparedValidationGeneration;
     // Navigation consumes only the latest source readiness snapshot. Actual deploy
     // and Next validation still perform their original authoritative checks.
     private (bool Prepared, string Folder)? _navigationSourceKey;

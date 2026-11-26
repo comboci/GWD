@@ -27,14 +27,12 @@ public sealed partial class WizardForm
         var exportSource = new Button { Text = "Export Clean Source ZIP", AutoSize = true };
         _lockSourceAction = lockSource;
         _exportSourceAction = exportSource;
-        // A single compact action strip stays opposite the Deployment profile label.
+        // The quick actions and menu commands invoke the same live controls.
+        // Parenting them also gives them normal focus and disposal lifetimes.
         foreach (var action in new Control[] { saveProfile, loadProfile, lockSource, exportSource })
-        {
-            action.Font = new Font("Segoe UI", 8.5F);
-            action.Margin = new Padding(2, 1, 3, 1);
-        }
-        var profileActions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false, FlowDirection = FlowDirection.LeftToRight };
-        // Actions are exposed through the top menu; no duplicate controls on the page.
+            action.Margin = new Padding(2, 1, 3, 3);
+        var profileActions = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = true, FlowDirection = FlowDirection.LeftToRight };
+        profileActions.Controls.AddRange(new Control[] { saveProfile, loadProfile, lockSource, exportSource });
         var sourceRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
         sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); sourceRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         sourceRow.Controls.Add(source, 0, 0); sourceRow.Controls.Add(browse, 1, 0);
@@ -75,6 +73,7 @@ public sealed partial class WizardForm
         var dependencySyncProgress = new ProgressBar { Width = 360, Height = 18, Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 28, Visible = false };
         var dependencySyncActivity = new Label { AutoSize = true, ForeColor = Color.RoyalBlue, MaximumSize = new Size(800, 0), Visible = false, Text = "Checking dependencies..." };
 
+        AddRow(form, "Profile actions", profileActions);
         AddRow(form, "Source folder", sourceRow);
 
         AddRow(form, "Detected source root", detectedRoot);
@@ -304,15 +303,18 @@ public sealed partial class WizardForm
         };
         saveProfile.Click += (_, _) =>
         {
+            if (!CanNavigateInteractively()) return;
             Directory.CreateDirectory(ProfilesFolder);
             using var dialog = new SaveFileDialog { Title = "Save deployment profile", Filter = "Deployment profile (*.json)|*.json", InitialDirectory = ProfilesFolder, FileName = string.IsNullOrWhiteSpace(_profile.ApplicationName) ? "deployment-profile.json" : _profile.ApplicationName.Replace(" ", "-") + ".json" };
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
             var dto = DeploymentProfileSnapshot.From(_profile, lockSource.Checked);
             File.WriteAllText(dialog.FileName, JsonSerializer.Serialize(dto, new JsonSerializerOptions { WriteIndented = true }));
             AppendLog("[PROFILE] Saved: " + dialog.FileName + " (secrets excluded)");
+            NotifyUi(UiNoticeKind.Success, "Profile saved (credentials excluded).");
         };
         loadProfile.Click += (_, _) =>
         {
+            if (!CanNavigateInteractively()) return;
             Directory.CreateDirectory(ProfilesFolder);
             using var dialog = new OpenFileDialog { Title = "Load deployment profile", Filter = "Deployment profile (*.json)|*.json", InitialDirectory = ProfilesFolder };
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
@@ -326,11 +328,13 @@ public sealed partial class WizardForm
                 dependencyMode.SelectedItem = NormalizeDependencyMode(_profile.DependencyResolutionMode);
                 lockSource.Checked = dto.SourceLocked;
                 AppendLog("[PROFILE] Loaded: " + dialog.FileName + " (secrets remain session-only)");
+                NotifyUi(UiNoticeKind.Info, "Profile loaded.");
             }
             catch (Exception ex) { InternalDiagnostics.Record(ex, "Load deployment profile"); MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Profile", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         };
         exportSource.Click += (_, _) =>
         {
+            if (!CanNavigateInteractively()) return;
             var src = source.Text.Trim(); if (!Directory.Exists(src)) { MessageBox.Show(this, "Select a valid source folder first.", "Clean Source Export", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
             using var options = new CleanExportOptionsForm(); if (options.ShowDialog(this) != DialogResult.OK) return;
             using var dialog = new SaveFileDialog { Title = "Export clean source ZIP", Filter = "ZIP archive (*.zip)|*.zip", FileName = $"{SanitizeFileName(_profile.ApplicationName)}-Last-Sources.zip" };

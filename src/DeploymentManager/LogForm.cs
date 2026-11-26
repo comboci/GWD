@@ -24,6 +24,7 @@ public sealed class LogForm : Form
 
     public LogForm(string logFile)
     {
+        GwdUi.ConfigureForm(this);
         _logFile = logFile;
         _boldLogFont = new Font(_box.Font, FontStyle.Bold);
         Text = "Deployment Manager — View Log"; Width = 1100; Height = 720; StartPosition = FormStartPosition.CenterParent;
@@ -37,6 +38,7 @@ public sealed class LogForm : Form
         var latest = new Button { Text = "Jump to Latest", AutoSize = true };
         top.Controls.AddRange(new Control[] { refresh, latest, _pause, open, dump, _status });
         Controls.Add(top); top.BringToFront();
+        GwdUi.StyleTree(this);
         refresh.Click += (_, _) => ResetTail();
         latest.Click += (_, _) => ResetTail();
         _pause.Click += (_, _) =>

@@ -46,9 +46,10 @@ public sealed class DeploymentHistoryForm : Form
         StartPosition = FormStartPosition.CenterParent;
         KeyPreview = true;
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); } };
-        Font = new Font("Segoe UI", 9.5F);
+        GwdUi.ConfigureForm(this);
 
         BuildUi();
+        GwdUi.StyleTree(this);
         // The grid is parented now and has inherited the form's DPI-aware font.
         _boldAttemptFont = new Font(_grid.Font, FontStyle.Bold);
         Shown += async (_, _) => await LoadProjectsAsync();
@@ -62,7 +63,7 @@ public sealed class DeploymentHistoryForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        var header = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = false };
+        var header = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
         header.Controls.Add(new Label { Text = "Project:", AutoSize = true, Padding = new Padding(0, 8, 6, 0), Font = new Font("Segoe UI Semibold", 9.5F) });
         header.Controls.Add(_projects);
         var refresh = new Button { Text = "Refresh", Width = 95, Height = 32, Margin = new Padding(10, 2, 0, 2) };

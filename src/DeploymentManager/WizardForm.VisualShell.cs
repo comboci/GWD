@@ -176,9 +176,8 @@ public sealed partial class WizardForm
 
     private void OpenDiagnostics()
     {
-        // Diagnostics can export mutable profile state. Do not open it during
-        // an active action; the non-modal Live Log is available at all times.
-        if (!CanNavigateInteractively()) { NotifyUi(UiNoticeKind.Info, "Use Live Log during an active operation; Diagnostics is available when idle."); return; }
+        // Preserve the existing modal Diagnostics access, including during
+        // deployment. Live Log is also available in a non-modal window.
         using var dialog = new DiagnosticsCenterForm(_appData, _history, _profile, _deployment, _logService.LogFile, _runtimeMetrics);
         dialog.ShowDialog(this);
     }
@@ -195,6 +194,7 @@ public sealed partial class WizardForm
         if (_visualResourcesStopped) return;
         _visualResourcesStopped = true;
         _noticeTimer.Stop(); _noticeTimer.Dispose();
-        _noticeWindow?.Close(); _liveLogWindow?.Close();
+        if (_noticeWindow is { IsDisposed: false }) _noticeWindow.Close();
+        if (_liveLogWindow is { IsDisposed: false }) _liveLogWindow.Close();
     }
 }

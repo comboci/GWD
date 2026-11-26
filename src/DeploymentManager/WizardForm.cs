@@ -63,9 +63,9 @@ public sealed partial class WizardForm : Form
     private bool _offlineDependenciesReady;
     private bool _dependencySyncRunning;
     private string _offlineDependenciesDetail = "Not checked";
-    private readonly Label _pageTitle = new() { AutoSize = true, Font = new Font("Segoe UI Semibold", 18F) };
+    private readonly Label _pageTitle = new() { AutoSize = true, Font = GwdUi.Heading };
     private readonly Label _pageDescription = new() { AutoSize = true, MaximumSize = new Size(820, 0), ForeColor = Color.DimGray };
-    private readonly Label _stepIndicator = new() { AutoSize = true, ForeColor = Color.DimGray, Font = new Font("Segoe UI Semibold", 9.5F) };
+    private readonly Label _stepIndicator = new() { AutoSize = true, ForeColor = Color.DimGray, Font = GwdUi.Small };
     private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font("Consolas", 9F) };
     private readonly ProgressBar _progress = new() { Dock = DockStyle.Bottom, Height = 16 };
     private readonly Label _activity = new() { AutoSize = false, Dock = DockStyle.Fill, Height = 36, Padding = new Padding(8, 0, 8, 0), TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.DimGray, Text = "Ready" };
@@ -400,7 +400,7 @@ public sealed partial class WizardForm : Form
         }
         footerButtons.Controls.Add(_next);
         footerButtons.Controls.Add(_back);
-        var resetWizard = new Button { Text = "Start Over", Width = 125, Height = 36 };
+        var resetWizard = new Button { Text = "Start Over", AutoSize = true, MinimumSize = new Size(108, 36) };
         var startOverMenu = new ContextMenuStrip();
         resetWizard.ContextMenuStrip = startOverMenu;
         startOverMenu.Items.Add("Start Over — Clear Log", null, (_, _) => ResetWizard(clearLog: true));
@@ -430,8 +430,8 @@ public sealed partial class WizardForm : Form
         fileMenu.DropDownItems.Add(saveMenu);
         fileMenu.DropDownItems.Add(loadMenu);
         fileMenu.DropDownItems.Add(new ToolStripSeparator());
-        var settingsButton = new Button { Text = "Settings", Width = 110, Height = 36 };
-        settingsButton.Click += (_, _) =>
+        var settingsMenu = new ToolStripMenuItem("Settings");
+        settingsMenu.Click += (_, _) =>
         {
             if (!CanNavigateInteractively()) return;
             FlushDeferredSettingsSaves();
@@ -448,13 +448,11 @@ public sealed partial class WizardForm : Form
         };
 
 
-        var settingsMenu = new ToolStripMenuItem("Settings");
-        settingsMenu.Click += (_, _) => settingsButton.PerformClick();
         fileMenu.DropDownItems.Add(settingsMenu);
         var databaseMenu = new ToolStripMenuItem("Database Management");
         databaseMenu.Click += (_, _) =>
         {
-            if (_operationRunning || _autoDeployRunning || _dependencySyncRunning)
+            if (!CanNavigateInteractively())
             {
                 MessageBox.Show(this, "Stop the current operation before opening Database Management.");
                 return;
@@ -486,7 +484,7 @@ public sealed partial class WizardForm : Form
         var emailNotificationsMenu = new ToolStripMenuItem("Email Notifications...");
         emailNotificationsMenu.Click += (_, _) =>
         {
-            if (_operationRunning || _autoDeployRunning || _dependencySyncRunning)
+            if (!CanNavigateInteractively())
             {
                 MessageBox.Show(this, "Stop the current operation before editing Email Notifications.");
                 return;
@@ -855,7 +853,7 @@ public sealed partial class WizardForm : Form
                 (i == 4 && _runtimesAutoVerified) || (i == 5 && _sqlDatabaseAutoVerified) ||
                 (i == 6 && _deploymentLocationAutoVerified);
             var state = current ? "Current" : checkedState ? "Checked" : i < _pageIndex ? "Earlier" : "Pending";
-            var caption = $"{i + 1:00}  {_steps[i]}";
+            var caption = $"{(current ? "▶ " : checkedState ? "• " : "")}{i + 1:00}  {_steps[i]}";
             // Never label an earlier step as passed solely because of position.
             if (button.Text != caption) button.Text = caption;
             button.AccessibleDescription = state + "; checks are not deployment authorization.";
@@ -978,7 +976,10 @@ public sealed partial class WizardForm : Form
             _autoDeploy.Enabled = _autoDeployCts?.IsCancellationRequested != true;
         else
             _autoDeploy.Enabled = CanNavigateInteractively() && CanAutoDeployStart();
-        foreach (var button in _stepLabels) button.Enabled = CanNavigateInteractively();
+        var canNavigate = CanNavigateInteractively();
+        foreach (var button in _stepLabels) button.Enabled = canNavigate;
+        foreach (var action in new Control?[] { _saveProfileAction, _loadProfileAction, _lockSourceAction, _exportSourceAction })
+            if (action is { IsDisposed: false }) action.Enabled = canNavigate;
         UpdateDashboard();
     }
 
@@ -2402,8 +2403,8 @@ public sealed partial class WizardForm : Form
 
     private static TableLayoutPanel FormGrid()
     {
-        var grid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, GrowStyle = TableLayoutPanelGrowStyle.AddRows, ColumnCount = 2, RowCount = 0, Padding = new Padding(0, 4, 0, 0) };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
+        var grid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, GrowStyle = TableLayoutPanelGrowStyle.AddRows, ColumnCount = 2, RowCount = 0, Padding = new Padding(10, 8, 10, 8) };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
         grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         return grid;
     }
@@ -2412,7 +2413,8 @@ public sealed partial class WizardForm : Form
     {
         var row = grid.RowCount++;
         grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.Controls.Add(new Label { Text = label, AutoSize = true, Margin = new Padding(3, 4, 3, 8), Padding = new Padding(0, 8, 10, 0) }, 0, row);
+        grid.Controls.Add(new Label { Text = label, AccessibleName = label, AutoSize = true, MaximumSize = new Size(198, 0), Font = GwdUi.Section, Margin = new Padding(3, 4, 3, 8), Padding = new Padding(0, 4, 8, 0) }, 0, row);
+        if (string.IsNullOrEmpty(control.AccessibleName)) control.AccessibleName = label;
         control.Margin = new Padding(3, 4, 3, 8);
         grid.Controls.Add(control, 1, row);
     }
@@ -2441,7 +2443,7 @@ public sealed partial class WizardForm : Form
     private static GroupBox StatusCard(string title, string detail, bool ok)
     {
         var box = new GroupBox { Text = title, Dock = DockStyle.Fill, Margin = new Padding(7), Padding = new Padding(12) };
-        var status = new Label { Name = "StatusText", Text = ok ? "● Ready" : "● Action required", AutoSize = true, ForeColor = ok ? Color.ForestGreen : Color.Firebrick, Font = new Font("Segoe UI Semibold", 9.5F) };
+        var status = new Label { Name = "StatusText", Text = ok ? "● Ready" : "● Action required", AutoSize = true, ForeColor = GwdUi.HighContrast ? SystemColors.ControlText : ok ? GwdUi.Success : GwdUi.Danger, Font = GwdUi.Section };
         var detailLabel = new Label { Name = "StatusDetail", Text = detail, AutoSize = false, Dock = DockStyle.Fill, Padding = new Padding(0, 26, 0, 0), ForeColor = Color.FromArgb(55, 55, 55) };
         box.Controls.Add(detailLabel); box.Controls.Add(status);
         return box;
@@ -2454,7 +2456,7 @@ public sealed partial class WizardForm : Form
         if (card.Controls["StatusText"] is Label status)
         {
             status.Text = ok ? "● Ready" : "● Action required";
-            status.ForeColor = ok ? Color.ForestGreen : Color.Firebrick;
+            status.ForeColor = GwdUi.HighContrast ? SystemColors.ControlText : ok ? GwdUi.Success : GwdUi.Danger;
         }
         if (card.Controls["StatusDetail"] is Label description) description.Text = detail;
     }

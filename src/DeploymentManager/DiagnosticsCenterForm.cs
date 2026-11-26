@@ -41,6 +41,7 @@ public sealed partial class DiagnosticsCenterForm : Form
         _currentLog = currentLog;
         _runtimeMetrics = runtimeMetrics;
 
+        GwdUi.ConfigureForm(this);
         Text = $"Diagnostics & Deployment History Center — {ProductInfo.DisplayVersion}";
         Width = 1260;
         Height = 820;
@@ -105,7 +106,7 @@ public sealed partial class DiagnosticsCenterForm : Form
         MainMenuStrip = menu;
         root.Controls.Add(menu, 0, 0);
 
-        var statusBar = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(12, 4, 8, 5), WrapContents = false };
+        var statusBar = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(12, 4, 8, 5), WrapContents = true };
         statusBar.Controls.Add(_exportStatus);
         statusBar.Controls.Add(new Label
         {
@@ -133,6 +134,7 @@ public sealed partial class DiagnosticsCenterForm : Form
 
         root.Controls.Add(_tabs, 0, 2);
         Controls.Add(root);
+        GwdUi.StyleTree(this);
         UpdateActionMenuState();
         // Closing the dialog stops further progress callbacks and requests
         // cancellation; the worker disposes its temporary ZIP in its own finally.
@@ -216,6 +218,7 @@ public sealed partial class DiagnosticsCenterForm : Form
         {
             _materializingTab = true;
             created = factory();
+            GwdUi.StyleTree(created);
             var index = _tabs.TabPages.IndexOf(placeholder);
             var section = _sectionByTab[placeholder];
             // Keep the actual tab alive: its event handlers, metrics timer and

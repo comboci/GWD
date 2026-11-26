@@ -194,6 +194,7 @@ public sealed partial class WizardForm
                 if (_pageIndex == 4) RebuildCurrentPage();
             });
         }
+        GwdUi.StyleTree(box);
         return box;
     }
 

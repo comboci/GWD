@@ -72,6 +72,18 @@ public static class EmailNotificationService
 
     public static string SingleLine(string value) => value.Replace('\r', ' ').Replace('\n', ' ');
 
+    public static string FailureCategory(Exception error) => error switch
+    {
+        OperationCanceledException or TimeoutException => "TIMEOUT_OR_CANCELLED",
+        CryptographicException or FormatException or JsonException => "PROTECTED_SETTINGS_UNREADABLE",
+        ArgumentException => "INVALID_SETTINGS",
+        SmtpException smtp => "SMTP_STATUS_" + ((int)smtp.StatusCode).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        System.Net.Sockets.SocketException => "NETWORK_ERROR",
+        System.Security.Authentication.AuthenticationException => "TLS_ERROR",
+        UnauthorizedAccessException => "SETTINGS_ACCESS_DENIED",
+        _ => "UNCLASSIFIED_ERROR"
+    };
+
     public static async Task SendAsync(EmailNotificationSettings settings, string subject, string body)
     {
         Validate(settings);

@@ -609,7 +609,9 @@ public sealed partial class WizardForm
 
         BeginInvoke(async () =>
         {
-            if (body.IsDisposed || _pageIndex != 5 || _autoDeployRunning || string.IsNullOrWhiteSpace(_profile.SqlInstance) || _sqlAdminConnectionVerified) return;
+            if (body.IsDisposed || _pageIndex != 5 || !CanNavigateInteractively() || string.IsNullOrWhiteSpace(_profile.SqlInstance) || _sqlAdminConnectionVerified) return;
+            await BusyAsync(test, async () =>
+            {
             try
             {
                 verified.Text = "Testing automatically...";
@@ -636,6 +638,7 @@ public sealed partial class WizardForm
                 AppendLog("[SQL] Automatic administrative connection test failed: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message));
             }
             UpdateNavigationState();
+            });
         });
     }
 

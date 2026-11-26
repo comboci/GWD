@@ -140,7 +140,8 @@ public sealed class EnvironmentService
         var appcmd = AppCmdPath();
         if (!File.Exists(appcmd)) return Array.Empty<IisSiteInfo>();
         var namesResult = await _runner.RunAsync(appcmd, "list site /text:name", ct: ct);
-        if (namesResult.ExitCode != 0) return Array.Empty<IisSiteInfo>();
+        if (namesResult.ExitCode != 0 || namesResult.Output.Contains("[... earlier process output omitted from in-memory buffer", StringComparison.Ordinal))
+            throw new InvalidOperationException("IIS site inventory failed or exceeded the output limit; an empty list is not evidence.");
         var names = namesResult.Output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(x => x.Trim().Trim('"')).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var list = new List<IisSiteInfo>();
@@ -192,7 +193,8 @@ public sealed class EnvironmentService
         var appcmd = AppCmdPath();
         if (!File.Exists(appcmd)) return Array.Empty<IisAppPoolInfo>();
         var namesResult = await _runner.RunAsync(appcmd, "list apppool /text:name", ct: ct);
-        if (namesResult.ExitCode != 0) return Array.Empty<IisAppPoolInfo>();
+        if (namesResult.ExitCode != 0 || namesResult.Output.Contains("[... earlier process output omitted from in-memory buffer", StringComparison.Ordinal))
+            throw new InvalidOperationException("IIS application pool inventory failed or exceeded the output limit; an empty list is not evidence.");
         var names = namesResult.Output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
             .Select(x => x.Trim().Trim('"')).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase);
         var list = new List<IisAppPoolInfo>();

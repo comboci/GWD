@@ -228,13 +228,13 @@ public sealed partial class WizardForm : Form
 
     private void OnHealthUpdated(HealthSnapshot snapshot)
     {
-        if (IsDisposed || Disposing || !IsHandleCreated) return;
+        if (IsDisposed || Disposing || !IsHandleCreated || _visualResourcesStopped) return;
         try
         {
             BeginInvoke((Action)(() =>
             {
                 // A scheduled health callback can arrive after the form closes.
-                if (IsDisposed || Disposing) return;
+                if (IsDisposed || Disposing || _visualResourcesStopped) return;
                 _iisHealth.Text = snapshot.IisInstalled ? "✓ IIS installed" : "○ IIS unverified";
                 _iisHealth.ForeColor = snapshot.IisInstalled ? Color.ForestGreen : Color.DarkOrange;
                 var iisDetail = snapshot.IisInstalled
@@ -1096,6 +1096,18 @@ public sealed partial class WizardForm : Form
                 switch (step)
                 {
                     case 0:
+                        if (string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase))
+                        {
+                            var prepared = DeploymentService.ValidatePreparedPublish(_profile.ReadyPublishFolder);
+                            if (!prepared.Ok) throw new InvalidOperationException(prepared.Detail);
+                        }
+                        else
+                        {
+                            if (!Directory.Exists(_profile.SourceFolder)) throw new InvalidOperationException("Select a valid source folder.");
+                            _profile.ApiProjectPath = _environment.DetectApiProject(_profile.SourceFolder)
+                                ?? throw new InvalidOperationException("No ASP.NET Core Web project was found in this source.");
+                        }
+                        if (string.IsNullOrWhiteSpace(_profile.ApplicationName)) throw new InvalidOperationException("Application name is required.");
                         break;
 
                     case 1:
@@ -1518,6 +1530,9 @@ public sealed partial class WizardForm : Form
     private async Task ScanEnvironmentAsync(CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
+        _scanCompleted = false;
+        _iisAutoVerified = _runtimesAutoVerified = _deploymentLocationAutoVerified = false;
+        UpdateStepIndicator();
         ValidateTargetPage();
         var mode = _profile.BuildMode;
         var source = _profile.SourceFolder;

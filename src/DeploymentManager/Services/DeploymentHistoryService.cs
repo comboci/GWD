@@ -282,8 +282,23 @@ public sealed class DeploymentHistoryService
             !document.RootElement.TryGetProperty("StartedAtUtc", out var started) ||
             started.ValueKind != JsonValueKind.String || !started.TryGetDateTime(out var date) || date == default)
             throw new JsonException("Required deployment history identity or timestamp is invalid.");
-        return document.RootElement.Deserialize<DeploymentHistoryRecord>()
+        var record = document.RootElement.Deserialize<DeploymentHistoryRecord>()
             ?? throw new JsonException("Null deployment history record.");
+        // Explicit nulls/invalid numeric data must not crash the entire history
+        // screen or be silently converted into a successful attempt. Missing
+        // optional legacy fields continue to use model defaults.
+        static bool ValidDuration(double seconds) => double.IsFinite(seconds) &&
+            seconds >= 0 && seconds < TimeSpan.MaxValue.TotalSeconds;
+        if (record.BuildMode is null || record.Result is null ||
+            !ValidDuration(record.ElapsedSeconds) ||
+            (record.IntervalSincePreviousSeconds is double interval && !ValidDuration(interval)))
+            throw new JsonException("Invalid history mode, result or duration.");
+        if (record.BuildPerformance is { } performance &&
+            (performance.Stages is null || !ValidDuration(performance.TotalMilliseconds / 1000d) ||
+             performance.Stages.Any(stage => stage is null || stage.Status is null ||
+                 !ValidDuration(stage.ElapsedMilliseconds / 1000d))))
+            throw new JsonException("Invalid build performance history.");
+        return record;
     }
 
     // Redact text BEFORE writing JSON. Replacing arbitrary substrings in the

@@ -60,6 +60,9 @@ public static class LogPreviewReader
     // until its complete successor has been written.
     public static async Task CopySnapshotAsync(string source, string destination, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        if (string.Equals(Path.GetFullPath(source), Path.GetFullPath(destination), StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Log snapshot destination must differ from the original evidence file.");
         var temporary = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(destination))!, "." + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {

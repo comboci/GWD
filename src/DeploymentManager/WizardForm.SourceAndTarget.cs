@@ -352,9 +352,21 @@ public sealed partial class WizardForm
                     dto.DependencyResolutionMode is null || dto.DeploymentRepositoryFolder is null || dto.WorkspaceRoot is null)
                     throw new InvalidDataException("Profile is missing required fields.");
                 FlushDeferredSettingsSaves();
+                var sqlIdentityChanged = !string.Equals(_profile.SqlInstance, dto.SqlInstance, StringComparison.OrdinalIgnoreCase) ||
+                    !string.Equals(_profile.SqlUserName, dto.SqlUserName, StringComparison.OrdinalIgnoreCase) ||
+                    _profile.UseWindowsAuthentication != dto.UseWindowsAuthentication;
                 dto.ApplyTo(_profile);
+                if (sqlIdentityChanged)
+                {
+                    _profile.SqlPassword = string.Empty;
+                    _profile.SqlCredentialConfigured = false;
+                }
                 _sourceLocked = dto.SourceLocked;
                 _profile.InstallerCacheFolder = Path.Combine(_profile.DeploymentRepositoryFolder, "Installers");
+                if (!string.IsNullOrWhiteSpace(_profile.DeploymentRepositoryFolder))
+                    _appData.SaveDeploymentRepositoryFolder(_profile.DeploymentRepositoryFolder);
+                if (!string.IsNullOrWhiteSpace(_profile.WorkspaceRoot))
+                    _appData.SaveWorkspaceRoot(_profile.WorkspaceRoot);
                 _offlineDependenciesReady = false;
                 InvalidateEnvironmentEvidence();
                 InvalidateNavigationSourceReadiness();
@@ -733,7 +745,9 @@ public sealed partial class WizardForm
         host.Leave += (_, _) => FlushDeferredSettingsSaves();
         testRemote.Click += async (_, _) =>
         {
-            if (!ValidateRemoteInputs(showMessage: true)) return;
+            if (!CanNavigateInteractively() || !ValidateRemoteInputs(showMessage: true)) return;
+            await BusyAsync(testRemote, async () =>
+            {
             try
             {
                 testRemote.Enabled = false; remoteState.Text = "Checking remote server...";
@@ -748,7 +762,8 @@ public sealed partial class WizardForm
                 }
             }
             catch (Exception ex) { remoteState.Text = "Remote NOT READY — " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message); remoteState.ForeColor = Color.Firebrick; InternalDiagnostics.Record(ex, "Remote readiness test"); }
-            finally { testRemote.Enabled = string.Equals(targetMode.SelectedItem?.ToString(), "Remote IIS Server", StringComparison.OrdinalIgnoreCase); }
+            finally { if (!testRemote.IsDisposed) testRemote.Enabled = string.Equals(targetMode.SelectedItem?.ToString(), "Remote IIS Server", StringComparison.OrdinalIgnoreCase); }
+            });
         };
         browsePublish.Click += (_, _) =>
         {

@@ -588,7 +588,16 @@ public sealed partial class WizardForm
             // Defer the first asynchronous preflight until the form has a UI
             // message pump; later page visits already have a window handle.
             if (IsHandleCreated) RunSourceTests();
-            else Shown += (_, _) => { if (!sourceTestResult.IsDisposed) RunSourceTests(); };
+            else
+            {
+                void RunInitialSourceTests(object? sender, EventArgs args)
+                {
+                    Shown -= RunInitialSourceTests;
+                    if (!sourceTestResult.IsDisposed && _pageIndex == 0) RunSourceTests();
+                }
+                Shown += RunInitialSourceTests;
+                sourceTestResult.Disposed += (_, _) => Shown -= RunInitialSourceTests;
+            }
         }
     }
 

@@ -7,6 +7,8 @@ using System.Text.RegularExpressions;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.IO.Compression;
+using GenericWeb.DeploymentManager.UI.Pages;
+using static GenericWeb.DeploymentManager.UI.Controls.StatusCardUi;
 
 namespace GenericWeb.DeploymentManager;
 
@@ -79,7 +81,7 @@ public sealed partial class WizardForm : Form
     private int _renderedPageIndex = -1;
     private bool _navigationInProgress;
     private bool _pageActionRunning;
-    private Action? _refreshScanCards;
+    private EnvironmentScanView? _scanView;
     private int _lastLoggedPageIndex = -1;
     private bool _scanCompleted;
     private PrerequisiteState _iisState = new(false, "Not scanned");
@@ -835,7 +837,8 @@ public sealed partial class WizardForm : Form
     private void DisposeContentControls()
     {
         _renderedPageIndex = -1;
-        _refreshScanCards = null;
+        _scanView?.Deactivate();
+        _scanView = null;
         if (_pageIndex == 0) CancelBackgroundVerification();
         // Source/target controls may own the latest unsaved edit. Their queued
         // actions must execute while controls are still alive.
@@ -1475,58 +1478,30 @@ public sealed partial class WizardForm : Form
     {
         _pageTitle.Text = "Environment scan";
         _pageDescription.Text = "Inspect the machine before changing anything. The results are shown as separate, readable status panels.";
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 2 };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        var scan = new Button { Text = "Re-scan environment", AutoSize = true };
-        root.Controls.Add(scan, 0, 0);
-
-        var cards = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, ColumnCount = 2, RowCount = 3, Padding = new Padding(0, 12, 0, 0) };
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-        for (int i = 0; i < 3; i++) cards.RowStyles.Add(new RowStyle(SizeType.Percent, 33.333F));
-
-        var win = StatusCard("Windows", _environment.GetWindowsDescription(), true);
-        var iis = StatusCard("IIS Web Server", _iisState.Detail, _iisState.Installed);
-        var hosting = StatusCard($"ASP.NET Core Hosting Bundle (.NET {_profile.TargetFrameworkMajor})", _hostingState.Detail, _hostingState.Installed);
-        var sdk = StatusCard($".NET {_profile.TargetFrameworkMajor} SDK", _sdkState.Detail, _sdkState.Installed);
-        var node = StatusCard("Node.js / npm", _nodeState.Detail, _nodeState.Installed);
-        var sql = StatusCard("SQL Server Engine", _sqlInstances.Count == 0 ? "Not scanned" : string.Join("\r\n", _sqlInstances), _sqlInstances.Count > 0);
-        cards.Controls.Add(win, 0, 0); cards.Controls.Add(iis, 1, 0);
-        cards.Controls.Add(hosting, 0, 1); cards.Controls.Add(sdk, 1, 1);
-        cards.Controls.Add(node, 0, 2); cards.Controls.Add(sql, 1, 2);
-        root.Controls.Add(cards, 0, 1);
-        _content.Controls.Add(root);
-
-        _refreshScanCards = () =>
-        {
-            if (root.IsDisposed || _pageIndex != 2) return;
-            cards.SuspendLayout();
-            try
-            {
-                UpdateStatusCard(win, "Windows", _environment.GetWindowsDescription(), true);
-                UpdateStatusCard(iis, "IIS Web Server", _iisState.Detail, _iisState.Installed);
-                UpdateStatusCard(hosting, $"ASP.NET Core Hosting Bundle (.NET {_profile.TargetFrameworkMajor})", _hostingState.Detail, _hostingState.Installed);
-                UpdateStatusCard(sdk, $".NET {_profile.TargetFrameworkMajor} SDK", _sdkState.Detail, _sdkState.Installed);
-                UpdateStatusCard(node, "Node.js / npm", _nodeState.Detail, _nodeState.Installed);
-                UpdateStatusCard(sql, "SQL Server Engine", _sqlInstances.Count == 0 ? "No SQL Server Database Engine instance detected." : string.Join("\r\n", _sqlInstances), _sqlInstances.Count > 0);
-            }
-            finally { cards.ResumeLayout(true); }
-        };
-        scan.Click += async (_, _) =>
-        {
-            if (root.IsDisposed || _pageIndex != 2 || !CanNavigateInteractively()) return;
-            await BusyAsync(scan, ScanEnvironmentAsyncWithoutToken);
-        };
+        var scan = new EnvironmentScanView(GetScanCards());
+        _scanView = scan;
+        _content.Controls.Add(scan);
+        scan.Activate(button => BusyAsync(button, ScanEnvironmentAsyncWithoutToken));
 
         // Auto Deploy owns its explicit scan; never schedule a duplicate page scan.
         if (!_autoDeployRunning)
             BeginInvoke(new Action(() =>
             {
-                if (!root.IsDisposed && _pageIndex == 2 && CanNavigateInteractively())
-                    scan.PerformClick();
+                if (ReferenceEquals(scan, _scanView) && !scan.IsDisposed && _pageIndex == 2 && CanNavigateInteractively())
+                    scan.RequestScan();
             }));
     }
+
+    private ScanCardState[] GetScanCards() =>
+    [
+        new("Windows", _environment.GetWindowsDescription(), true),
+        new("IIS Web Server", _iisState.Detail, _iisState.Installed),
+        new($"ASP.NET Core Hosting Bundle (.NET {_profile.TargetFrameworkMajor})", _hostingState.Detail, _hostingState.Installed),
+        new($".NET {_profile.TargetFrameworkMajor} SDK", _sdkState.Detail, _sdkState.Installed),
+        new("Node.js / npm", _nodeState.Detail, _nodeState.Installed),
+        new("SQL Server Engine", _sqlInstances.Count > 0 ? string.Join("\r\n", _sqlInstances) :
+            _scanCompleted ? "No SQL Server Database Engine instance detected." : "Not scanned", _sqlInstances.Count > 0)
+    ];
 
     private Task ScanEnvironmentAsyncWithoutToken() => ScanEnvironmentAsync();
 
@@ -1571,7 +1546,7 @@ public sealed partial class WizardForm : Form
         _scanCompleted = true;
         AutoLocateCachedInstallers();
         UpdateStepIndicator();
-        _refreshScanCards?.Invoke();
+        if (_pageIndex == 2) _scanView?.RefreshCards(GetScanCards());
     }
 
     private void BuildIisPage()
@@ -2536,27 +2511,6 @@ public sealed partial class WizardForm : Form
         var box = new GroupBox { Text = title, Width = 850, Height = 165, Padding = new Padding(14) };
         box.Controls.Add(new Label { Text = text, Dock = DockStyle.Fill, AutoSize = false });
         return box;
-    }
-
-    private static GroupBox StatusCard(string title, string detail, bool ok)
-    {
-        var box = new GroupBox { Text = title, Dock = DockStyle.Fill, Margin = new Padding(7), Padding = new Padding(12) };
-        var status = new Label { Name = "StatusText", Text = ok ? "● Ready" : "● Action required", AutoSize = true, ForeColor = GwdUi.HighContrast ? SystemColors.ControlText : ok ? GwdUi.Success : GwdUi.Danger, Font = GwdUi.Section };
-        var detailLabel = new Label { Name = "StatusDetail", Text = detail, AutoSize = false, Dock = DockStyle.Fill, Padding = new Padding(0, 26, 0, 0), ForeColor = Color.FromArgb(55, 55, 55) };
-        box.Controls.Add(detailLabel); box.Controls.Add(status);
-        return box;
-    }
-
-    private static void UpdateStatusCard(GroupBox card, string title, string detail, bool ok)
-    {
-        if (card.IsDisposed) return;
-        card.Text = title;
-        if (card.Controls["StatusText"] is Label status)
-        {
-            status.Text = ok ? "● Ready" : "● Action required";
-            status.ForeColor = GwdUi.HighContrast ? SystemColors.ControlText : ok ? GwdUi.Success : GwdUi.Danger;
-        }
-        if (card.Controls["StatusDetail"] is Label description) description.Text = detail;
     }
 
     private static string GenerateStrongPassword()

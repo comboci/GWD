@@ -1,6 +1,6 @@
 {
-  "version": "279.0.0",
+  "version": "280.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V279-R — A02.8 - Central Wizard stage registry and page lifetime; Windows acceptance pending"
+  "commitNote": "V280-R — A03.1 - ordered cross-instance settings mutation and credential generations; Windows acceptance pending"
 }

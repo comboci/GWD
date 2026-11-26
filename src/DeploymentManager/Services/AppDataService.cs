@@ -48,7 +48,27 @@ public sealed class AppDataService
 
     public DeploymentManagerSettings GetSettings() => LoadSettings();
 
-    public void SaveSettings(DeploymentManagerSettings settings) => SaveSettingsAtomic(settings);
+    public void SaveSettings(DeploymentManagerSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        WithSettingsWriter(() =>
+        {
+            var current = ReadSettingsCore();
+            if (settings.Revision != current.Revision)
+                throw new InvalidOperationException("Settings changed; reload before saving a complete snapshot.");
+            // The bulk API must not bypass the credential writer or copy older
+            // protected bytes back into a credential that was explicitly erased.
+            var snapshot = JsonSerializer.Deserialize<DeploymentManagerSettings>(JsonSerializer.Serialize(settings))!;
+            snapshot.RemoteHost = current.RemoteHost;
+            snapshot.RemoteUserName = current.RemoteUserName;
+            snapshot.RemotePasswordProtected = current.RemotePasswordProtected;
+            snapshot.RememberRemoteCredential = current.RememberRemoteCredential;
+            snapshot.RemoteCredentialGeneration = current.RemoteCredentialGeneration;
+            SaveSettingsCore(snapshot);
+            settings.Revision = snapshot.Revision;
+            return true;
+        });
+    }
 
     public string GetInstallerCacheFolder()
     {
@@ -67,17 +87,19 @@ public sealed class AppDataService
     public void SaveInstallerCacheFolder(string folder)
     {
         if (string.IsNullOrWhiteSpace(folder)) return;
-        try
+        UpdateSettings(settings =>
         {
-            using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
-            key.SetValue("InstallerCacheFolder", folder, RegistryValueKind.String);
-        }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Write InstallerCacheFolder registry"); }
-
-        var settings = LoadSettings();
-        settings.InstallerCacheFolder = folder;
-        settings.DeploymentRepositoryFolder = folder;
-        SaveSettingsAtomic(settings);
+            settings.InstallerCacheFolder = folder;
+            settings.DeploymentRepositoryFolder = folder;
+        }, () =>
+        {
+            try
+            {
+                using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
+                key.SetValue("InstallerCacheFolder", folder, RegistryValueKind.String);
+            }
+            catch (Exception ex) { InternalDiagnostics.Record(ex, "Write InstallerCacheFolder registry"); }
+        });
     }
 
     public string GetDeploymentRepositoryFolder()
@@ -110,9 +132,7 @@ public sealed class AppDataService
         if (string.IsNullOrWhiteSpace(folder)) return;
         try { Directory.CreateDirectory(folder); }
         catch (Exception ex) { InternalDiagnostics.Record(ex, "Create workspace root"); }
-        var settings = LoadSettings();
-        settings.WorkspaceRoot = folder;
-        SaveSettingsAtomic(settings);
+        UpdateSettings(settings => settings.WorkspaceRoot = folder);
     }
 
     public string GetManagerReleaseRoot()
@@ -125,9 +145,7 @@ public sealed class AppDataService
     public void SaveManagerReleaseRoot(string folder)
     {
         if (string.IsNullOrWhiteSpace(folder)) return;
-        var settings = LoadSettings();
-        settings.ManagerReleaseRoot = Path.GetFullPath(folder);
-        SaveSettingsAtomic(settings);
+        UpdateSettings(settings => settings.ManagerReleaseRoot = Path.GetFullPath(folder));
     }
 
     public string GetDefaultProjectFolder()
@@ -139,9 +157,7 @@ public sealed class AppDataService
     public void SaveDefaultProjectFolder(string folder)
     {
         if (string.IsNullOrWhiteSpace(folder)) return;
-        var settings = LoadSettings();
-        settings.DefaultProjectFolder = Path.GetFullPath(folder);
-        SaveSettingsAtomic(settings);
+        UpdateSettings(settings => settings.DefaultProjectFolder = Path.GetFullPath(folder));
     }
 
     public string GetLastBrowseFolder(BrowseContext context = BrowseContext.General)
@@ -184,19 +200,20 @@ public sealed class AppDataService
             var folder = Directory.Exists(selectedPath) ? selectedPath : Path.GetDirectoryName(selectedPath);
             if (string.IsNullOrWhiteSpace(folder)) return;
             folder = Path.GetFullPath(folder);
-            var settings = LoadSettings();
-            settings.LastBrowseFolder = folder;
-            switch (context)
+            UpdateSettings(settings =>
             {
-                case BrowseContext.Source: settings.LastSourceBrowseFolder = folder; break;
-                case BrowseContext.Publish: settings.LastPublishBrowseFolder = folder; break;
-                case BrowseContext.Installer: settings.LastInstallerBrowseFolder = folder; break;
-                case BrowseContext.Repository: settings.LastRepositoryBrowseFolder = folder; break;
-                case BrowseContext.Workspace: settings.LastWorkspaceBrowseFolder = folder; break;
-                case BrowseContext.Hosting: settings.LastHostingBrowseFolder = folder; break;
-                case BrowseContext.ReleaseOutput: settings.LastReleaseOutputBrowseFolder = folder; break;
-            }
-            SaveSettingsAtomic(settings);
+                settings.LastBrowseFolder = folder;
+                switch (context)
+                {
+                    case BrowseContext.Source: settings.LastSourceBrowseFolder = folder; break;
+                    case BrowseContext.Publish: settings.LastPublishBrowseFolder = folder; break;
+                    case BrowseContext.Installer: settings.LastInstallerBrowseFolder = folder; break;
+                    case BrowseContext.Repository: settings.LastRepositoryBrowseFolder = folder; break;
+                    case BrowseContext.Workspace: settings.LastWorkspaceBrowseFolder = folder; break;
+                    case BrowseContext.Hosting: settings.LastHostingBrowseFolder = folder; break;
+                    case BrowseContext.ReleaseOutput: settings.LastReleaseOutputBrowseFolder = folder; break;
+                }
+            });
         }
         catch (Exception ex) { InternalDiagnostics.Record(ex, $"Save browse folder ({context})"); }
     }
@@ -245,18 +262,42 @@ public sealed class AppDataService
 
     public void SaveRemoteCredential(string host, string userName, string password, bool remember)
     {
-        try
-        {
-            var settings = LoadSettings();
-            settings.RemoteHost = remember ? host : "";
-            settings.RemoteUserName = remember ? userName : "";
-            settings.RememberRemoteCredential = remember;
-            settings.RemotePasswordProtected = remember
-                ? Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(password), null, DataProtectionScope.CurrentUser))
-                : "";
-            SaveSettingsAtomic(settings);
-        }
+        try { SetRemoteCredentialPreference(host, userName, password, remember); }
         catch (Exception ex) { InternalDiagnostics.Record(ex, "Save remote credential"); }
+    }
+
+    // Explicit preference changes fence every previously queued credential edit.
+    public Guid SetRemoteCredentialPreference(string host, string userName, string password, bool remember) =>
+        WithSettingsWriter(() =>
+        {
+            var settings = ReadSettingsCore();
+            settings.RemoteCredentialGeneration = Guid.NewGuid();
+            SetCredentialFields(settings, host, userName, password, remember);
+            SaveSettingsCore(settings);
+            return settings.RemoteCredentialGeneration;
+        });
+
+    public Guid GetRememberedRemoteCredentialGeneration() => LoadSettings().RemoteCredentialGeneration;
+
+    public bool SaveRememberedRemoteCredential(Guid generation, string host, string userName, string password) =>
+        WithSettingsWriter(() =>
+        {
+            var settings = ReadSettingsCore();
+            if (!settings.RememberRemoteCredential || settings.RemoteCredentialGeneration != generation)
+                return false;
+            SetCredentialFields(settings, host, userName, password, true);
+            SaveSettingsCore(settings);
+            return true;
+        });
+
+    private static void SetCredentialFields(DeploymentManagerSettings settings, string host, string userName, string password, bool remember)
+    {
+        settings.RemoteHost = remember ? host : "";
+        settings.RemoteUserName = remember ? userName : "";
+        settings.RememberRemoteCredential = remember;
+        settings.RemotePasswordProtected = remember
+            ? Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(password), null, DataProtectionScope.CurrentUser))
+            : "";
     }
 
     public string GetDependencyResolutionMode()
@@ -268,9 +309,7 @@ public sealed class AppDataService
     public void SaveDependencyResolutionMode(string mode)
     {
         if (string.IsNullOrWhiteSpace(mode)) return;
-        var settings = LoadSettings();
-        settings.DependencyResolutionMode = mode;
-        SaveSettingsAtomic(settings);
+        UpdateSettings(settings => settings.DependencyResolutionMode = mode);
     }
 
     private static string GetDefaultRepositoryFolder()
@@ -307,11 +346,15 @@ public sealed class AppDataService
         if (string.IsNullOrWhiteSpace(hostingRoot)) return;
         try
         {
-            using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
-            key.SetValue("HostingRoot", hostingRoot, RegistryValueKind.String);
-            key.SetValue("DeploymentLayout", deploymentLayout, RegistryValueKind.String);
-            key.SetValue("CleanupPreviousDeployments", cleanupPreviousDeployments ? 1 : 0, RegistryValueKind.DWord);
-            key.SetValue("UseDefaultIisWebsite", useDefaultIisWebsite ? 1 : 0, RegistryValueKind.DWord);
+            WithSettingsWriter(() =>
+            {
+                using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
+                key.SetValue("HostingRoot", hostingRoot, RegistryValueKind.String);
+                key.SetValue("DeploymentLayout", deploymentLayout, RegistryValueKind.String);
+                key.SetValue("CleanupPreviousDeployments", cleanupPreviousDeployments ? 1 : 0, RegistryValueKind.DWord);
+                key.SetValue("UseDefaultIisWebsite", useDefaultIisWebsite ? 1 : 0, RegistryValueKind.DWord);
+                return true;
+            });
         }
         catch (Exception ex) { InternalDiagnostics.Record(ex, "Write hosting settings registry"); }
     }
@@ -336,10 +379,14 @@ public sealed class AppDataService
     {
         try
         {
-            using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
-            key.SetValue("ApplicationName", applicationName, RegistryValueKind.String);
-            key.SetValue("SiteName", siteName, RegistryValueKind.String);
-            key.SetValue("DatabaseName", databaseName, RegistryValueKind.String);
+            WithSettingsWriter(() =>
+            {
+                using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
+                key.SetValue("ApplicationName", applicationName, RegistryValueKind.String);
+                key.SetValue("SiteName", siteName, RegistryValueKind.String);
+                key.SetValue("DatabaseName", databaseName, RegistryValueKind.String);
+                return true;
+            });
         }
         catch (Exception ex) { InternalDiagnostics.Record(ex, "Write deployment identity registry"); }
     }
@@ -439,14 +486,35 @@ public sealed class AppDataService
         };
     }
 
-    private DeploymentManagerSettings LoadSettings()
+    // The deployment manager is Windows-only; a single named mutex covers
+    // settings writes from other windows/instances, including registry writes.
+    private static T WithSettingsWriter<T>(Func<T> write)
     {
+        using var gate = new Mutex(false, @"Global\NSP.DeploymentManager.Settings.V1");
+        bool acquired = false;
         try
         {
-            return File.Exists(SettingsFile)
-                ? JsonSerializer.Deserialize<DeploymentManagerSettings>(File.ReadAllText(SettingsFile)) ?? new()
-                : new();
+            try { acquired = gate.WaitOne(TimeSpan.FromSeconds(2)); }
+            catch (AbandonedMutexException) { acquired = true; }
+            if (!acquired) throw new IOException("The settings file is busy. Try saving again.");
+            return write();
         }
+        finally { if (acquired) gate.ReleaseMutex(); }
+    }
+
+    private void UpdateSettings(Action<DeploymentManagerSettings> update, Action? afterSave = null) =>
+        WithSettingsWriter(() =>
+        {
+            var current = ReadSettingsCore();
+            update(current);
+            SaveSettingsCore(current);
+            afterSave?.Invoke();
+            return true;
+        });
+
+    private DeploymentManagerSettings LoadSettings()
+    {
+        try { return ReadSettingsCore(); }
         catch (Exception ex)
         {
             InternalDiagnostics.Record(ex, "Load settings.json");
@@ -454,7 +522,22 @@ public sealed class AppDataService
         }
     }
 
-    private void SaveSettingsAtomic(DeploymentManagerSettings settings) => WriteJsonAtomic(SettingsFile, settings);
+    private DeploymentManagerSettings ReadSettingsCore()
+    {
+        try
+        {
+            using var input = new FileStream(SettingsFile, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            return JsonSerializer.Deserialize<DeploymentManagerSettings>(input)
+                ?? throw new IOException("Cannot replace empty deployment settings.");
+        }
+        catch (FileNotFoundException) { return new(); }
+    }
+
+    private void SaveSettingsCore(DeploymentManagerSettings settings)
+    {
+        settings.Revision = Guid.NewGuid();
+        WriteJsonAtomic(SettingsFile, settings);
+    }
 
     private static void WriteJsonAtomic<T>(string path, T value)
     {
@@ -513,6 +596,8 @@ public sealed class DeploymentState
 
 public sealed class DeploymentManagerSettings
 {
+    public Guid Revision { get; set; }
+    public Guid RemoteCredentialGeneration { get; set; }
     public string InstallerCacheFolder { get; set; } = string.Empty;
     public string DeploymentRepositoryFolder { get; set; } = string.Empty;
     public string WorkspaceRoot { get; set; } = string.Empty;

@@ -3,7 +3,7 @@
   "branch": "fix/ui-performance-phase-01",
   "baselineVersion": "V269-R",
   "baselineCommit": "0121217a13057d7c832a9a9ddd7aa9acf5a099cc",
-  "candidate": "V279-R",
+  "candidate": "V280-R",
   "state": "IN_PROGRESS",
   "packs": {
     "GWD-A01": "TEST_PENDING",
@@ -27,7 +27,8 @@
     "A02.5 - Source control tree, reusable quick actions and outgoing view guard",
     "A02.6 - IIS management view and dedicated presenter partial",
     "A02.7 - Installers and SQL views",
-    "A02.8 - Central Wizard stage registry and page lifetime"
+    "A02.8 - Central Wizard stage registry and page lifetime",
+    "A03.1 - ordered cross-instance settings mutation and credential generations"
   ],
   "nextSourcePackage": "GWD-A03",
   "build": "NOT_RUN_POLICY",

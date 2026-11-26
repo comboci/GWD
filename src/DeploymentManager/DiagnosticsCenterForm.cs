@@ -424,24 +424,51 @@ public sealed partial class DiagnosticsCenterForm : Form
         return tab;
     }
 
+    // A bounded preview is not the evidence file. Export and Open continue
+    // to use the original, complete files. No disk I/O runs in tab construction.
+    private const int MaxDiagnosticPreviewChars = 500_000;
+
+    private static string ReadDiagnosticPreview(string path, bool tail)
+    {
+        if (!File.Exists(path)) return "No file is available.";
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        var offset = tail ? Math.Max(0L, stream.Length - MaxDiagnosticPreviewChars) : 0L;
+        stream.Seek(offset, SeekOrigin.Begin);
+        using var reader = new StreamReader(stream);
+        var buffer = new char[MaxDiagnosticPreviewChars];
+        var count = reader.ReadBlock(buffer, 0, buffer.Length);
+        var more = reader.Peek() >= 0;
+        var text = new string(buffer, 0, count);
+        if (offset > 0) text = "[... latest log preview; export contains the complete log ...]\r\n" + text;
+        if (more) text += "\r\n[... preview limit reached; open or export the complete original file ...]";
+        return text;
+    }
+
     private TabPage CreateLogTab()
     {
         var tab = new TabPage("Current Log");
         var box = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, WordWrap = false, Font = new Font("Consolas", 9.5F) };
-        try
-        {
-            if (File.Exists(_currentLog))
-            {
-                using var fs = new FileStream(_currentLog, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                fs.Seek(Math.Max(0, fs.Length - 500_000), SeekOrigin.Begin);
-                using var reader = new StreamReader(fs);
-                box.Text = reader.ReadToEnd();
-                box.SelectionStart = box.TextLength;
-                box.ScrollToCaret();
-            }
-        }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Diagnostics current log tab"); box.Text = GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message); }
         tab.Controls.Add(box);
+        var generation = 0;
+        async Task LoadLogAsync()
+        {
+            var request = ++generation;
+            box.Text = "Loading current log...";
+            string text;
+            try { text = await Task.Run(() => ReadDiagnosticPreview(_currentLog, tail: true)); }
+            catch (Exception ex)
+            {
+                InternalDiagnostics.Record(ex, "Diagnostics current log tab");
+                text = SecretRedactor.Redact(ex.Message);
+            }
+            if (tab.IsDisposed || box.IsDisposed || request != generation) return;
+            box.Text = text;
+            box.SelectionStart = box.TextLength;
+            box.ScrollToCaret();
+        }
+        _tabRefreshActions[tab] = LoadLogAsync;
+        _ = LoadLogAsync();
         return tab;
     }
 
@@ -451,22 +478,64 @@ public sealed partial class DiagnosticsCenterForm : Form
         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Vertical, SplitterDistance = 430 };
         var list = new ListBox { Dock = DockStyle.Fill, Font = new Font("Consolas", 9F) };
         var preview = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, WordWrap = false, Font = new Font("Consolas", 9F) };
-        try
+        var listGeneration = 0;
+        var previewGeneration = 0;
+
+        async Task LoadFilesAsync()
         {
-            if (Directory.Exists(folder))
-                foreach (var file in Directory.EnumerateFiles(folder, pattern).OrderByDescending(File.GetLastWriteTime).Take(500)) list.Items.Add(file);
+            var request = ++listGeneration;
+            var previous = list.SelectedItem as string;
+            preview.Text = "Loading diagnostic files...";
+            string[] files;
+            try
+            {
+                files = await Task.Run(() => Directory.Exists(folder)
+                    ? Directory.EnumerateFiles(folder, pattern).OrderByDescending(File.GetLastWriteTime).Take(500).ToArray()
+                    : Array.Empty<string>());
+            }
+            catch (Exception ex)
+            {
+                InternalDiagnostics.Record(ex, "Diagnostics file list: " + folder);
+                if (!tab.IsDisposed && !preview.IsDisposed && request == listGeneration)
+                    preview.Text = SecretRedactor.Redact(ex.Message);
+                return;
+            }
+            if (tab.IsDisposed || list.IsDisposed || preview.IsDisposed || request != listGeneration) return;
+            ++previewGeneration;
+            list.BeginUpdate();
+            try
+            {
+                list.Items.Clear();
+                list.Items.AddRange(files);
+            }
+            finally { list.EndUpdate(); }
+            preview.Text = files.Length == 0 ? "No diagnostic files found." : "Select a file. Double-click to open the full original.";
+            if (previous is not null && Array.IndexOf(files, previous) >= 0)
+                list.SelectedItem = previous;
         }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Diagnostics file list: " + folder); }
-        list.SelectedIndexChanged += (_, _) =>
+
+        list.SelectedIndexChanged += async (_, _) =>
         {
+            var request = ++previewGeneration;
             if (list.SelectedItem is not string file) return;
-            try { preview.Text = File.ReadAllText(file); }
-            catch (Exception ex) { InternalDiagnostics.Record(ex, "Diagnostics file preview: " + file); preview.Text = GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message); }
+            preview.Text = "Loading preview...";
+            string text;
+            try { text = await Task.Run(() => ReadDiagnosticPreview(file, tail: false)); }
+            catch (Exception ex)
+            {
+                InternalDiagnostics.Record(ex, "Diagnostics file preview: " + file);
+                text = SecretRedactor.Redact(ex.Message);
+            }
+            if (tab.IsDisposed || preview.IsDisposed || list.IsDisposed || request != previewGeneration ||
+                !string.Equals(list.SelectedItem as string, file, StringComparison.Ordinal)) return;
+            preview.Text = text;
         };
         list.DoubleClick += (_, _) => { if (list.SelectedItem is string file) OpenTarget(file); };
         split.Panel1.Controls.Add(list);
         split.Panel2.Controls.Add(preview);
         tab.Controls.Add(split);
+        _tabRefreshActions[tab] = LoadFilesAsync;
+        _ = LoadFilesAsync();
         return tab;
     }
 

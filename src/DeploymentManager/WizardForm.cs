@@ -88,6 +88,11 @@ public sealed class WizardForm : Form
     private bool _deploymentLocationAutoVerified;
     private CancellationTokenSource? _backgroundVerifyCts;
     private int _preparedValidationGeneration;
+    // Navigation consumes only the latest source readiness snapshot. Actual deploy
+    // and Next validation still perform their original authoritative checks.
+    private (bool Prepared, string Folder)? _navigationSourceKey;
+    private bool _navigationSourceReady;
+    private CancellationTokenSource? _navigationProbeCts;
     private string? _lastErrorReportPath;
     private const string InterruptedDeploymentStatus = "PREVIOUS DEPLOYMENT INTERRUPTED — RECOVERY UNVERIFIED";
     private string _deploymentStatus = "Not started";
@@ -192,6 +197,8 @@ public sealed class WizardForm : Form
         _runtimeMetricsTimer.Start();
         UpdateRuntimeMetrics();
         FormClosing += WizardForm_FormClosing;
+        Shown += (_, _) => UpdateNavigationState();
+        Disposed += (_, _) => CancelNavigationSourceProbe();
         _healthMonitor.Updated += OnHealthUpdated;
         _healthMonitor.Start();
         ShowPage(0);
@@ -571,6 +578,7 @@ public sealed class WizardForm : Form
         _autoDeployCts?.Dispose();
         _autoDeployCts = null;
         _deployment.ResetPerformanceSnapshot();
+        InvalidateNavigationSourceReadiness();
         DisposeContentControls();
 
         // Keep the selected project so Start Over returns to Project Source ready for confirmation/change.
@@ -741,15 +749,92 @@ public sealed class WizardForm : Form
         }
     }
 
+    private (bool Prepared, string Folder) NavigationSourceKey()
+    {
+        var prepared = string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase);
+        return (prepared, (prepared ? _profile.ReadyPublishFolder : _profile.SourceFolder).Trim());
+    }
+
+    private void CancelNavigationSourceProbe()
+    {
+        var request = _navigationProbeCts;
+        _navigationProbeCts = null;
+        request?.Cancel(); // The worker owns disposal, even when superseded.
+    }
+
+    private void InvalidateNavigationSourceReadiness()
+    {
+        CancelNavigationSourceProbe();
+        _navigationSourceKey = null;
+        _navigationSourceReady = false;
+    }
+
+    private void RememberNavigationSourceReadiness(bool prepared, string folder, bool ready)
+    {
+        var key = (Prepared: prepared, Folder: folder.Trim());
+        if (key != NavigationSourceKey()) return;
+        CancelNavigationSourceProbe();
+        _navigationSourceKey = key;
+        _navigationSourceReady = ready;
+    }
+
+    private bool EnsureNavigationSourceReadiness()
+    {
+        var key = NavigationSourceKey();
+        if (_navigationSourceKey == key) return _navigationSourceReady;
+        InvalidateNavigationSourceReadiness();
+        if (string.IsNullOrWhiteSpace(key.Folder))
+        {
+            _navigationSourceKey = key;
+            return false;
+        }
+        // During construction there is not necessarily a UI message pump yet.
+        // Shown starts the probe if the source page has not already supplied a result.
+        if (!IsHandleCreated || IsDisposed || Disposing) return false;
+        _navigationSourceKey = key;
+        var request = new CancellationTokenSource();
+        _navigationProbeCts = request;
+        _ = ProbeNavigationSourceAsync(key, request);
+        return false;
+    }
+
+    private async Task ProbeNavigationSourceAsync((bool Prepared, string Folder) key, CancellationTokenSource request)
+    {
+        var ready = false;
+        try
+        {
+            await Task.Delay(200, request.Token);
+            ready = await Task.Run(() => key.Prepared
+                ? DeploymentService.ValidatePreparedPublish(key.Folder).Ok
+                : !string.IsNullOrWhiteSpace(_environment.DetectApiProject(key.Folder)), request.Token);
+        }
+        catch (OperationCanceledException) when (request.IsCancellationRequested) { }
+        catch (Exception ex) { InternalDiagnostics.Record(ex, "Navigation source readiness"); }
+        finally
+        {
+            // Compare both request identity and input key. A result from an old
+            // source/mode cannot enable controls for a new selection.
+            var current = ReferenceEquals(_navigationProbeCts, request);
+            var cancelled = request.IsCancellationRequested;
+            if (current) _navigationProbeCts = null;
+            request.Dispose();
+            if (current && !cancelled && !IsDisposed && !Disposing &&
+                _navigationSourceKey == key && NavigationSourceKey() == key)
+            {
+                _navigationSourceReady = ready;
+                UpdateNavigationState();
+            }
+        }
+    }
+
     private void UpdateNavigationState()
     {
         _back.Enabled = _pageIndex > 0;
+        var navigationSourceReady = EnsureNavigationSourceReadiness();
         var localOnly = string.Equals(_profile.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase);
         bool canNext = _pageIndex switch
         {
-            0 => string.Equals(_profile.BuildMode, "Prepared IIS Publish", StringComparison.OrdinalIgnoreCase)
-                ? DeploymentService.ValidatePreparedPublish(_profile.ReadyPublishFolder).Ok && !string.IsNullOrWhiteSpace(_profile.ApplicationName)
-                : Directory.Exists(_profile.SourceFolder) && !string.IsNullOrWhiteSpace(_profile.ApplicationName) && !string.IsNullOrWhiteSpace(_environment.DetectApiProject(_profile.SourceFolder)),
+            0 => navigationSourceReady && !string.IsNullOrWhiteSpace(_profile.ApplicationName),
             1 => CanLeaveTargetPage(),
             2 => _scanCompleted,
             3 => localOnly || _iisState.Installed,
@@ -788,21 +873,11 @@ public sealed class WizardForm : Form
             return false;
         }
 
-        if (_profile.BuildMode == "Prepared IIS Publish")
-            return Directory.Exists(_profile.ReadyPublishFolder) && Directory.EnumerateFiles(_profile.ReadyPublishFolder, "*", SearchOption.TopDirectoryOnly).Any();
         if (string.Equals(_profile.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(_profile.WorkspaceRoot)) return false;
-        if (!Directory.Exists(_profile.SourceFolder)) return false;
-        var api = _environment.DetectApiProject(_profile.SourceFolder);
-        return !string.IsNullOrWhiteSpace(api);
+        return EnsureNavigationSourceReadiness();
     }
 
-    private bool CanAutoDeployStart()
-    {
-        if (_profile.BuildMode == "Prepared IIS Publish")
-            return Directory.Exists(_profile.ReadyPublishFolder) && Directory.EnumerateFiles(_profile.ReadyPublishFolder, "*", SearchOption.TopDirectoryOnly).Any();
-        if (!Directory.Exists(_profile.SourceFolder)) return false;
-        return !string.IsNullOrWhiteSpace(_environment.DetectApiProject(_profile.SourceFolder));
-    }
+    private bool CanAutoDeployStart() => EnsureNavigationSourceReadiness();
 
     private static string NormalizeDependencyMode(string? mode)
     {
@@ -1144,6 +1219,7 @@ public sealed class WizardForm : Form
         }
         catch (Exception ex)
         {
+            if (_pageIndex <= 1) InvalidateNavigationSourceReadiness();
             MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Cannot continue", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             AppendLog("ERROR: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message));
             UpdateNavigationState();
@@ -1253,6 +1329,7 @@ public sealed class WizardForm : Form
             if (!prepared) { preparedValidation.Text = "Not applicable for source-build mode."; preparedValidation.ForeColor = Color.DimGray; return; }
             _profile.ReadyPublishFolder = preparedPublish.Text.Trim();
             var validation = DeploymentService.ValidatePreparedPublish(_profile.ReadyPublishFolder);
+            RememberNavigationSourceReadiness(true, _profile.ReadyPublishFolder, validation.Ok);
             preparedValidation.Text = validation.Detail;
             preparedValidation.ForeColor = validation.Ok ? Color.ForestGreen : Color.Firebrick;
             if (validation.Ok && string.IsNullOrWhiteSpace(app.Text) && !string.IsNullOrWhiteSpace(validation.ApplicationBinary))
@@ -1271,8 +1348,10 @@ public sealed class WizardForm : Form
         {
             _profile.SourceFolder = source.Text.Trim();
             var api = Directory.Exists(_profile.SourceFolder) ? _environment.DetectApiProject(_profile.SourceFolder) : null;
+            RememberNavigationSourceReadiness(false, _profile.SourceFolder, !string.IsNullOrWhiteSpace(api));
             if (api is null)
             {
+                _profile.ApiProjectPath = string.Empty;
                 detectedRoot.Text = "No ASP.NET Core Web project detected."; detectedRoot.ForeColor = Color.Firebrick;
                 app.Text = site.Text = database.Text = string.Empty;
             }
@@ -3630,8 +3709,14 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
     private void BuildReviewPageRefresh()
     {
         if (_pageIndex != _steps.Length - 1) return;
-        _content.Controls.Clear();
-        BuildReviewPage();
+        _content.SuspendLayout();
+        try
+        {
+            // Detach the persistent log, then dispose the previous view and its handlers.
+            DisposeContentControls();
+            BuildReviewPage();
+        }
+        finally { _content.ResumeLayout(true); }
     }
 
     private async Task BusyAsync(Control control, Func<Task> action)
@@ -3911,6 +3996,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             : "Do you want to close Deployment Manager?";
         if (MessageBox.Show(this, warning, "Confirm exit", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
         { e.Cancel = true; return; }
+        CancelNavigationSourceProbe();
         _acceptUiLogLines = false;
         _uiLogFlushTimer.Stop();
         _uiLogFlushTimer.Dispose();

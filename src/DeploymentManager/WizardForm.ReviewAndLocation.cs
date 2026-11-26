@@ -17,78 +17,22 @@ public sealed partial class WizardForm
     {
         _pageTitle.Text = "Deployment location";
         _pageDescription.Text = "Choose exactly where IIS should host the application. You can use a dedicated application folder or explicitly take over the IIS default web root on port 80.";
-        var form = FormGrid();
-        var lastCustomRoot = string.Equals(_profile.HostingRoot.TrimEnd('\\'), @"C:\inetpub\wwwroot", StringComparison.OrdinalIgnoreCase)
-            ? Path.Combine(@"C:\inetpub\wwwroot", SafeApplicationFolderName(_profile.ApplicationName))
-            : _profile.HostingRoot;
-        var useDefault = new CheckBox
+        var fallbackRoot = Path.Combine(@"C:\inetpub\wwwroot", SafeApplicationFolderName(_profile.ApplicationName));
+        var view = new DeploymentLocationView(_profile.ApplicationName, _profile.HostingRoot, _profile.DeploymentLayout,
+            _profile.UseDefaultIisWebsite, _profile.CleanupPreviousDeployments, fallbackRoot);
+        _locationView = view;
+        _content.Controls.Add(view);
+        view.Activate(choice =>
         {
-            Text = @"Use IIS default web root (C:\inetpub\wwwroot) and port 80 — replace the existing IIS site/content on port 80",
-            AutoSize = true,
-            Checked = _profile.UseDefaultIisWebsite,
-            ForeColor = Color.DarkRed
-        };
-        var hostingRoot = new TextBox { Text = _profile.HostingRoot, Dock = DockStyle.Fill, MinimumSize = new Size(650, 38), Font = new Font("Segoe UI", 10F) };
-        var browse = new Button { Text = "Browse...", Width = 120, Height = 38 };
-        var single = new RadioButton { Text = "Single Folder — always deploy the active site into this exact folder", AutoSize = true, Checked = string.Equals(_profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) };
-        var versioned = new RadioButton { Text = "Versioned Folders — keep releases as subfolders under this root", AutoSize = true, Checked = !string.Equals(_profile.DeploymentLayout, "Single Folder", StringComparison.OrdinalIgnoreCase) };
-        var cleanup = new CheckBox { Text = "After a successful versioned deployment, delete older release folders", AutoSize = true, Checked = _profile.CleanupPreviousDeployments, Enabled = versioned.Checked };
-        var hint = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(720, 0), Text = @"Dedicated folder example: C:\inetpub\wwwroot\NSPOfficeAutomation
-Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site owning port 80 blocks deployment; reconfigure its binding explicitly first." };
-
-        AddRow(form, "Application", new TextBox { Text = _profile.ApplicationName, Dock = DockStyle.Fill, ReadOnly = true });
-        AddRow(form, "Default IIS website", useDefault);
-        AddRow(form, "Hosted site folder", Wrap(hostingRoot, browse));
-        AddRow(form, "Deployment layout", VerticalWrap(single, versioned, cleanup));
-        AddRow(form, "", hint);
-        _content.Controls.Add(form);
-
-        void ApplyDefaultMode()
-        {
-            if (useDefault.Checked)
-            {
-                if (!string.Equals(hostingRoot.Text.TrimEnd('\\'), @"C:\inetpub\wwwroot", StringComparison.OrdinalIgnoreCase)) lastCustomRoot = hostingRoot.Text.Trim();
-                hostingRoot.Text = @"C:\inetpub\wwwroot";
-                single.Checked = true;
-                _profile.HttpPort = 80;
-                _profile.HostHeader = string.Empty;
-            }
-            else if (string.Equals(hostingRoot.Text.TrimEnd('\\'), @"C:\inetpub\wwwroot", StringComparison.OrdinalIgnoreCase))
-            {
-                hostingRoot.Text = string.IsNullOrWhiteSpace(lastCustomRoot) ? Path.Combine(@"C:\inetpub\wwwroot", SafeApplicationFolderName(_profile.ApplicationName)) : lastCustomRoot;
-            }
-            hostingRoot.ReadOnly = useDefault.Checked;
-            browse.Enabled = !useDefault.Checked;
-            single.Enabled = !useDefault.Checked;
-            versioned.Enabled = !useDefault.Checked;
-            cleanup.Enabled = !useDefault.Checked && versioned.Checked;
-        }
-
-        void Save()
-        {
-            _profile.UseDefaultIisWebsite = useDefault.Checked;
-            _profile.HostingRoot = hostingRoot.Text.Trim();
-            _profile.DeploymentLayout = useDefault.Checked || single.Checked ? "Single Folder" : "Versioned Folders";
-            _profile.CleanupPreviousDeployments = cleanup.Checked;
+            _profile.UseDefaultIisWebsite = choice.UseDefault;
+            _profile.HostingRoot = choice.Folder;
+            _profile.DeploymentLayout = choice.Layout;
+            _profile.CleanupPreviousDeployments = choice.CleanupOlder;
             if (_profile.UseDefaultIisWebsite) { _profile.HttpPort = 80; _profile.HostHeader = string.Empty; }
-            cleanup.Enabled = !useDefault.Checked && versioned.Checked;
             QueueDeferredSettingsSave("hosting", () => _appData.SaveHostingSettings(_profile.HostingRoot, _profile.DeploymentLayout, _profile.CleanupPreviousDeployments, _profile.UseDefaultIisWebsite));
             UpdateNavigationState();
-        }
-
-        hostingRoot.TextChanged += (_, _) => Save();
-        hostingRoot.Leave += (_, _) => FlushDeferredSettingsSaves();
-        single.CheckedChanged += (_, _) => Save();
-        versioned.CheckedChanged += (_, _) => Save();
-        cleanup.CheckedChanged += (_, _) => Save();
-        useDefault.CheckedChanged += (_, _) => { ApplyDefaultMode(); Save(); };
-        browse.Click += (_, _) =>
-        {
-            using var dialog = new FolderBrowserDialog { Description = "Choose the folder where IIS site files should be hosted", UseDescriptionForTitle = true, SelectedPath = Directory.Exists(hostingRoot.Text) ? hostingRoot.Text : string.Empty, ShowNewFolderButton = true };
-            if (dialog.ShowDialog(this) == DialogResult.OK) hostingRoot.Text = dialog.SelectedPath;
-        };
-        ApplyDefaultMode();
-        Save();
+        }, FlushDeferredSettingsSaves);
+        view.PublishCurrent();
     }
 
     private double _reviewSplitRatio = 0.42;

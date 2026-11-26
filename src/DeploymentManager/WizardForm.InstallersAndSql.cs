@@ -7,6 +7,7 @@ using System.Text.RegularExpressions;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.IO.Compression;
+using static GenericWeb.DeploymentManager.UI.Controls.WizardLayout;
 
 namespace GenericWeb.DeploymentManager;
 

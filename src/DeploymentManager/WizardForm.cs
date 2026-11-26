@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.IO.Compression;
 using GenericWeb.DeploymentManager.UI.Pages;
 using static GenericWeb.DeploymentManager.UI.Controls.StatusCardUi;
+using static GenericWeb.DeploymentManager.UI.Controls.WizardLayout;
 
 namespace GenericWeb.DeploymentManager;
 
@@ -121,6 +122,7 @@ public sealed partial class WizardForm : Form
     private int _droppedUiLogLines;
     private volatile bool _acceptUiLogLines = true;
     private ReviewStageView? _reviewView;
+    private DeploymentLocationView? _locationView;
     private CancellationTokenSource? _deploymentCts;
     private bool _deploymentCancelConfirmationOpen;
     private CancellationTokenSource? _autoDeployCts;
@@ -840,6 +842,8 @@ public sealed partial class WizardForm : Form
         _scanView = null;
         _reviewView?.Deactivate();
         _reviewView = null;
+        _locationView?.Deactivate();
+        _locationView = null;
         if (_pageIndex == 0) CancelBackgroundVerification();
         // Source/target controls may own the latest unsaved edit. Their queued
         // actions must execute while controls are still alive.
@@ -2472,38 +2476,6 @@ public sealed partial class WizardForm : Form
     }
 
     private void RememberBrowseSelection(string path, BrowseContext context = BrowseContext.General) => _appData.SaveLastBrowseFolder(path, context);
-
-    private static TableLayoutPanel FormGrid()
-    {
-        var grid = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, GrowStyle = TableLayoutPanelGrowStyle.AddRows, ColumnCount = 2, RowCount = 0, Padding = new Padding(10, 8, 10, 8) };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        return grid;
-    }
-
-    private static void AddRow(TableLayoutPanel grid, string label, Control control)
-    {
-        var row = grid.RowCount++;
-        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        grid.Controls.Add(new Label { Text = label, AccessibleName = label, AutoSize = true, MaximumSize = new Size(198, 0), Font = GwdUi.Section, Margin = new Padding(3, 4, 3, 8), Padding = new Padding(0, 4, 8, 0) }, 0, row);
-        if (string.IsNullOrEmpty(control.AccessibleName)) control.AccessibleName = label;
-        control.Margin = new Padding(3, 4, 3, 8);
-        grid.Controls.Add(control, 1, row);
-    }
-
-    private static FlowLayoutPanel VerticalWrap(params Control[] controls)
-    {
-        var panel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, FlowDirection = FlowDirection.TopDown, WrapContents = false };
-        panel.Controls.AddRange(controls);
-        return panel;
-    }
-
-    private static FlowLayoutPanel Wrap(params Control[] controls)
-    {
-        var panel = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
-        panel.Controls.AddRange(controls);
-        return panel;
-    }
 
     private static GroupBox InfoBox(string title, string text)
     {

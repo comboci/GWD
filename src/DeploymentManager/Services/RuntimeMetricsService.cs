@@ -20,7 +20,9 @@ public sealed class RuntimeMetricsService : IDisposable
     private readonly Queue<RuntimeMetricSample> _history = new();
     private RuntimeMetricSample? _latestSample;
     private readonly object _sync = new();
-    private DateTimeOffset _lastAt = DateTimeOffset.Now;
+    private readonly object _sampleSync = new();
+    private bool _disposed;
+    private long _lastTimestamp = Stopwatch.GetTimestamp();
     private TimeSpan _lastCpu;
     private const int MaxSamples = 720; // 1 hour at a 5-second sampling interval.
 
@@ -31,8 +33,9 @@ public sealed class RuntimeMetricsService : IDisposable
 
     public RuntimeMetricSample Sample()
     {
-        lock (_sync)
+        lock (_sampleSync)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             return SampleUnderLock();
         }
     }
@@ -44,15 +47,20 @@ public sealed class RuntimeMetricsService : IDisposable
             _process.Refresh();
             var now = DateTimeOffset.Now;
             var cpuNow = _process.TotalProcessorTime;
-            var elapsedMs = Math.Max(1, (now - _lastAt).TotalMilliseconds);
+            var timestamp = Stopwatch.GetTimestamp();
+            var elapsedMs = Math.Max(1, Stopwatch.GetElapsedTime(_lastTimestamp, timestamp).TotalMilliseconds);
             var cpuMs = Math.Max(0, (cpuNow - _lastCpu).TotalMilliseconds);
             var cpu = Math.Clamp(cpuMs / elapsedMs / Math.Max(1, Environment.ProcessorCount) * 100d, 0d, 100d);
-            _lastAt = now;
+            _lastTimestamp = timestamp;
             _lastCpu = cpuNow;
             var sample = new RuntimeMetricSample(now, cpu, _process.WorkingSet64, _process.PrivateMemorySize64, GC.GetTotalMemory(false), _process.Threads.Count);
-            _history.Enqueue(sample);
-            _latestSample = sample;
-            while (_history.Count > MaxSamples) _history.Dequeue();
+            // Readers never wait for OS process/thread enumeration.
+            lock (_sync)
+            {
+                _history.Enqueue(sample);
+                _latestSample = sample;
+                while (_history.Count > MaxSamples) _history.Dequeue();
+            }
             return sample;
         }
         catch (Exception ex)
@@ -74,8 +82,21 @@ public sealed class RuntimeMetricsService : IDisposable
         lock (_sync) return _history.ToArray();
     }
 
+    public RuntimeMetricSample[] GetRecentHistory(int maxSamples)
+    {
+        lock (_sync) return _history.Skip(Math.Max(0, _history.Count - Math.Max(0, maxSamples))).ToArray();
+    }
+
     public string ToPlainText() => string.Join(Environment.NewLine, GetHistory().Select(x => $"{x.At:yyyy-MM-dd HH:mm:ss} | {x.ToDisplayText()}"));
     public string ToJson() => JsonSerializer.Serialize(GetHistory(), new JsonSerializerOptions { WriteIndented = true });
 
-    public void Dispose() => _process.Dispose();
+    public void Dispose()
+    {
+        lock (_sampleSync)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _process.Dispose();
+        }
+    }
 }

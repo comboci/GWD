@@ -39,6 +39,8 @@ public sealed partial class WizardForm : Form
     private readonly Label _deploymentIndicator = new() { Dock = DockStyle.Fill, AutoSize = false, AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(8, 2, 6, 2), ForeColor = Color.DimGray, Text = "Recorded deployment result: Not started" };
     private readonly ToolTip _healthTip = new() { AutoPopDelay = 20000, InitialDelay = 350, ReshowDelay = 100 };
     private readonly System.Windows.Forms.Timer _runtimeMetricsTimer = new() { Interval = 5000 };
+    private Task<RuntimeMetricSample>? _runtimeMetricsPending;
+    private bool _runtimeMetricsClosing;
     private readonly Label _resourceUsage = new() { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 8, 8, 0), Text = "CPU/RAM: sampling..." };
     // Persistent settings are coalesced on the UI thread, not written for each
     // TextChanged character. Flush before a page's controls are disposed.
@@ -201,9 +203,14 @@ public sealed partial class WizardForm : Form
             _trayBlinkVisible = !_trayBlinkVisible;
             _trayIcon.Icon = _trayBlinkVisible ? (_persistentState.LastResult == "Successful" ? _traySuccessIcon : _trayFailureIcon) : (Icon ?? SystemIcons.Application);
         };
-        _runtimeMetricsTimer.Tick += (_, _) => UpdateRuntimeMetrics();
-        _runtimeMetricsTimer.Start();
-        UpdateRuntimeMetrics();
+        _runtimeMetricsTimer.Tick += async (_, _) => await UpdateRuntimeMetricsAsync();
+        Shown += async (_, _) =>
+        {
+            if (_runtimeMetricsClosing) return;
+            _runtimeMetricsTimer.Start();
+            await UpdateRuntimeMetricsAsync();
+        };
+        Disposed += (_, _) => StopRuntimeMetrics();
         FormClosing += WizardForm_FormClosing;
         Shown += (_, _) => UpdateNavigationState();
         Disposed += (_, _) => CancelNavigationSourceProbe();
@@ -488,12 +495,37 @@ public sealed partial class WizardForm : Form
         };
     }
 
-    private void UpdateRuntimeMetrics()
+    private async Task UpdateRuntimeMetricsAsync()
     {
-        if (IsDisposed || Disposing) return;
-        var sample = _runtimeMetrics.Sample();
-        _resourceUsage.Text = sample.ToDisplayText();
-        _resourceUsage.ForeColor = sample.WorkingSetBytes > 768L * 1024 * 1024 ? Color.Firebrick : (sample.WorkingSetBytes > 384L * 1024 * 1024 ? Color.DarkOrange : Color.DimGray);
+        if (_runtimeMetricsClosing || IsDisposed || Disposing || _runtimeMetricsPending is not null) return;
+        var pending = Task.Run(_runtimeMetrics.Sample);
+        _runtimeMetricsPending = pending;
+        try
+        {
+            var sample = await pending;
+            if (_runtimeMetricsClosing || IsDisposed || Disposing) return;
+            if (!ReferenceEquals(sample, _runtimeMetrics.GetLatestSample()))
+            {
+                _resourceUsage.Text = "CPU/RAM sampling unavailable";
+                _resourceUsage.ForeColor = Color.DimGray;
+                return;
+            }
+            _resourceUsage.Text = sample.ToDisplayText();
+            _resourceUsage.ForeColor = sample.WorkingSetBytes > 768L * 1024 * 1024 ? Color.Firebrick : (sample.WorkingSetBytes > 384L * 1024 * 1024 ? Color.DarkOrange : Color.DimGray);
+        }
+        catch (Exception ex) { InternalDiagnostics.Record(ex, "Runtime metrics worker"); }
+        finally { if (ReferenceEquals(_runtimeMetricsPending, pending)) _runtimeMetricsPending = null; }
+    }
+
+    private void StopRuntimeMetrics()
+    {
+        if (_runtimeMetricsClosing) return;
+        _runtimeMetricsClosing = true;
+        _runtimeMetricsTimer.Stop();
+        _runtimeMetricsTimer.Dispose();
+        var pending = _runtimeMetricsPending;
+        if (pending is null || pending.IsCompleted) _runtimeMetrics.Dispose();
+        else _ = pending.ContinueWith(_ => _runtimeMetrics.Dispose(), TaskScheduler.Default);
     }
 
     private async Task CleanupPreviousVersionsAsync()
@@ -2614,9 +2646,7 @@ public sealed partial class WizardForm : Form
         _trayIcon.Dispose();
         _traySuccessIcon.Dispose();
         _trayFailureIcon.Dispose();
-        _runtimeMetricsTimer.Stop();
-        _runtimeMetricsTimer.Dispose();
-        _runtimeMetrics.Dispose();
+        StopRuntimeMetrics();
         _healthMonitor.Updated -= OnHealthUpdated;
         _healthMonitor.Dispose();
         _healthTip.Dispose();

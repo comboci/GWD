@@ -12,7 +12,7 @@ public sealed partial class DiagnosticsCenterForm : Form
     private readonly string _currentLog;
     private readonly DiagnosticBundleService _bundle = new();
     private readonly RuntimeMetricsService _runtimeMetrics;
-    private readonly System.Windows.Forms.Timer _metricsTimer = new() { Interval = 2000 };
+    private readonly System.Windows.Forms.Timer _metricsTimer = new() { Interval = 5000 };
     private TabPage? _runtimeResourcesTab;
     private Action? _refreshRuntimeResources;
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill };
@@ -616,7 +616,7 @@ public sealed partial class DiagnosticsCenterForm : Form
 
             lastRenderedAt = sample.At;
             current.Text = $"Measured {sample.At:HH:mm:ss} | {sample.ToDisplayText()}";
-            var lines = _runtimeMetrics.GetHistory().TakeLast(240)
+            var lines = _runtimeMetrics.GetRecentHistory(240)
                 .Select(x => $"{x.At:HH:mm:ss} | {x.ToDisplayText()}");
             history.Text = string.Join(Environment.NewLine, lines);
             history.SelectionStart = history.TextLength;

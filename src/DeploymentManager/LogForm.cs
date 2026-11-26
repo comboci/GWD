@@ -19,6 +19,8 @@ public sealed class LogForm : Form
     private bool _reading;
     private bool _paused;
     private bool _closing;
+    private Task? _copyPending;
+    private bool _lifetimeDisposed;
 
     public LogForm(string logFile)
     {
@@ -170,7 +172,11 @@ public sealed class LogForm : Form
             if (!File.Exists(_logFile)) { MessageBox.Show(this, "There is no current log file yet.", "Log dump", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
             var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
             var destination = Path.Combine(desktop, $"NSP-Deployment-Log-{DateTime.Now:yyyyMMdd-HHmmss}.txt");
-            await Task.Run(() => LogPreviewReader.CopySnapshotAsync(_logFile, destination, _lifetime.Token));
+            var token = _lifetime.Token;
+            var copy = Task.Run(() => LogPreviewReader.CopySnapshotAsync(_logFile, destination, token));
+            _copyPending = copy;
+            try { await copy; }
+            finally { _copyPending = null; }
             if (!_closing && !IsDisposed)
                 MessageBox.Show(this, "Complete log snapshot copied to Desktop:\r\n" + destination, "Log dump created", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
@@ -188,8 +194,13 @@ public sealed class LogForm : Form
         finally
         {
             if (disposing) { _timer.Dispose(); _boldLogFont?.Dispose(); }
-            // The token source is disposed after an outstanding copy completes by GC;
-            // disposing it here could race a worker that has not yet obtained Token.
+            if (disposing && !_lifetimeDisposed)
+            {
+                _lifetimeDisposed = true;
+                var pending = _copyPending;
+                if (pending is null || pending.IsCompleted) _lifetime.Dispose();
+                else _ = pending.ContinueWith(_ => _lifetime.Dispose(), TaskScheduler.Default);
+            }
         }
     }
 }

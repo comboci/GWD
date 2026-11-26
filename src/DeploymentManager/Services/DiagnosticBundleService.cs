@@ -221,43 +221,78 @@ public sealed class DiagnosticBundleService
     private static void AddSanitizedFile(ZipArchive archive, string source, string name, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
+        if (name.StartsWith("history/", StringComparison.Ordinal) && name.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase))
+        {
+            // Keep structured redaction record-by-record. If a history read or
+            // archive write fails, fail the entire temporary export rather than
+            // publish a partial history as a complete entry.
+            AddHistoryFile(archive, source, name, ct);
+            return;
+        }
         try
         {
             using var stream = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
             var contents = reader.ReadToEnd();
             ct.ThrowIfCancellationRequested();
-            if (name.StartsWith("history/", StringComparison.Ordinal) && name.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase))
-            {
-                var valid = new StringBuilder();
-                var rejected = new StringBuilder();
-                int lineNumber = 0;
-                using var lines = new StringReader(contents);
-                while (lines.ReadLine() is string line)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    lineNumber++;
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    try
-                    {
-                        var record = DeploymentHistoryService.ReadHistoryRecord(line);
-                        valid.AppendLine(DeploymentHistoryService.SerializeRedactedRecord(record));
-                    }
-                    catch (JsonException)
-                    {
-                        rejected.AppendLine("Invalid history line " + lineNumber + ": " + SecretRedactor.Redact(line));
-                    }
-                }
-                AddAlreadyRedactedText(archive, name, valid.ToString());
-                if (rejected.Length > 0) AddAlreadyRedactedText(archive, name + ".rejected.txt", rejected.ToString());
-            }
-            else AddText(archive, name, contents);
+            // Arbitrary text can contain multiline registered secrets and regex
+            // matches; do not replace whole-text redaction with unsafe line splits.
+            AddText(archive, name, contents);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
             InternalDiagnostics.Record(ex, "Diagnostic export file: " + source);
             AddText(archive, name + ".unavailable.txt", ex.Message);
+        }
+    }
+
+    private static void AddHistoryFile(ZipArchive archive, string source, string name, CancellationToken ct)
+    {
+        using var input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(input, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        // ZipArchive in Create mode permits only one open entry. Spool only
+        // already-redacted rejected lines to a delete-on-close temporary file.
+        var spoolPath = Path.Combine(Path.GetTempPath(), "gwd-history-" + Guid.NewGuid().ToString("N") + ".tmp");
+        using var spool = new FileStream(spoolPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None,
+            16 * 1024, FileOptions.DeleteOnClose);
+        var entry = archive.CreateEntry(name, CompressionLevel.Optimal);
+        using (var valid = new StreamWriter(entry.Open(), new UTF8Encoding(false)))
+        using (var rejected = new StreamWriter(spool, new UTF8Encoding(false), 16 * 1024, leaveOpen: true))
+        {
+            int lineNumber = 0;
+            while (reader.ReadLine() is string line)
+            {
+                ct.ThrowIfCancellationRequested();
+                lineNumber++;
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                string serialized;
+                try
+                {
+                    var record = DeploymentHistoryService.ReadHistoryRecord(line);
+                    serialized = DeploymentHistoryService.SerializeRedactedRecord(record);
+                }
+                catch (JsonException)
+                {
+                    rejected.WriteLine("Invalid history line " + lineNumber + ": " + SecretRedactor.Redact(line));
+                    continue;
+                }
+                valid.WriteLine(serialized);
+            }
+        }
+        ct.ThrowIfCancellationRequested();
+        if (spool.Length > 0)
+        {
+            spool.Position = 0;
+            var rejectedEntry = archive.CreateEntry(name + ".rejected.txt", CompressionLevel.Optimal);
+            using var output = rejectedEntry.Open();
+            var buffer = new byte[16 * 1024];
+            int read;
+            while ((read = spool.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                ct.ThrowIfCancellationRequested();
+                output.Write(buffer, 0, read);
+            }
         }
     }
 

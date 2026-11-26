@@ -1558,7 +1558,7 @@ public sealed class WizardForm : Form
             using var options = new CleanExportOptionsForm(); if (options.ShowDialog(this) != DialogResult.OK) return;
             using var dialog = new SaveFileDialog { Title = "Export clean source ZIP", Filter = "ZIP archive (*.zip)|*.zip", FileName = $"{SanitizeFileName(_profile.ApplicationName)}-Last-Sources.zip" };
             if (dialog.ShowDialog(this) != DialogResult.OK) return;
-            try { ExportCleanSourceZip(src, dialog.FileName, options.Exclusions); MessageBox.Show(this, "Clean source ZIP created successfully.\r\n" + dialog.FileName, "Clean Source Export", MessageBoxButtons.OK, MessageBoxIcon.Information); AppendLog("[EXPORT] Clean source ZIP: " + dialog.FileName); }
+            try { ExportCleanSourceWithProgress(src, dialog.FileName, options.Exclusions); MessageBox.Show(this, "Clean source ZIP created successfully.\r\n" + dialog.FileName, "Clean Source Export", MessageBoxButtons.OK, MessageBoxIcon.Information); AppendLog("[EXPORT] Clean source ZIP: " + dialog.FileName); }
             catch (Exception ex) { InternalDiagnostics.Record(ex, "Clean source export"); MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Clean Source Export", MessageBoxButtons.OK, MessageBoxIcon.Error); }
         };
 
@@ -2028,7 +2028,7 @@ public sealed class WizardForm : Form
     {
         ValidateTargetPage();
         _iisState = await _environment.CheckIisAsync();
-        _hostingState = _environment.CheckHostingBundle(_profile.TargetFrameworkMajor);
+        _hostingState = await _environment.CheckHostingBundleAsync(_profile.TargetFrameworkMajor);
         var readyPublish = _profile.BuildMode == "Prepared IIS Publish";
         _sdkState = readyPublish ? new PrerequisiteState(true, "Not required — build is skipped because a ready publish folder was selected.") : await _environment.CheckDotNetSdkAsync(_profile.TargetFrameworkMajor);
         _nodeState = readyPublish ? new PrerequisiteState(true, "Not required — build is skipped because a ready publish folder was selected.") : await _environment.CheckNodeAsync(_profile.RequiresNode);
@@ -2149,36 +2149,71 @@ public sealed class WizardForm : Form
             UpdateNavigationState();
         }
 
+        CancellationTokenSource? inventoryRequest = null;
+        grid.Disposed += (_, _) => inventoryRequest?.Cancel();
+
         async Task LoadSites()
         {
-            if (!_iisState.Installed) return;
+            if (!_iisState.Installed || grid.IsDisposed || poolGrid.IsDisposed) return;
+            inventoryRequest?.Cancel();
+            var request = new CancellationTokenSource();
+            inventoryRequest = request;
             refreshSites.Enabled = false;
+            lastIisCheck.Text = "Refreshing IIS inventory...";
+            bool Current() => ReferenceEquals(inventoryRequest, request) && !request.IsCancellationRequested &&
+                !grid.IsDisposed && !grid.Disposing && grid.Parent is not null && grid.Columns.Count == 6 &&
+                !poolGrid.IsDisposed && !poolGrid.Disposing && poolGrid.Parent is not null && poolGrid.Columns.Count == 2;
             try
             {
-                var sites = await _environment.ListIisSitesAsync();
-                if (grid.IsDisposed || grid.Disposing || !grid.IsHandleCreated || grid.Parent is null || grid.Columns.Count != 6) return;
+                var inventory = await Task.Run(async () =>
+                {
+                    var sites = await _environment.ListIisSitesAsync(request.Token);
+                    var pools = await _environment.ListIisAppPoolsAsync(request.Token);
+                    return (sites, pools);
+                }, request.Token);
+                if (!Current()) return;
                 grid.SuspendLayout();
+                poolGrid.SuspendLayout();
                 try
                 {
                     grid.Rows.Clear();
-                    foreach (var x in sites)
+                    foreach (var x in inventory.sites)
                     {
-                        if (grid.IsDisposed || grid.Disposing || grid.Parent is null || grid.Columns.Count != 6) return;
                         var i = grid.Rows.Add(false, x.Name, x.State, x.Bindings, x.PhysicalPath, x.AppPool);
                         grid.Rows[i].Tag = x;
                     }
+                    poolGrid.Rows.Clear();
+                    foreach (var ap in inventory.pools)
+                    {
+                        var i = poolGrid.Rows.Add(ap.Name, ap.State);
+                        poolGrid.Rows[i].Tag = ap;
+                    }
+                    lastIisCheck.Text = "Last checked: " + DateTime.Now.ToString("HH:mm:ss");
                 }
-                finally { if (!grid.IsDisposed) grid.ResumeLayout(); }
-                var pools = await _environment.ListIisAppPoolsAsync();
-                if (poolGrid.IsDisposed || poolGrid.Disposing || !poolGrid.IsHandleCreated || poolGrid.Parent is null || poolGrid.Columns.Count != 2) return;
-                poolGrid.Rows.Clear(); foreach(var ap in pools){ if(poolGrid.IsDisposed || poolGrid.Columns.Count != 2) return; var r=poolGrid.Rows.Add(ap.Name,ap.State); poolGrid.Rows[r].Tag=ap; }
-                lastIisCheck.Text = "Last checked: " + DateTime.Now.ToString("HH:mm:ss");
+                finally { grid.ResumeLayout(); poolGrid.ResumeLayout(); }
             }
-            catch (Exception ex) { AppendLog("[IIS] Could not enumerate sites: " + GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message)); MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "IIS site list", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-            finally { refreshSites.Enabled = true; }
+            catch (OperationCanceledException) when (request.IsCancellationRequested) { }
+            catch (Exception ex)
+            {
+                if (!Current()) return;
+                grid.Rows.Clear();
+                poolGrid.Rows.Clear();
+                lastIisCheck.Text = "IIS refresh failed";
+                AppendLog("[IIS] Could not enumerate sites: " + SecretRedactor.Redact(ex.Message));
+                MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "IIS site list", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                if (ReferenceEquals(inventoryRequest, request))
+                {
+                    inventoryRequest = null;
+                    if (!refreshSites.IsDisposed) refreshSites.Enabled = true;
+                }
+                request.Dispose();
+            }
         }
 
-        List<IisSiteInfo> PickedSites() => grid.Rows.Cast<DataGridViewRow>()
+        List<IisSiteInfo> PickedSites() => inventoryRequest is not null ? new List<IisSiteInfo>() : grid.Rows.Cast<DataGridViewRow>()
             .Where(r => Convert.ToBoolean(r.Cells["Pick"].Value ?? false) && r.Tag is IisSiteInfo)
             .Select(r => (IisSiteInfo)r.Tag!).ToList();
 
@@ -2188,7 +2223,7 @@ public sealed class WizardForm : Form
         advanced.CheckedChanged += async (_, _) => { if (_iisState.Installed && advanced.Checked) { management.Visible = true; await LoadSites(); } else management.Visible = false; };
         if (_iisState.Installed) BeginInvoke(new Action(async () => { if (!grid.IsDisposed && grid.Parent is not null) await LoadSites(); }));
         refreshSites.Click += async (_, _) => await LoadSites();
-        IisAppPoolInfo? SelectedPool() => poolGrid.CurrentRow?.Tag as IisAppPoolInfo;
+        IisAppPoolInfo? SelectedPool() => inventoryRequest is not null ? null : poolGrid.CurrentRow?.Tag as IisAppPoolInfo;
         startPool.Click += async (_, _) => { var x=SelectedPool(); if(x is null)return; await BusyAsync(startPool, async () => { await _environment.StartIisAppPoolAsync(x.Name); await LoadSites(); }); };
         stopPool.Click += async (_, _) => { var x=SelectedPool(); if(x is null)return; await BusyAsync(stopPool, async () => { await _environment.StopIisAppPoolAsync(x.Name); await LoadSites(); }); };
         recyclePool.Click += async (_, _) => { var x=SelectedPool(); if(x is null)return; await BusyAsync(recyclePool, async () => { await _environment.RecycleIisAppPoolAsync(x.Name); await LoadSites(); }); };
@@ -2286,7 +2321,7 @@ public sealed class WizardForm : Form
                 {
                     if (!(await _environment.CheckIisAsync()).Installed) throw new InvalidOperationException("IIS must be installed first.");
                     await _prereq.InstallHostingBundleAsync(path);
-                    _hostingState = _environment.CheckHostingBundle(_profile.TargetFrameworkMajor);
+                    _hostingState = await _environment.CheckHostingBundleAsync(_profile.TargetFrameworkMajor);
                 }));
 
             list.Controls.Add(InstallerCard(sdkPackage, () => _profile.DotNetSdkInstallerPath, x => _profile.DotNetSdkInstallerPath = x,
@@ -2441,7 +2476,7 @@ public sealed class WizardForm : Form
 
     private async Task RefreshRuntimeStatesAsync()
     {
-        _hostingState = _environment.CheckHostingBundle(_profile.TargetFrameworkMajor);
+        _hostingState = await _environment.CheckHostingBundleAsync(_profile.TargetFrameworkMajor);
         var readyPublish = _profile.BuildMode == "Prepared IIS Publish";
         _sdkState = readyPublish ? new PrerequisiteState(true, "Not required — build is skipped because a ready publish folder was selected.") : await _environment.CheckDotNetSdkAsync(_profile.TargetFrameworkMajor);
         _nodeState = readyPublish ? new PrerequisiteState(true, "Not required — build is skipped because a ready publish folder was selected.") : await _environment.CheckNodeAsync(_profile.RequiresNode);
@@ -2611,15 +2646,29 @@ public sealed class WizardForm : Form
             refreshDiagnostics.Enabled = existingRadio.Checked && existing.Items.Count > 0;
         }
 
+        var sqlDiagnosticGeneration = 0;
         async Task RefreshDiagnosticsAsync()
         {
+            var generation = ++sqlDiagnosticGeneration;
+            var fingerprint = _sql.Connections.Fingerprint(_profile);
             if (string.IsNullOrWhiteSpace(_profile.SqlInstance))
             {
                 diagnostics.Text = "Select an existing SQL Server instance first.";
                 return;
             }
-            var state = await _sql.DiagnoseAsync(_profile);
-            diagnostics.Text = state.ToDisplayText();
+            diagnostics.Text = "Checking SQL Server...";
+            try
+            {
+                var state = await _sql.DiagnoseAsync(_profile);
+                if (!diagnostics.IsDisposed && generation == sqlDiagnosticGeneration &&
+                    fingerprint == _sql.Connections.Fingerprint(_profile))
+                    diagnostics.Text = state.ToDisplayText();
+            }
+            catch (OperationCanceledException) when (fingerprint != _sql.Connections.Fingerprint(_profile))
+            {
+                if (!diagnostics.IsDisposed && generation == sqlDiagnosticGeneration)
+                    diagnostics.Text = "SQL configuration changed. Refresh diagnostics for the current configuration.";
+            }
         }
 
         existingRadio.CheckedChanged += (_, _) => SyncSelection();
@@ -4030,6 +4079,33 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         return new string((string.IsNullOrWhiteSpace(value) ? "Project" : value).Select(c => invalid.Contains(c) ? '_' : c).ToArray()).Replace(" ", "-");
     }
 
+    private void ExportCleanSourceWithProgress(string sourceRoot, string zipPath, IReadOnlyCollection<string> exclusions)
+    {
+        // Existing exclusive export workflow; compression runs off the UI thread.
+        var excluded = exclusions.ToArray();
+        Exception? failure = null;
+        var running = true;
+        using var progress = new Form
+        {
+            Text = "Export clean source", Width = 480, Height = 132,
+            FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
+            MaximizeBox = false, MinimizeBox = false, ControlBox = false, ShowInTaskbar = false
+        };
+        var message = new Label { Text = "Creating source archive...", Dock = DockStyle.Top, Height = 42, TextAlign = ContentAlignment.MiddleCenter };
+        var bar = new ProgressBar { Dock = DockStyle.Bottom, Height = 20, Style = ProgressBarStyle.Marquee };
+        progress.Controls.Add(message);
+        progress.Controls.Add(bar);
+        progress.FormClosing += (_, e) => { if (running) e.Cancel = true; };
+        progress.Shown += async (_, _) =>
+        {
+            try { await Task.Run(() => ExportCleanSourceZip(sourceRoot, zipPath, excluded)); }
+            catch (Exception ex) { failure = ex; }
+            finally { running = false; progress.Close(); }
+        };
+        progress.ShowDialog(this);
+        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+    }
+
     private static void ExportCleanSourceZip(string sourceRoot, string zipPath, IReadOnlyCollection<string> exclusions)
     {
         var root = Path.GetFullPath(sourceRoot);
@@ -4046,7 +4122,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         }
 
         var excluded = new HashSet<string>(exclusions.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim().Trim('\\', '/')), StringComparer.OrdinalIgnoreCase);
-        // Validate the entire included tree before replacing an existing archive.
+        // Validate included paths during compression; never replace an existing archive until compression finishes.
         void Visit(string directory, Action<string, string>? addFile)
         {
             foreach (var item in Directory.EnumerateFileSystemEntries(directory))
@@ -4062,17 +4138,18 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             }
         }
 
-        Visit(root, null);
-        if (File.Exists(destination)) File.Delete(destination);
+        var temporary = Path.Combine(Path.GetDirectoryName(destination)!, "." + Guid.NewGuid().ToString("N") + ".tmp");
         try
         {
-            using var archive = ZipFile.Open(destination, ZipArchiveMode.Create);
-            Visit(root, (file, relative) => archive.CreateEntryFromFile(file, relative, CompressionLevel.Optimal));
+            using (var archive = ZipFile.Open(temporary, ZipArchiveMode.Create))
+                Visit(root, (file, relative) => archive.CreateEntryFromFile(file, relative, CompressionLevel.Optimal));
+            // Same-directory promotion only after a complete archive has closed.
+            File.Move(temporary, destination, overwrite: true);
         }
-        catch
+        finally
         {
-            if (File.Exists(destination)) File.Delete(destination);
-            throw;
+            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            catch (Exception ex) { InternalDiagnostics.Record(ex, "Clean source temporary ZIP cleanup"); }
         }
     }
 

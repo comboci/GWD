@@ -61,6 +61,9 @@ public sealed class EnvironmentService
         return new(true, $"Installed — ASP.NET Core {major} runtime detected; IIS Module V2 {version}.");
     }
 
+    public Task<PrerequisiteState> CheckHostingBundleAsync(int major, CancellationToken ct = default)
+        => Task.Run(() => CheckHostingBundle(major), ct);
+
     public async Task<PrerequisiteState> CheckDotNetSdkAsync(int major)
     {
         try
@@ -111,6 +114,29 @@ public sealed class EnvironmentService
 
     public async Task<IReadOnlyList<IisSiteInfo>> ListIisSitesAsync(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        var appcmd = AppCmdPath();
+        if (!File.Exists(appcmd)) return Array.Empty<IisSiteInfo>();
+        try
+        {
+            // Default XML only, never full configuration (which may contain credentials).
+            var sites = await ReadInventoryXmlAsync(appcmd, "list site /xml", ct);
+            var apps = await ReadInventoryXmlAsync(appcmd, "list app /xml", ct);
+            var vdirs = await ReadInventoryXmlAsync(appcmd, "list vdir /xml", ct);
+            ct.ThrowIfCancellationRequested();
+            return IisInventoryParser.ParseSites(sites, apps, vdirs);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) when (ex is FormatException or System.Xml.XmlException or InvalidOperationException)
+        {
+            _runner.Report("[IIS] Bulk site inventory unavailable; using compatible individual queries.");
+            InternalDiagnostics.Record(ex, "Bulk IIS site inventory fallback");
+            return await ListIisSitesLegacyAsync(ct);
+        }
+    }
+
+    private async Task<IReadOnlyList<IisSiteInfo>> ListIisSitesLegacyAsync(CancellationToken ct)
+    {
         var appcmd = AppCmdPath();
         if (!File.Exists(appcmd)) return Array.Empty<IisSiteInfo>();
         var namesResult = await _runner.RunAsync(appcmd, "list site /text:name", ct: ct);
@@ -132,6 +158,37 @@ public sealed class EnvironmentService
 
     public async Task<IReadOnlyList<IisAppPoolInfo>> ListIisAppPoolsAsync(CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        var appcmd = AppCmdPath();
+        if (!File.Exists(appcmd)) return Array.Empty<IisAppPoolInfo>();
+        try
+        {
+            var pools = await ReadInventoryXmlAsync(appcmd, "list apppool /xml", ct);
+            ct.ThrowIfCancellationRequested();
+            return IisInventoryParser.ParsePools(pools);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex) when (ex is FormatException or System.Xml.XmlException or InvalidOperationException)
+        {
+            _runner.Report("[IIS] Bulk application pool inventory unavailable; using compatible individual queries.");
+            InternalDiagnostics.Record(ex, "Bulk IIS application pool inventory fallback");
+            return await ListIisAppPoolsLegacyAsync(ct);
+        }
+    }
+
+    private async Task<string> ReadInventoryXmlAsync(string appcmd, string arguments, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        var result = await _runner.RunAsync(appcmd, arguments, ct: ct);
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException("Read-only AppCmd inventory returned exit code " + result.ExitCode);
+        if (result.Output.Contains("[... earlier process output omitted from in-memory buffer", StringComparison.Ordinal))
+            throw new FormatException("AppCmd inventory exceeded the bounded capture.");
+        return result.Output;
+    }
+
+    private async Task<IReadOnlyList<IisAppPoolInfo>> ListIisAppPoolsLegacyAsync(CancellationToken ct)
+    {
         var appcmd = AppCmdPath();
         if (!File.Exists(appcmd)) return Array.Empty<IisAppPoolInfo>();
         var namesResult = await _runner.RunAsync(appcmd, "list apppool /text:name", ct: ct);
@@ -151,7 +208,7 @@ public sealed class EnvironmentService
     // The background health monitor needs counts, not per-site bindings, paths,
     // pool assignments or states. Fetch the same distinct names used by the
     // detailed listing with exactly one read-only appcmd call per object type.
-    // Keep ListIisSitesAsync/ListIisAppPoolsAsync unchanged for management UI.
+    // The management UI uses detailed bulk inventory, with legacy fallback.
     public async Task<(int Sites, int AppPools)> CountIisObjectsAsync(CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();

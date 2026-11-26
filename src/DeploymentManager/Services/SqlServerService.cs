@@ -36,8 +36,19 @@ public sealed class SqlServerService
         return result.ToList();
     }
 
-    public Task<List<SqlInstanceInfo>> DetectInstancesAsync()
-        => Task.FromResult(DetectInstanceNames().Select(ReadInstanceMetadata).ToList());
+    public Task<List<SqlInstanceInfo>> DetectInstancesAsync(CancellationToken ct = default)
+        => Task.Run(() =>
+        {
+            ct.ThrowIfCancellationRequested();
+            var instances = new List<SqlInstanceInfo>();
+            foreach (var name in DetectInstanceNames())
+            {
+                ct.ThrowIfCancellationRequested();
+                instances.Add(ReadInstanceMetadata(name));
+            }
+            ct.ThrowIfCancellationRequested();
+            return instances;
+        }, ct);
 
     private static SqlInstanceInfo ReadInstanceMetadata(string name)
     {
@@ -66,12 +77,16 @@ public sealed class SqlServerService
 
         var serviceName = ServiceNameFor(instance);
         var serviceState = await GetServiceStateAsync(serviceName, ct);
-        var tcpEnabled = IsTcpEnabled(instance);
-        var mixedMode = GetLoginMode(instance) == 2;
+        var (tcpEnabled, mixedMode) = await Task.Run(
+            () => (IsTcpEnabled(instance), GetLoginMode(instance) == 2), ct);
+        ct.ThrowIfCancellationRequested();
         var browserState = InstanceNameFromServer(instance).Equals("MSSQLSERVER", StringComparison.OrdinalIgnoreCase)
             ? "Not required for default instance"
             : await GetServiceStateAsync("SQLBrowser", ct);
 
+        ct.ThrowIfCancellationRequested();
+        if (Connections.Fingerprint(profile) != fingerprint)
+            throw new OperationCanceledException("SQL configuration changed during diagnostics.");
         try
         {
             await using var connection = await Connections.OpenAsync(profile, "master", ct);
@@ -86,6 +101,9 @@ SELECT
             var sysadmin = !reader.IsDBNull(0) && reader.GetInt32(0) == 1;
             var windowsOnly = !reader.IsDBNull(1) && reader.GetInt32(1) == 1;
             var saEnabled = !reader.IsDBNull(2) && reader.GetInt32(2) == 0;
+            ct.ThrowIfCancellationRequested();
+            if (Connections.Fingerprint(profile) != fingerprint)
+                throw new OperationCanceledException("SQL configuration changed during diagnostics.");
             return new SqlInstanceDiagnostics(instance, serviceState, tcpEnabled, true, sysadmin, saEnabled, windowsOnly ? "Windows only" : "Mixed mode", $"SQL Browser: {browserState}. Connection: {Connections.State(profile).Detail}");
         }
         catch (OperationCanceledException) { throw; }

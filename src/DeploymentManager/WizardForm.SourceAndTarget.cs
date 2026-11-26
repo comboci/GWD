@@ -606,61 +606,29 @@ public sealed partial class WizardForm
     {
         _pageTitle.Text = "Target and deployment identity";
         _pageDescription.Text = "Configure deployment identity, local/remote target, and prepared publish input when applicable.";
-        var form = FormGrid();
-        var sourceAlreadySelected = Directory.Exists(_profile.SourceFolder);
-        var appName = new TextBox { Text = sourceAlreadySelected ? _profile.ApplicationName : string.Empty, Width = 210 };
-        var siteName = new TextBox { Text = sourceAlreadySelected ? _profile.SiteName : string.Empty, Width = 210 };
-        var databaseName = new TextBox { Text = sourceAlreadySelected ? _profile.DatabaseName : string.Empty, Width = 210 };
-        var targetMode = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 175 };
-        targetMode.Items.AddRange(new object[] { "Local Server", "Remote IIS Server" });
-        targetMode.SelectedItem = _profile.TargetMode;
-        var host = new Ipv4AddressControl { Text = _profile.TargetMode == "Remote IIS Server" ? _profile.TargetHost : string.Empty };
-        var remoteUser = new TextBox { Text = _profile.RemoteUserName, Width = 180 };
-        var remotePassword = new TextBox { Text = _profile.RemotePassword, Width = 170, UseSystemPasswordChar = true };
-        var remotePort = new NumericUpDown { Minimum = 1, Maximum = 65535, Value = _profile.RemoteWinRmPort, Width = 82 };
-        var remoteSsl = new CheckBox { Text = "HTTPS / SSL", Checked = _profile.RemoteUseSsl, AutoSize = true };
-        var savedRemote = _appData.GetRemoteCredential();
-        var rememberRemote = new CheckBox { Text = "Save securely", Checked = savedRemote.Remember, AutoSize = true };
-        var testRemote = new Button { Text = "Test / Bootstrap Remote", Width = 170 };
-        var remoteState = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(690,0), Text = "Remote readiness not tested." };
-        var publish = new TextBox { Text = _profile.ReadyPublishFolder, Dock = DockStyle.Fill };
-        var browsePublish = new Button { Text = "Browse publish folder...", AutoSize = true };
-        var detected = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(650, 0) };
-        var framework = new Label { AutoSize = true, ForeColor = Color.DimGray };
-        var node = new Label { AutoSize = true, ForeColor = Color.DimGray };
-        var modeHelp = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(700, 0) };
-
-        var identityRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
-        identityRow.Controls.AddRange(new Control[]
-        {
-            new Label { Text = "App", AutoSize = true, Padding = new Padding(0, 7, 4, 0) }, appName,
-            new Label { Text = "Site", AutoSize = true, Padding = new Padding(10, 7, 4, 0) }, siteName,
-            new Label { Text = "Database", AutoSize = true, Padding = new Padding(10, 7, 4, 0) }, databaseName
-        });
-        AddRow(form, "Identity", identityRow);
-        AddRow(form, "Database behavior", new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(760, 0), Text = "Changing the database name connects the application to a different database; Deployment Manager does not delete or migrate data from the previous database automatically." });
-
-        var targetRow = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill, WrapContents = false };
-        targetRow.Controls.AddRange(new Control[]
-        {
-            targetMode,
-            new Label { Text = "Host / IP", AutoSize = true, Padding = new Padding(10, 7, 3, 0) }, host,
-            new Label { Text = "User", AutoSize = true, Padding = new Padding(8, 7, 3, 0) }, remoteUser,
-            new Label { Text = "Password", AutoSize = true, Padding = new Padding(8, 7, 3, 0) }, remotePassword,
-            new Label { Text = "WinRM", AutoSize = true, Padding = new Padding(8, 7, 3, 0) }, remotePort,
-            remoteSsl, rememberRemote, testRemote
-        });
-        AddRow(form, "Deployment target", targetRow);
-        AddRow(form, "Remote readiness", remoteState);
-
-        var publishRow = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
-        publishRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100)); publishRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        publishRow.Controls.Add(publish, 0, 0); publishRow.Controls.Add(browsePublish, 1, 0);
-        AddRow(form, "Detected Web project", detected);
-        AddRow(form, "Target framework", framework);
-        AddRow(form, "Frontend", node);
-        AddRow(form, "Mode behavior", modeHelp);
-        _content.Controls.Add(form);
+        var view = new UI.Pages.DeploymentTargetView(Directory.Exists(_profile.SourceFolder),
+            _profile.ApplicationName, _profile.SiteName, _profile.DatabaseName, _profile.TargetMode,
+            _profile.TargetHost, _profile.RemoteUserName, _profile.RemotePassword, _profile.RemoteWinRmPort,
+            _profile.RemoteUseSsl, _appData.GetRemoteCredential().Remember, _profile.ReadyPublishFolder);
+        var appName = view.AppName;
+        var siteName = view.SiteName;
+        var databaseName = view.DatabaseName;
+        var targetMode = view.TargetMode;
+        var host = view.Host;
+        var remoteUser = view.RemoteUser;
+        var remotePassword = view.RemotePassword;
+        var remotePort = view.RemotePort;
+        var remoteSsl = view.RemoteSsl;
+        var rememberRemote = view.RememberRemote;
+        var testRemote = view.TestRemote;
+        var remoteState = view.RemoteState;
+        var publish = view.Publish;
+        var browsePublish = view.BrowsePublish;
+        var detected = view.Detected;
+        var framework = view.Framework;
+        var node = view.Node;
+        var modeHelp = view.ModeHelp;
+        _content.Controls.Add(view);
 
         void RefreshDetected()
         {

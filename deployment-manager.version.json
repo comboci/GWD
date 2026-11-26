@@ -1,6 +1,6 @@
 {
-  "version": "272.0.0",
+  "version": "273.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V272-R — re-enable local review options after deployment ownership is released"
+  "commitNote": "V273-R — GWD-A02.2 independent Review view source candidate; Windows acceptance pending"
 }

@@ -107,7 +107,6 @@ public sealed partial class WizardForm : Form
     private string _deploymentStatus = "Not started";
     private string? _lastSuccessfulPublishPath;
     private string _deploymentElapsedText = "Elapsed: 00:00:00";
-    private Label? _deploymentElapsedLabel;
     private LogViewMode _logViewMode = LogViewMode.Normal;
     private readonly List<(DateTime At, string Line)> _uiLogLines = new();
     private const int MaxPendingUiLogLines = 2_048;
@@ -121,8 +120,7 @@ public sealed partial class WizardForm : Form
     private readonly System.Windows.Forms.Timer _uiLogFlushTimer = new() { Interval = 100 };
     private int _droppedUiLogLines;
     private volatile bool _acceptUiLogLines = true;
-    private ComboBox? _logModeCombo;
-    private Label? _reviewActivity;
+    private ReviewStageView? _reviewView;
     private CancellationTokenSource? _deploymentCts;
     private bool _deploymentCancelConfirmationOpen;
     private CancellationTokenSource? _autoDeployCts;
@@ -215,6 +213,7 @@ public sealed partial class WizardForm : Form
         };
         Disposed += (_, _) => StopRuntimeMetrics();
         Disposed += (_, _) => StopVisualResources();
+        Disposed += (_, _) => { if (!_log.IsDisposed) _log.Dispose(); };
         FormClosing += WizardForm_FormClosing;
         Shown += (_, _) => UpdateNavigationState();
         Disposed += (_, _) => CancelNavigationSourceProbe();
@@ -839,6 +838,8 @@ public sealed partial class WizardForm : Form
         _renderedPageIndex = -1;
         _scanView?.Deactivate();
         _scanView = null;
+        _reviewView?.Deactivate();
+        _reviewView = null;
         if (_pageIndex == 0) CancelBackgroundVerification();
         // Source/target controls may own the latest unsaved edit. Their queued
         // actions must execute while controls are still alive.
@@ -1983,8 +1984,7 @@ public sealed partial class WizardForm : Form
             UpdateNavigationState();
             AcknowledgeTrayAlert();
             _deploymentElapsedText = "Elapsed: 00:00:00";
-            if (_deploymentElapsedLabel is not null && !_deploymentElapsedLabel.IsDisposed) _deploymentElapsedLabel.Text = _deploymentElapsedText;
-            if (_logModeCombo is not null && !_logModeCombo.IsDisposed) _logModeCombo.Enabled = false;
+            _reviewView?.ShowElapsed(_deploymentElapsedText);
             _deployment.ResetPerformanceSnapshot();
             try
             {
@@ -2001,8 +2001,7 @@ public sealed partial class WizardForm : Form
             elapsedTimer.Tick += (_, _) =>
             {
                 _deploymentElapsedText = $"Elapsed: {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}";
-                if (_deploymentElapsedLabel is not null && !_deploymentElapsedLabel.IsDisposed)
-                    _deploymentElapsedLabel.Text = _deploymentElapsedText;
+                _reviewView?.ShowElapsed(_deploymentElapsedText);
             };
             elapsedTimer.Start();
             _deploymentStatus = "DEPLOYMENT IN PROGRESS";
@@ -2242,13 +2241,8 @@ public sealed partial class WizardForm : Form
                 }
                 elapsedTimer.Stop();
                 _deploymentElapsedText = $"Elapsed: {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}";
-                if (_deploymentElapsedLabel is not null && !_deploymentElapsedLabel.IsDisposed)
-                {
-                    _deploymentElapsedLabel.Text = _deploymentElapsedText;
-                    _deploymentElapsedLabel.ForeColor = _persistentState.LastResult == "Successful" ? Color.ForestGreen : ((_persistentState.LastResult == "Failed" || _persistentState.LastResult == "RecoveryFailed") ? Color.Firebrick : (_persistentState.LastResult == "Cancelled" ? Color.DarkOrange : Color.RoyalBlue));
-                }
+                _reviewView?.ShowElapsed(_deploymentElapsedText, ReviewElapsedColor());
                 AppendLog($"Deployment elapsed time: {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}");
-                if (_logModeCombo is not null && !_logModeCombo.IsDisposed) _logModeCombo.Enabled = true;
                 _persistentState.UpdatedAt = DateTime.Now;
                 try { _appData.SaveState(_persistentState); }
                 catch (Exception stateError)
@@ -2615,8 +2609,7 @@ public sealed partial class WizardForm : Form
         {
             _activity.Text = latestActivity;
             _activity.AutoEllipsis = true;
-            if (_reviewActivity is not null && !_reviewActivity.IsDisposed)
-                _reviewActivity.Text = latestActivity;
+            _reviewView?.ShowActivity(latestActivity);
         }
         // Persist the wizard's latest state no more than once every 5 seconds.
         if ((DateTime.UtcNow - _lastLogStateSaveUtc).TotalSeconds >= 5)

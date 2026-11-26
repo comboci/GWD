@@ -2,6 +2,7 @@ const fs = require('node:fs'), path = require('node:path'), assert = require('no
 const dir = path.join(__dirname,'..','src/DeploymentManager');
 const read = p => fs.readFileSync(path.join(dir,p),'utf8');
 const w = read('WizardForm.cs'), visual = read('WizardForm.VisualShell.cs'), theme = read('GwdUi.cs');
+const reviewView = read('UI/Pages/ReviewStageView.cs');
 const source = read('WizardForm.SourceAndTarget.cs'), review = read('WizardForm.ReviewAndLocation.cs'), infra = read('WizardForm.InstallersAndSql.cs');
 const diag = read('DiagnosticsCenterForm.cs'), log = read('LogForm.cs'), history = read('DeploymentHistoryForm.cs');
 const settings = read('SettingsForm.cs'), email = read('EmailNotificationSettingsForm.cs'), db = read('DatabaseRelocationForm.cs'), confirm = read('AutoYesConfirmationForm.cs');
@@ -33,8 +34,9 @@ const checks=[
  ['notification resources closed',visual.includes('_noticeTimer.Stop(); _noticeTimer.Dispose()')&&w.includes('StopVisualResources();')],
  ['profile controls mounted and guarded',source.includes('profileActions.Controls.AddRange(new Control[] { saveProfile, loadProfile, lockSource, exportSource })')&&source.includes('AddRow(form, "Profile actions", profileActions)')&&source.includes('if (!CanNavigateInteractively()) return;')],
  ['source lock persists across view reconstruction',source.includes('Checked = _sourceLocked')&&source.includes('_sourceLocked = lockSource.Checked')&&w.includes('lockSourceMenu.Checked = _sourceLocked')],
- ['review mode summary updates',review.includes('deployMode.SelectedIndexChanged += (_, _) => RefreshSummary()')&&review.includes('void RefreshSummary() => summary.Text =')],
- ['review splitter initialized once',review.includes('if (initialized || split.IsDisposed')&&review.includes('_reviewSplitRatio = Math.Clamp(')],
+ ['review mode summary updates',reviewView.includes('mode.SelectedIndexChanged +=')&&reviewView.includes('summary.Text = actions.ChangeBuildMode(mode.SelectedIndex)')&&review.includes('InvalidateEnvironmentEvidence();')&&review.includes('return DescribeReview();')],
+ ['review view releases callbacks and preserves shared log',reviewView.includes('ReviewStageView : UserControl')&&reviewView.includes('Deactivate() => _actions = null')&&reviewView.includes('parent.Controls.Remove(_sharedLog)')&&w.includes('_reviewView?.Deactivate()')],
+ ['review splitter initialized once',reviewView.includes('if (initialized || split.IsDisposed')&&reviewView.includes('TrackSplitRatio(Math.Clamp(')&&review.includes('ratio => _reviewSplitRatio = ratio')],
  ['major dialogs use shared styling',[diag,log,history,settings,email,db,confirm].every(s=>s.includes('GwdUi.ConfigureForm(this)')&&s.includes('GwdUi.StyleTree(this)'))],
  ['lazy tab and installer styles applied',diag.includes('GwdUi.StyleTree(created)')&&infra.includes('GwdUi.StyleTree(box)')],
  ['countdown and affirmative protection semantics retained',confirm.includes('AcceptButton = _yes;')&&confirm.includes('CancelButton = _no;')&&confirm.includes('if (_remainingSeconds <= 0) Finish(DialogResult.Yes)')],

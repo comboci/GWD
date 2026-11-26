@@ -3,7 +3,7 @@
   "branch": "fix/ui-performance-phase-01",
   "baselineVersion": "V269-R",
   "baselineCommit": "0121217a13057d7c832a9a9ddd7aa9acf5a099cc",
-  "candidate": "V272-R",
+  "candidate": "V273-R",
   "state": "IN_PROGRESS",
   "packs": {
     "GWD-A01": "TEST_PENDING",
@@ -20,7 +20,8 @@
     "GWD-A12": "PENDING"
   },
   "completedSourceSlices": [
-    "A02.1 - Environment Scan view and Source initial subscription"
+    "A02.1 - Environment Scan view and Source initial subscription",
+    "A02.2 - Review UserControl and shared log ownership"
   ],
   "nextSourcePackage": "GWD-A02",
   "build": "NOT_RUN_POLICY",

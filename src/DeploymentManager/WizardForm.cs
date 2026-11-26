@@ -105,6 +105,7 @@ public sealed class WizardForm : Form
     private volatile bool _acceptUiLogLines = true;
     private ComboBox? _logModeCombo;
     private Label? _reviewActivity;
+    private Label? _reviewStatusBanner;
     private CancellationTokenSource? _deploymentCts;
     private CancellationTokenSource? _autoDeployCts;
     private string ProfilesFolder => Path.Combine(_appData.Root, "Profiles");
@@ -253,6 +254,11 @@ public sealed class WizardForm : Form
         _deploymentIndicator.ForeColor = needsReview ? Color.Firebrick
             : _deploymentStatus.Contains("SUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.DarkGreen
             : _deploymentStatus.Contains("IN PROGRESS", StringComparison.OrdinalIgnoreCase) ? Color.RoyalBlue : Color.DimGray;
+        if (_reviewStatusBanner is { IsDisposed: false, Disposing: false } banner)
+        {
+            banner.Text = _deploymentStatus;
+            banner.ForeColor = _deploymentIndicator.ForeColor;
+        }
         _healthTip.SetToolTip(_deploymentIndicator, needsReview
             ? "Do not infer successful recovery from IIS status or HTTP response. Review the attempt Journal, recovery markers, backups and actual site/API/frontend state before retrying."
             : "Recorded process outcome only; check actual IIS target, HTTP endpoint and running release identity independently.");
@@ -3053,12 +3059,9 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         reviewRoot.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         reviewRoot.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         reviewRoot.Controls.Add(deployModePanel, 0, 0);
-        var recoveryWarning = _deploymentStatus.Contains("UNSUCCESSFUL", StringComparison.OrdinalIgnoreCase)
-            || _deploymentStatus.Contains("RECOVERY FAILED", StringComparison.OrdinalIgnoreCase)
-            || _deploymentStatus.Contains("INTERRUPTED", StringComparison.OrdinalIgnoreCase);
-        var statusBanner = new Label { Text = _deploymentStatus, AutoSize = true, Padding = new Padding(8), Font = new Font("Segoe UI Semibold", 11F),
-            ForeColor = recoveryWarning ? Color.Firebrick : (_deploymentStatus.Contains("SUCCESSFUL", StringComparison.OrdinalIgnoreCase) ? Color.ForestGreen : Color.DimGray) };
-        reviewRoot.Controls.Add(statusBanner, 0, 1);
+        _reviewStatusBanner = new Label { Text = _deploymentStatus, AutoSize = true, Padding = new Padding(8), Font = new Font("Segoe UI Semibold", 11F) };
+        reviewRoot.Controls.Add(_reviewStatusBanner, 0, 1);
+        UpdateDeploymentIndicator();
         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 210, FixedPanel = FixedPanel.None };
         void KeepHalfSplit() { if (split.Height > 160) split.SplitterDistance = Math.Max(80, (split.Height - split.SplitterWidth) / 2); }
         split.Resize += (_, _) => KeepHalfSplit();
@@ -3358,6 +3361,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         {
             _deploymentStatus = "DEPLOYMENT CANCELLED";
             _persistentState.LastResult = "Cancelled";
+            UpdateDeploymentIndicator();
             AppendLog("[CANCEL] Deployment cancellation acknowledged. Running cleanup/rollback...");
             var cleanupOk = true;
             var rollbackAttempted = false;
@@ -3378,6 +3382,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 cleanupOk = false;
                 _deploymentStatus = "DEPLOYMENT CANCELLED — RECOVERY FAILED";
                 _persistentState.LastResult = "RecoveryFailed";
+                UpdateDeploymentIndicator();
                 AppendLog("[CANCEL] Cleanup/recovery FAILED: " + cleanupEx);
                 ShowTrayDeploymentResult(false);
             }
@@ -3392,6 +3397,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         {
             _deploymentStatus = "DEPLOYMENT UNSUCCESSFUL";
             _persistentState.LastResult = "Failed";
+            UpdateDeploymentIndicator();
             AppendLog("DEPLOYMENT UNSUCCESSFUL: " + ex);
             try { if (iisAttempt is not null) await _deployment.CollectIisFailureDiagnosticsAsync(_profile); }
             catch (Exception diagnosticEx) { AppendLog("[DIAGNOSTICS] Collection failed; primary deployment error preserved: " + diagnosticEx); }
@@ -3408,6 +3414,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
                 recoveryFailed = true;
                 _deploymentStatus = "DEPLOYMENT FAILED — RECOVERY FAILED";
                 _persistentState.LastResult = "RecoveryFailed";
+                UpdateDeploymentIndicator();
                 AppendLog("[CLEANUP] Recovery FAILED: " + cleanupEx);
             }
             ShowTrayDeploymentResult(false);

@@ -3515,10 +3515,11 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
             await EmailNotificationService.SendAsync(settings, subject, body);
             AppendLog("[EMAIL] Deployment result notification accepted by SMTP server.");
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // No SMTP exception payload or credential material enters diagnostics.
-            try { AppendLog("[EMAIL] Result notification failed. Check Email Notifications settings and Test Email. Deployment result is unchanged."); }
+            // Only allow-listed failure categories/status codes enter diagnostics.
+            // SMTP server replies and exception messages may contain credentials or addresses.
+            try { AppendLog("[EMAIL] Result notification failed (" + EmailNotificationService.FailureCategory(ex) + "). Check Email Notifications settings and Test Email. Deployment result is unchanged."); }
             catch { /* Never fail deployment due to notification or notification logging. */ }
         }
     }

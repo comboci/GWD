@@ -122,6 +122,7 @@ public sealed partial class WizardForm : Form
     private ComboBox? _logModeCombo;
     private Label? _reviewActivity;
     private CancellationTokenSource? _deploymentCts;
+    private bool _deploymentCancelConfirmationOpen;
     private CancellationTokenSource? _autoDeployCts;
     private string ProfilesFolder => Path.Combine(_appData.Root, "Profiles");
 
@@ -975,8 +976,9 @@ public sealed partial class WizardForm : Form
         };
         if (_operationRunning && _pageIndex == _steps.Length - 1)
         {
-            _next.Enabled = true;
-            _next.Text = _deploymentCts?.IsCancellationRequested == true ? "Cancelling..." : "Cancel Deploy";
+            var cancelling = _deploymentCts?.IsCancellationRequested == true;
+            _next.Enabled = !cancelling && !_deploymentCancelConfirmationOpen;
+            _next.Text = cancelling ? "Cancelling..." : "Cancel Deploy";
         }
         else
         {
@@ -984,7 +986,8 @@ public sealed partial class WizardForm : Form
         }
         _back.Enabled = _pageIndex > 0 && CanNavigateInteractively();
         if (_autoDeployRunning)
-            _autoDeploy.Enabled = _autoDeployCts?.IsCancellationRequested != true;
+            _autoDeploy.Enabled = _autoDeployCts?.IsCancellationRequested != true &&
+                _deploymentCts?.IsCancellationRequested != true && !_deploymentCancelConfirmationOpen;
         else
             _autoDeploy.Enabled = CanNavigateInteractively() && CanAutoDeployStart();
         var canNavigate = CanNavigateInteractively();
@@ -1754,7 +1757,15 @@ public sealed partial class WizardForm : Form
         startPool.Click += async (_, _) => { var x=SelectedPool(); if(x is null)return; await BusyAsync(startPool, async () => { await _environment.StartIisAppPoolAsync(x.Name); await LoadSites(); }); };
         stopPool.Click += async (_, _) => { var x=SelectedPool(); if(x is null)return; await BusyAsync(stopPool, async () => { await _environment.StopIisAppPoolAsync(x.Name); await LoadSites(); }); };
         recyclePool.Click += async (_, _) => { var x=SelectedPool(); if(x is null)return; await BusyAsync(recyclePool, async () => { await _environment.RecycleIisAppPoolAsync(x.Name); await LoadSites(); }); };
-        deletePool.Click += async (_, _) => { var x=SelectedPool(); if(x is null)return; if(MessageBox.Show(this,$"Delete unused application pool '{x.Name}'?","Delete App Pool",MessageBoxButtons.YesNo,MessageBoxIcon.Warning,MessageBoxDefaultButton.Button2)!=DialogResult.Yes)return; try{await _environment.DeleteIisAppPoolAsync(x.Name);await LoadSites();}catch(Exception ex){MessageBox.Show(this,GenericWeb.DeploymentManager.Services.SecretRedactor.Redact(ex.Message),"Delete App Pool",MessageBoxButtons.OK,MessageBoxIcon.Error);} };
+        deletePool.Click += async (_, _) => await BusyAsync(deletePool, async () =>
+        {
+            var selected = SelectedPool();
+            if (selected is null) return;
+            if (MessageBox.Show(this, $"Delete unused application pool '{selected.Name}'?", "Delete App Pool",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes) return;
+            await _environment.DeleteIisAppPoolAsync(selected.Name);
+            await LoadSites();
+        });
         startSites.Click += async (_, _) => await BusyAsync(startSites, async () =>
         {
             foreach (var x in PickedSites()) await _environment.StartIisSiteAsync(x.Name);
@@ -1765,7 +1776,7 @@ public sealed partial class WizardForm : Form
             foreach (var x in PickedSites()) await _environment.StopIisSiteAsync(x.Name);
             await LoadSites();
         });
-        removeSites.Click += async (_, _) =>
+        removeSites.Click += async (_, _) => await BusyAsync(removeSites, async () =>
         {
             var picked = PickedSites();
             if (picked.Count == 0) { MessageBox.Show(this, "Tick at least one IIS site first.", "IIS cleanup", MessageBoxButtons.OK, MessageBoxIcon.Information); return; }
@@ -1779,16 +1790,10 @@ public sealed partial class WizardForm : Form
                 var second = MessageBox.Show(this, "C:\\inetpub\\wwwroot is included. This will delete the files currently in the IIS default web root. Confirm cleanup?", "Confirm wwwroot cleanup", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
                 if (second != DialogResult.Yes) return;
             }
-            removeSites.Enabled = false;
-            try
-            {
-                foreach (var x in picked) await _environment.RemoveIisSiteAndFilesAsync(x, deletePhysicalFiles: true);
-                AppendLog($"[IIS CLEANUP] Removed {picked.Count} selected site(s) and cleaned their physical files.");
-                await LoadSites();
-            }
-            catch (Exception ex) { AppendLog("[IIS CLEANUP] " + ex); MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "IIS cleanup failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-            finally { removeSites.Enabled = true; }
-        };
+            foreach (var x in picked) await _environment.RemoveIisSiteAndFilesAsync(x, deletePhysicalFiles: true);
+            AppendLog($"[IIS CLEANUP] Removed {picked.Count} selected site(s) and cleaned their physical files.");
+            await LoadSites();
+        });
     }
 
     private static string NormalizeAutoHostingRoot(string hostingRoot, string applicationName)
@@ -1944,15 +1949,26 @@ public sealed partial class WizardForm : Form
 
     private void RequestDeploymentCancellation()
     {
-        if (!_operationRunning || _deploymentCts is null || _deploymentCts.IsCancellationRequested) return;
-        var answer = MessageBox.Show(this,
-            "Cancel the current deployment? Running build processes will be stopped and Deployment Manager will clean staging/failed files and restore the previous hosted site where possible.",
-            "Cancel deployment", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
-        if (answer != DialogResult.Yes) return;
-        _next.Text = "Cancelling...";
-        _next.Enabled = false;
-        AppendLog("[CANCEL] Operator requested deployment cancellation from the Deploy button. Stopping active process tree and preparing cleanup...");
-        _deploymentCts.Cancel();
+        var request = _deploymentCts;
+        if (!_operationRunning || request is null || request.IsCancellationRequested || _deploymentCancelConfirmationOpen) return;
+        _deploymentCancelConfirmationOpen = true;
+        try
+        {
+            var answer = MessageBox.Show(this,
+                "Cancel the current deployment? Running build processes will be stopped and Deployment Manager will clean staging/failed files and restore the previous hosted site where possible.",
+                "Cancel deployment", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+            // WinForms modal loops pump async continuations. The original
+            // deployment may already have finished while the prompt was open.
+            if (answer != DialogResult.Yes || !_operationRunning || !ReferenceEquals(request, _deploymentCts)) return;
+            if (request.IsCancellationRequested || IsDisposed || Disposing) return;
+            request.Cancel();
+            AppendLog("[CANCEL] Operator requested deployment cancellation. Stopping active process tree and preparing cleanup...");
+        }
+        finally
+        {
+            _deploymentCancelConfirmationOpen = false;
+            if (!IsDisposed && !Disposing) UpdateNavigationState();
+        }
     }
 
     private async Task DeployAsync()
@@ -1974,51 +1990,52 @@ public sealed partial class WizardForm : Form
             using var protectionDialog = new AutoYesConfirmationForm("Deployment protection policy", protection, 3);
             if (protectionDialog.ShowDialog(this) != DialogResult.Yes) return;
         }
-        _operationRunning = true;
-        UpdateNavigationState();
-        AcknowledgeTrayAlert();
-        _deploymentCts?.Dispose();
-        _deploymentCts = new CancellationTokenSource();
-        var ct = _deploymentCts.Token;
-        _deploymentElapsedText = "Elapsed: 00:00:00";
-        if (_deploymentElapsedLabel is not null && !_deploymentElapsedLabel.IsDisposed) _deploymentElapsedLabel.Text = _deploymentElapsedText;
-        if (_logModeCombo is not null && !_logModeCombo.IsDisposed) _logModeCombo.Enabled = false;
+        using var request = new CancellationTokenSource();
+        var ct = request.Token;
         var deploymentStopwatch = System.Diagnostics.Stopwatch.StartNew();
-        _deployment.ResetPerformanceSnapshot();
-        DeploymentHistoryRecord? historyAttempt = null;
-        try
-        {
-            historyAttempt = _history.BeginAttempt(_profile, _logService.LogFile);
-            AppendLog($"[HISTORY] Deployment attempt recorded. Project ID: {historyAttempt.ProjectId}; Attempt ID: {historyAttempt.AttemptId}; Version: {(string.IsNullOrWhiteSpace(historyAttempt.ApplicationVersion) ? "unknown" : historyAttempt.ApplicationVersion)}");
-        }
-        catch (Exception historyEx)
-        {
-            AppendLog("[HISTORY] Warning: could not start persistent deployment-history record: " + historyEx.Message);
-        }
-        var codeQuality = new CodeQualitySession();
-        await Task.Run(() => codeQuality.Start(_appData, _profile, historyAttempt?.ProjectId ?? "unknown", historyAttempt?.AttemptId ?? Guid.NewGuid().ToString("N")));
-        _runner.CodeQuality = codeQuality;
         using var elapsedTimer = new System.Windows.Forms.Timer { Interval = 500 };
-        elapsedTimer.Tick += (_, _) =>
-        {
-            _deploymentElapsedText = $"Elapsed: {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}";
-            if (_deploymentElapsedLabel is not null && !_deploymentElapsedLabel.IsDisposed)
-                _deploymentElapsedLabel.Text = _deploymentElapsedText;
-        };
-        elapsedTimer.Start();
-        _back.Enabled = false;
-        _next.Enabled = true;
-        _next.Text = "Cancel Deploy";
-        _deploymentStatus = "DEPLOYMENT IN PROGRESS";
-        _persistentState.LastResult = "InProgress";
-        UpdateDeploymentIndicator();
-        _appData.SaveState(_persistentState);
+        var codeQuality = new CodeQualitySession();
+        DeploymentHistoryRecord? historyAttempt = null;
         string? stagedPublish = null;
         string? publish = null;
         string? previousSitePath = null;
         IDisposable? iisAttempt = null;
+        var engineEntered = false;
+        _deploymentCts = request;
+        _operationRunning = true;
         try
         {
+            UpdateNavigationState();
+            AcknowledgeTrayAlert();
+            _deploymentElapsedText = "Elapsed: 00:00:00";
+            if (_deploymentElapsedLabel is not null && !_deploymentElapsedLabel.IsDisposed) _deploymentElapsedLabel.Text = _deploymentElapsedText;
+            if (_logModeCombo is not null && !_logModeCombo.IsDisposed) _logModeCombo.Enabled = false;
+            _deployment.ResetPerformanceSnapshot();
+            try
+            {
+                historyAttempt = _history.BeginAttempt(_profile, _logService.LogFile);
+                AppendLog($"[HISTORY] Deployment attempt recorded. Project ID: {historyAttempt.ProjectId}; Attempt ID: {historyAttempt.AttemptId}; Version: {(string.IsNullOrWhiteSpace(historyAttempt.ApplicationVersion) ? "unknown" : historyAttempt.ApplicationVersion)}");
+            }
+            catch (Exception historyEx)
+            {
+                AppendLog("[HISTORY] Warning: could not start persistent deployment-history record: " + historyEx.Message);
+            }
+            await Task.Run(() => codeQuality.Start(_appData, _profile, historyAttempt?.ProjectId ?? "unknown", historyAttempt?.AttemptId ?? Guid.NewGuid().ToString("N")), ct);
+            ct.ThrowIfCancellationRequested();
+            _runner.CodeQuality = codeQuality;
+            elapsedTimer.Tick += (_, _) =>
+            {
+                _deploymentElapsedText = $"Elapsed: {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}";
+                if (_deploymentElapsedLabel is not null && !_deploymentElapsedLabel.IsDisposed)
+                    _deploymentElapsedLabel.Text = _deploymentElapsedText;
+            };
+            elapsedTimer.Start();
+            _deploymentStatus = "DEPLOYMENT IN PROGRESS";
+            _persistentState.LastResult = "InProgress";
+            UpdateDeploymentIndicator();
+            _appData.SaveState(_persistentState);
+            ct.ThrowIfCancellationRequested();
+            engineEntered = true;
             var isRemote = _profile.TargetMode == "Remote IIS Server" && !isFastLocalTest;
             if (isRemote) throw new InvalidOperationException("Remote IIS deployment is blocked until equivalent target-side IIS safety checks and locking are verified. No remote changes were made.");
             if (!isFastLocalTest)
@@ -2125,10 +2142,15 @@ public sealed partial class WizardForm : Form
             await NotifyDeploymentOutcomeAsync(isFastLocalTest, historyAttempt?.ApplicationVersion, historyAttempt?.AttemptId, deploymentStopwatch.Elapsed, isFastLocalTest ? null : successUrl);
             BeginInvoke(() => MessageBox.Show(this, successMessage, successTitle, MessageBoxButtons.OK, MessageBoxIcon.Information));
         }
-        catch (OperationCanceledException) when (_deploymentCts?.IsCancellationRequested == true)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             _deploymentStatus = "DEPLOYMENT CANCELLED";
             _persistentState.LastResult = "Cancelled";
+            if (!engineEntered)
+            {
+                AppendLog("[CANCEL] Deployment cancelled during preparation; the deployment engine was not started.");
+                return;
+            }
             AppendLog("[CANCEL] Deployment cancellation acknowledged. Running cleanup/rollback...");
             var cleanupOk = true;
             var rollbackAttempted = false;
@@ -2164,6 +2186,12 @@ public sealed partial class WizardForm : Form
             _deploymentStatus = "DEPLOYMENT UNSUCCESSFUL";
             _persistentState.LastResult = "Failed";
             AppendLog("DEPLOYMENT UNSUCCESSFUL: " + ex);
+            if (!engineEntered)
+            {
+                MessageBox.Show(this, "Deployment preparation failed; the deployment engine was not started.\r\n\r\n" +
+                    SecretRedactor.Redact(ex.Message), "Deployment preparation failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
             try { if (iisAttempt is not null) await _deployment.CollectIisFailureDiagnosticsAsync(_profile); }
             catch (Exception diagnosticEx) { AppendLog("[DIAGNOSTICS] Collection failed; primary deployment error preserved: " + diagnosticEx); }
             var recoveryFailed = false;
@@ -2218,42 +2246,62 @@ public sealed partial class WizardForm : Form
         }
         finally
         {
-            try { iisAttempt?.Dispose(); } catch (Exception journalEx) { AppendLog("[IIS] Could not finalize attempt journal: " + journalEx.Message); }
-            codeQuality.Finish(_persistentState.LastResult == "Successful" ? "Successful" : _persistentState.LastResult == "Cancelled" ? "Cancelled" : "Failed");
-            _runner.CodeQuality = null;
-            deploymentStopwatch.Stop();
-            if (historyAttempt is not null)
+            try
             {
-                try
+                try { iisAttempt?.Dispose(); } catch (Exception journalEx) { AppendLog("[IIS] Could not finalize attempt journal: " + journalEx.Message); }
+                codeQuality.Finish(_persistentState.LastResult == "Successful" ? "Successful" : _persistentState.LastResult == "Cancelled" ? "Cancelled" : "Failed");
+                _runner.CodeQuality = null;
+                deploymentStopwatch.Stop();
+                if (historyAttempt is not null)
                 {
-                    var historyResult = _persistentState.LastResult == "Successful" ? "Successful" : (_persistentState.LastResult == "Cancelled" ? "Cancelled" : (_persistentState.LastResult == "RecoveryFailed" ? "RecoveryFailed" : "Failed"));
-                    _history.CompleteAttempt(historyAttempt, _profile, historyResult, deploymentStopwatch.Elapsed, publish ?? _profile.HostingRoot, _deployment.LastPerformanceSnapshot);
-                    AppendLog($"[HISTORY] Deployment attempt finalized: {historyResult}; elapsed {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}.");
+                    try
+                    {
+                        var historyResult = _persistentState.LastResult == "Successful" ? "Successful" : (_persistentState.LastResult == "Cancelled" ? "Cancelled" : (_persistentState.LastResult == "RecoveryFailed" ? "RecoveryFailed" : "Failed"));
+                        _history.CompleteAttempt(historyAttempt, _profile, historyResult, deploymentStopwatch.Elapsed, publish ?? _profile.HostingRoot, _deployment.LastPerformanceSnapshot);
+                        AppendLog($"[HISTORY] Deployment attempt finalized: {historyResult}; elapsed {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}.");
+                    }
+                    catch (Exception historyEx)
+                    {
+                        AppendLog("[HISTORY] Warning: could not finalize persistent deployment-history record: " + historyEx.Message);
+                    }
                 }
-                catch (Exception historyEx)
+                elapsedTimer.Stop();
+                _deploymentElapsedText = $"Elapsed: {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}";
+                if (_deploymentElapsedLabel is not null && !_deploymentElapsedLabel.IsDisposed)
                 {
-                    AppendLog("[HISTORY] Warning: could not finalize persistent deployment-history record: " + historyEx.Message);
+                    _deploymentElapsedLabel.Text = _deploymentElapsedText;
+                    _deploymentElapsedLabel.ForeColor = _persistentState.LastResult == "Successful" ? Color.ForestGreen : ((_persistentState.LastResult == "Failed" || _persistentState.LastResult == "RecoveryFailed") ? Color.Firebrick : (_persistentState.LastResult == "Cancelled" ? Color.DarkOrange : Color.RoyalBlue));
+                }
+                AppendLog($"Deployment elapsed time: {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}");
+                if (_logModeCombo is not null && !_logModeCombo.IsDisposed) _logModeCombo.Enabled = true;
+                _persistentState.UpdatedAt = DateTime.Now;
+                try { _appData.SaveState(_persistentState); }
+                catch (Exception stateError)
+                {
+                    InternalDiagnostics.Record(stateError, "Persist final deployment state");
+                    NotifyUi(UiNoticeKind.Warning, "Deployment result could not be written to the local state file. See the log and attempt history.");
                 }
             }
-            elapsedTimer.Stop();
-            _deploymentElapsedText = $"Elapsed: {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}";
-            if (_deploymentElapsedLabel is not null && !_deploymentElapsedLabel.IsDisposed)
+            finally
             {
-                _deploymentElapsedLabel.Text = _deploymentElapsedText;
-                _deploymentElapsedLabel.ForeColor = _persistentState.LastResult == "Successful" ? Color.ForestGreen : ((_persistentState.LastResult == "Failed" || _persistentState.LastResult == "RecoveryFailed") ? Color.Firebrick : (_persistentState.LastResult == "Cancelled" ? Color.DarkOrange : Color.RoyalBlue));
+                _deploymentCts = null;
+                _operationRunning = false;
+                if (!IsDisposed && !Disposing) UpdateNavigationState();
             }
-            AppendLog($"Deployment elapsed time: {deploymentStopwatch.Elapsed:hh\\:mm\\:ss}");
-            _operationRunning = false;
-            if (_logModeCombo is not null && !_logModeCombo.IsDisposed) _logModeCombo.Enabled = true;
-            _persistentState.UpdatedAt = DateTime.Now;
-            _appData.SaveState(_persistentState);
-            UpdateDeploymentIndicator();
-            if (_pageIndex == _steps.Length - 1)
+            if (!IsDisposed && !Disposing)
             {
-                _next.Text = (_persistentState.LastResult == "Failed" || _persistentState.LastResult == "RecoveryFailed") ? "Retry Deploy" : (_persistentState.LastResult == "Successful" ? "Deploy Again" : (_persistentState.LastResult == "Cancelled" ? "Deploy" : "Deploy"));
-                BuildReviewPageRefresh();
+                UpdateDeploymentIndicator();
+                if (_pageIndex == _steps.Length - 1)
+                {
+                    _next.Text = _persistentState.LastResult switch
+                    {
+                        "Failed" or "RecoveryFailed" => "Retry Deploy",
+                        "Successful" => "Deploy Again",
+                        _ => "Deploy"
+                    };
+                    BuildReviewPageRefresh();
+                }
             }
-            UpdateNavigationState();
         }
     }
 
@@ -2619,7 +2667,8 @@ public sealed partial class WizardForm : Form
             _persistentState.LastSourceFolder = _profile.SourceFolder;
             _persistentState.LastSiteName = _profile.SiteName;
             _persistentState.UpdatedAt = DateTime.Now;
-            _appData.SaveState(_persistentState);
+            try { _appData.SaveState(_persistentState); }
+            catch (Exception ex) { InternalDiagnostics.Record(ex, "Persist state from UI log timer"); }
         }
     }
 

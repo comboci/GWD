@@ -1,6 +1,6 @@
 {
-  "version": "269.0.0",
+  "version": "270.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V269-R — UI performance/UX source candidate; Windows build and runtime review pending"
+  "commitNote": "V270-R — GWD-A01 deployment lifecycle source candidate; Windows acceptance pending"
 }

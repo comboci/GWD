@@ -3063,9 +3063,20 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
         reviewRoot.Controls.Add(_reviewStatusBanner, 0, 1);
         UpdateDeploymentIndicator();
         var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, SplitterDistance = 210, FixedPanel = FixedPanel.None };
-        void KeepHalfSplit() { if (split.Height > 160) split.SplitterDistance = Math.Max(80, (split.Height - split.SplitterWidth) / 2); }
+        void KeepHalfSplit()
+        {
+            // Handle creation/resize can queue layout work just before the page is replaced.
+            if (IsDisposed || Disposing || split.IsDisposed || split.Disposing || !split.IsHandleCreated || !split.Visible || split.Height <= 160) return;
+            var max = split.ClientSize.Height - split.SplitterWidth - split.Panel2MinSize;
+            if (max < split.Panel1MinSize) return;
+            var desired = Math.Clamp((split.ClientSize.Height - split.SplitterWidth) / 2, split.Panel1MinSize, max);
+            if (split.SplitterDistance != desired) split.SplitterDistance = desired;
+        }
         split.Resize += (_, _) => KeepHalfSplit();
-        split.HandleCreated += (_, _) => BeginInvoke(() => KeepHalfSplit());
+        split.HandleCreated += (_, _) =>
+        {
+            if (!IsDisposed && !Disposing && IsHandleCreated) BeginInvoke(() => KeepHalfSplit());
+        };
         var summary = new TextBox { Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, Font = new Font("Consolas", 9.5F) };
         summary.Text = $"Application: {_profile.ApplicationName}\r\nBuild mode (selected on Project Source): {_profile.BuildMode}\r\nHosted website action: {(_profile.BuildMode == "Fast Local Test" ? "UNCHANGED — compile only" : "UPDATE after successful build")}\r\nDependency mode: {_profile.DependencyResolutionMode}\r\nOffline build: {_profile.OfflineBuild}\r\nTarget mode: {_profile.TargetMode}\r\nTarget: {_profile.TargetHost}\r\nDeployment Repository: {_profile.DeploymentRepositoryFolder}\r\nStable Build Workspace: {_profile.WorkspaceRoot}\r\nIncoming Source: {_profile.SourceFolder}\r\nReady publish folder: {_profile.ReadyPublishFolder}\r\nAPI project: {_profile.ApiProjectPath}\r\nTarget framework: .NET {_profile.TargetFrameworkMajor}\r\nNode required: {_profile.RequiresNode}\r\nSQL: {_profile.SqlInstance}\r\nDatabase: {_profile.DatabaseName}\r\nHosted site folder: {_profile.HostingRoot}\r\nDeployment layout: {_profile.DeploymentLayout}\r\nDefault IIS website: {_profile.UseDefaultIisWebsite}\r\nPersistent data root: {_profile.DeploymentRoot}\r\nIIS site: {_profile.SiteName}\r\nApp pool: {_profile.AppPoolName}\r\nPort: {_profile.HttpPort}\r\nHealth: {_profile.HealthPath}";
         split.Panel1.Controls.Add(summary); split.Panel2.Controls.Add(_log); reviewRoot.Controls.Add(split, 0, 2);
@@ -3638,7 +3649,7 @@ Default website mode: C:\inetpub\wwwroot, HTTP port 80. A different IIS site own
     private void BuildReviewPageRefresh()
     {
         if (_pageIndex != _steps.Length - 1) return;
-        _content.Controls.Clear();
+        DisposeContentControls(); // Detach the shared log, dispose the old page and its GDI resources.
         BuildReviewPage();
     }
 

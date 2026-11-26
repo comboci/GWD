@@ -10,7 +10,7 @@ public sealed class DeploymentHistoryForm : Form
     private readonly DeploymentProfile? _profile;
     private readonly string? _currentLog;
     private readonly ComboBox _projects = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 420 };
-    private readonly RichTextBox _summary = new() { ReadOnly = true, Dock = DockStyle.Fill, Font = new Font("Consolas", 9.5F), BackColor = Color.White };
+    private readonly RichTextBox _summary = new() { ReadOnly = true, Dock = DockStyle.Fill, Font = GwdUi.MonoReading, BackColor = Color.White };
     private readonly DataGridView _grid = new()
     {
         Dock = DockStyle.Fill,
@@ -68,7 +68,7 @@ public sealed class DeploymentHistoryForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
         var header = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, WrapContents = true };
-        header.Controls.Add(new Label { Text = "Project:", AutoSize = true, Padding = new Padding(0, 8, 6, 0), Font = new Font("Segoe UI Semibold", 9.5F) });
+        header.Controls.Add(new Label { Text = "Project:", AutoSize = true, Padding = new Padding(0, 8, 6, 0), Font = GwdUi.Section });
         header.Controls.Add(_projects);
         var refresh = new Button { Text = "Refresh", Width = 95, Height = 32, Margin = new Padding(10, 2, 0, 2) };
         refresh.Click += async (_, _) => await LoadProjectsAsync();
@@ -228,7 +228,7 @@ public sealed class DeploymentHistoryForm : Form
         _loadRequest = request;
         var id = choice.ProjectId;
         _summary.Text = "Loading project history...";
-        _status.Text = "Loading...";
+        GwdUi.ShowFeedback(_status, GwdUi.Feedback.Loading, "Loading history…");
         try
         {
             var result = await Task.Run(() =>
@@ -246,8 +246,9 @@ public sealed class DeploymentHistoryForm : Form
             var pageCount = result.Page.TotalAttempts == 0 ? 0 : (result.Page.TotalAttempts - 1) / result.Page.PageSize + 1;
             _newer.Enabled = _pageIndex > 0;
             _older.Enabled = _pageIndex + 1 < pageCount;
-            _status.Text = pageCount == 0 ? "No deployment history recorded."
-                : $"Page {_pageIndex + 1}/{pageCount} · {result.Page.TotalAttempts} attempt(s) recorded. Persistent history: {_history.Root}";
+            GwdUi.ShowFeedback(_status, pageCount == 0 ? GwdUi.Feedback.Empty : GwdUi.Feedback.Info,
+                pageCount == 0 ? "No deployment history recorded."
+                    : $"Page {_pageIndex + 1}/{pageCount} · {result.Page.TotalAttempts} attempt(s) recorded. Persistent history: {_history.Root}");
         }
         catch (OperationCanceledException) when (request.IsCancellationRequested) { }
         catch (Exception ex)

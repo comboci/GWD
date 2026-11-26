@@ -15,7 +15,7 @@ internal sealed class DatabaseRelocationForm : Form
     private readonly Button _inspect = new() { Text = "Refresh database size", Width = 180 };
     private readonly Button _move = new() { Text = "Detach, Move && Attach", Width = 210, Enabled = false };
     private readonly ProgressBar _relocationProgress = new() { Dock = DockStyle.Top, Height = 18, Minimum = 0, Maximum = 4 };
-    private readonly Label _stage = new() { Dock = DockStyle.Top, Height = 32, Text = "Ready", Font = new Font("Segoe UI Semibold", 10F), Padding = new Padding(8, 5, 0, 0) };
+    private readonly Label _stage = new() { Dock = DockStyle.Top, Height = 32, Text = "Ready", Font = GwdUi.Section, Padding = new Padding(8, 5, 0, 0) };
     private List<DatabaseFile> _files = new();
     private string _database = "";
 
@@ -36,7 +36,7 @@ internal sealed class DatabaseRelocationForm : Form
             if (picker.ShowDialog(this) == DialogResult.OK) _destination.Text = picker.SelectedPath;
         };
         toolbar.Controls.Add(_inspect); toolbar.Controls.Add(browse); toolbar.Controls.Add(_move);
-        _details.Font = new Font("Segoe UI", 11F);
+        _details.Font = GwdUi.Body;
         _details.WordWrap = true;
         Controls.Add(_details); Controls.Add(_relocationProgress); Controls.Add(_stage); Controls.Add(_destination); Controls.Add(toolbar);
         GwdUi.StyleTree(this);

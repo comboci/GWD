@@ -14,7 +14,7 @@ public sealed class ErrorReportForm : Form
         WordWrap = false,
         ScrollBars = RichTextBoxScrollBars.Both,
         Dock = DockStyle.Fill,
-        Font = new Font("Consolas", 9.5F),
+        Font = GwdUi.MonoReading,
         BackColor = Color.White
     };
 
@@ -50,6 +50,7 @@ public sealed class ErrorReportForm : Form
         Controls.Add(_reportBox);
         Controls.Add(top);
         top.BringToFront();
+        GwdUi.StyleTree(this);
 
         dump.Click += (_, _) => DumpDiagnosticBundle();
         openFolder.Click += (_, _) => OpenReportFolder();

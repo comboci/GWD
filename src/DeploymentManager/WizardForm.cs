@@ -66,7 +66,7 @@ public sealed partial class WizardForm : Form
     private readonly Label _pageTitle = new() { AutoSize = true, Font = GwdUi.Heading };
     private readonly Label _pageDescription = new() { AutoSize = true, MaximumSize = new Size(820, 0), ForeColor = Color.DimGray };
     private readonly Label _stepIndicator = new() { AutoSize = true, ForeColor = Color.DimGray, Font = GwdUi.Small };
-    private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = new Font("Consolas", 9F) };
+    private readonly TextBox _log = new() { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill, Font = GwdUi.Mono };
     private readonly ProgressBar _progress = new() { Dock = DockStyle.Bottom, Height = 16 };
     private readonly Label _activity = new() { AutoSize = false, Dock = DockStyle.Fill, Height = 36, Padding = new Padding(8, 0, 8, 0), TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.DimGray, Text = "Ready" };
 
@@ -2499,7 +2499,7 @@ public sealed partial class WizardForm : Form
         public IReadOnlyCollection<string> Exclusions => _list.Items.Cast<string>().Except(_list.CheckedItems.Cast<string>(), StringComparer.OrdinalIgnoreCase).ToArray();
         public CleanExportOptionsForm()
         {
-            Text="Clean Source Export"; Width=460; Height=390; StartPosition=FormStartPosition.CenterParent; Font=new Font("Segoe UI",9.5F);
+            Text="Clean Source Export"; Width=460; Height=390; StartPosition=FormStartPosition.CenterParent; Font=GwdUi.BodyCompact;
             var note=new Label{Text="Check folders you want INCLUDED in the ZIP. Unchecked folders are excluded.",Dock=DockStyle.Top,Height=42,Padding=new Padding(10)};
             foreach(var x in new[]{".git",".worktrees","IIS-Publish","bin","obj","node_modules"}) _list.Items.Add(x,false);
             var buttons=new FlowLayoutPanel{Dock=DockStyle.Bottom,Height=48,FlowDirection=FlowDirection.RightToLeft,Padding=new Padding(8)};

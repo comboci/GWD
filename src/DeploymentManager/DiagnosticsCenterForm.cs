@@ -267,7 +267,7 @@ public sealed partial class DiagnosticsCenterForm : Form
         header.Controls.Add(projects);
         root.Controls.Add(header, 0, 0);
 
-        var summary = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill, Font = new Font("Consolas", 9F), Text = "Loading deployment history..." };
+        var summary = new TextBox { Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill, Font = GwdUi.Mono, Text = "Loading deployment history..." };
         var grid = new DataGridView
         {
             Dock = DockStyle.Fill,
@@ -490,7 +490,7 @@ public sealed partial class DiagnosticsCenterForm : Form
     private TabPage CreateLogTab()
     {
         var tab = new TabPage("Current Log");
-        var box = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, WordWrap = false, Font = new Font("Consolas", 9.5F) };
+        var box = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, WordWrap = false, Font = GwdUi.MonoReading };
         tab.Controls.Add(box);
         var generation = 0;
         async Task LoadLogAsync()
@@ -529,8 +529,8 @@ public sealed partial class DiagnosticsCenterForm : Form
         }
         split.HandleCreated += (_, _) => FitInitialSplitter();
         split.ClientSizeChanged += (_, _) => FitInitialSplitter();
-        var list = new ListBox { Dock = DockStyle.Fill, Font = new Font("Consolas", 9F) };
-        var preview = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, WordWrap = false, Font = new Font("Consolas", 9F) };
+        var list = new ListBox { Dock = DockStyle.Fill, Font = GwdUi.Mono };
+        var preview = new RichTextBox { Dock = DockStyle.Fill, ReadOnly = true, WordWrap = false, Font = GwdUi.Mono };
         var listGeneration = 0;
         var previewGeneration = 0;
 
@@ -595,7 +595,7 @@ public sealed partial class DiagnosticsCenterForm : Form
     private TabPage CreatePerformanceTab()
     {
         var tab = new TabPage("Build Performance");
-        var box = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Font = new Font("Consolas", 9F) };
+        var box = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Font = GwdUi.Mono };
         box.Text = _deployment.LastPerformanceSnapshot?.ToPlainText() ?? "No build performance snapshot is available in the current session. Historical stage timings remain available in Deployment History.";
         tab.Controls.Add(box);
         return tab;
@@ -608,8 +608,8 @@ public sealed partial class DiagnosticsCenterForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        var current = new Label { AutoSize = true, Font = new Font("Segoe UI Semibold", 11F), Text = "Sampling..." };
-        var history = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Font = new Font("Consolas", 9F) };
+        var current = new Label { AutoSize = true, Font = GwdUi.Section, Text = "Sampling..." };
+        var history = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, Font = GwdUi.Mono };
         var note = new Label { AutoSize = true, ForeColor = Color.DimGray, MaximumSize = new Size(1000, 0), Text = "CPU/RAM is sampled by the main Wizard every 5 seconds. This tab displays the latest measured sample and never creates extra samples. History is bounded to 720 measurements; no forced GC runs." };
         root.Controls.Add(current, 0, 0); root.Controls.Add(history, 0, 1); root.Controls.Add(note, 0, 2);
         DateTimeOffset? lastRenderedAt = null;
@@ -775,7 +775,7 @@ public sealed partial class DiagnosticsCenterForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.Controls.Add(new Label { Text = "Diagnostic file created successfully:", AutoSize = true, Font = new Font("Segoe UI Semibold", 10F) }, 0, 0);
+        root.Controls.Add(new Label { Text = "Diagnostic file created successfully:", AutoSize = true, Font = GwdUi.Section }, 0, 0);
         var pathBox = new TextBox { Text = path, ReadOnly = true, Dock = DockStyle.Fill };
         root.Controls.Add(pathBox, 0, 1);
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, FlowDirection = FlowDirection.RightToLeft };

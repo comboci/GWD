@@ -1,6 +1,6 @@
 {
-  "version": "285.0.0",
+  "version": "286.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V285-R — A09 - adaptive Wizard and dialogs / PerMonitorV2 working bounds; Windows acceptance pending"
+  "commitNote": "V286-R — A07 - semantic roles, accessibility and shared visual resources; Windows acceptance pending"
 }

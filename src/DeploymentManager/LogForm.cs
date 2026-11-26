@@ -6,7 +6,7 @@ namespace GenericWeb.DeploymentManager;
 public sealed class LogForm : Form
 {
     private const int MaxUiChars = 500_000;
-    private readonly RichTextBox _box = new() { ReadOnly = true, ScrollBars = RichTextBoxScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill, Font = new Font("Consolas", 9.5F), BackColor = Color.White };
+    private readonly RichTextBox _box = new() { ReadOnly = true, ScrollBars = RichTextBoxScrollBars.Both, WordWrap = false, Dock = DockStyle.Fill, Font = GwdUi.MonoReading, BackColor = Color.White };
     private readonly Font _boldLogFont;
     private readonly string _logFile;
     private readonly System.Windows.Forms.Timer _timer = new() { Interval = 750 };

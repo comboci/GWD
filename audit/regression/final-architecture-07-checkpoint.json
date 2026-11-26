@@ -3,7 +3,7 @@
   "branch": "fix/ui-performance-phase-01",
   "baselineVersion": "V269-R",
   "baselineCommit": "0121217a13057d7c832a9a9ddd7aa9acf5a099cc",
-  "candidate": "V285-R",
+  "candidate": "V286-R",
   "state": "IN_PROGRESS",
   "packs": {
     "GWD-A01": "TEST_PENDING",
@@ -13,7 +13,7 @@
     "GWD-A05": "TEST_PENDING",
     "GWD-A06": "TEST_PENDING",
     "GWD-A09": "TEST_PENDING",
-    "GWD-A07": "PENDING",
+    "GWD-A07": "TEST_PENDING",
     "GWD-A08": "PENDING",
     "GWD-A10": "PENDING",
     "GWD-A11": "PENDING",
@@ -33,9 +33,10 @@
     "A04 - verified source-prefix incremental history index and paging",
     "A05 - asynchronous source preview, same-path invalidation and generation guards",
     "A06 - scoped health snapshot, coalesced single-flight and real evidence time",
-    "A09 - adaptive Wizard and dialogs / PerMonitorV2 working bounds"
+    "A09 - adaptive Wizard and dialogs / PerMonitorV2 working bounds",
+    "A07 - semantic roles, accessibility and shared visual resources"
   ],
-  "nextSourcePackage": "GWD-A07",
+  "nextSourcePackage": "GWD-A08",
   "build": "NOT_RUN_POLICY",
   "tests": "NOT_RUN_POLICY",
   "windowsRuntime": "NOT_RUN_OWNER",

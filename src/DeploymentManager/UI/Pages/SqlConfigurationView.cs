@@ -72,7 +72,7 @@ internal sealed class SqlConfigurationView : UserControl
             ReadOnly = true,
             ScrollBars = ScrollBars.Vertical,
             Dock = DockStyle.Fill,
-            Font = new Font("Consolas", 9F),
+            Font = GwdUi.Mono,
             Text = "Select an instance, then click Refresh diagnostics."
         };
         RefreshDiagnostics = new Button { Text = "Refresh diagnostics", AutoSize = true };

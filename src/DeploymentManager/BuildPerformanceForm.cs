@@ -14,7 +14,7 @@ public sealed class BuildPerformanceForm : Form
         GwdUi.ConfigureForm(this);
         KeyPreview = true;
         KeyDown += (_, e) => { if (e.KeyCode == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); } };
-        Font = new Font("Segoe UI", 9.5F);
+        Font = GwdUi.BodyCompact;
 
         var root = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, Padding = new Padding(14) };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -24,7 +24,7 @@ public sealed class BuildPerformanceForm : Form
         var header = new Label
         {
             AutoSize = true,
-            Font = new Font("Segoe UI Semibold", 13F),
+            Font = GwdUi.DialogHeading,
             Text = $"Build Performance  |  {trace.BuildMode}  |  Total {trace.TotalElapsed:hh\\:mm\\:ss\\.fff}\r\n" +
                    $"Dependency Mode: {trace.DependencyMode}   Started: {trace.StartedAt:yyyy-MM-dd HH:mm:ss}"
         };
@@ -81,5 +81,6 @@ public sealed class BuildPerformanceForm : Form
         buttons.Controls.Add(copy);
         root.Controls.Add(buttons, 0, 2);
         Controls.Add(root);
+        GwdUi.StyleTree(this);
     }
 }

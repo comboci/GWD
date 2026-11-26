@@ -271,6 +271,8 @@ public sealed partial class DiagnosticsCenterForm : Form
             ReadOnly = true,
             AllowUserToAddRows = false,
             AllowUserToDeleteRows = false,
+            VirtualMode = true,
+            AutoGenerateColumns = false,
             AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
             SelectionMode = DataGridViewSelectionMode.FullRowSelect,
             MultiSelect = false
@@ -290,6 +292,8 @@ public sealed partial class DiagnosticsCenterForm : Form
         var generation = 0;
         var selectingProjects = false;
         var loadingProjects = false;
+        CancellationTokenSource? historyRequest = null;
+        CancellationTokenSource? catalogRequest = null;
         var previous = new Button { Text = "Previous", AutoSize = true, Enabled = false };
         var next = new Button { Text = "Next", AutoSize = true, Enabled = false };
         var pageInfo = new Label { AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(8, 7, 0, 0), Text = "Loading..." };
@@ -299,23 +303,33 @@ public sealed partial class DiagnosticsCenterForm : Form
         navigation.Controls.Add(pageInfo);
         root.Controls.Add(navigation, 0, 3);
 
+        foreach (DataGridViewColumn column in grid.Columns)
+            column.SortMode = DataGridViewColumnSortMode.NotSortable;
+        grid.CellValueNeeded += (_, e) =>
+        {
+            var index = page * pageSize + e.RowIndex;
+            if (e.RowIndex < 0 || index < 0 || index >= records.Length) return;
+            var a = records[index];
+            e.Value = e.ColumnIndex switch
+            {
+                0 => a.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"),
+                1 => a.EndedAtUtc.HasValue ? a.Result : "Interrupted",
+                2 => a.EndedAtUtc.HasValue ? TimeSpan.FromSeconds(Math.Max(0, a.ElapsedSeconds)).ToString(@"hh\:mm\:ss") : "—",
+                3 => a.BuildMode,
+                4 => string.IsNullOrWhiteSpace(a.ApplicationVersion) ? "—" : a.ApplicationVersion,
+                5 => a.DeploymentTargetPath,
+                _ => null
+            };
+        };
+
         void RenderPage()
         {
             if (tab.IsDisposed) return;
             var pages = Math.Max(1, (records.Length + pageSize - 1) / pageSize);
             page = Math.Clamp(page, 0, pages - 1);
-            grid.SuspendLayout();
-            try
-            {
-                grid.Rows.Clear();
-                foreach (var a in records.Skip(page * pageSize).Take(pageSize))
-                {
-                    var duration = a.EndedAtUtc.HasValue ? TimeSpan.FromSeconds(Math.Max(0, a.ElapsedSeconds)).ToString(@"hh\:mm\:ss") : "—";
-                    grid.Rows.Add(a.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"), a.EndedAtUtc.HasValue ? a.Result : "Interrupted", duration, a.BuildMode,
-                        string.IsNullOrWhiteSpace(a.ApplicationVersion) ? "—" : a.ApplicationVersion, a.DeploymentTargetPath);
-                }
-            }
-            finally { grid.ResumeLayout(); }
+            grid.RowCount = Math.Min(pageSize, Math.Max(0, records.Length - page * pageSize));
+            grid.ClearSelection();
+            grid.Invalidate();
             previous.Enabled = page > 0;
             next.Enabled = page < pages - 1;
             pageInfo.Text = $"Page {page + 1}/{pages} — {records.Length} deployment(s)";
@@ -323,6 +337,8 @@ public sealed partial class DiagnosticsCenterForm : Form
 
         async Task LoadProjectAsync()
         {
+            historyRequest?.Cancel();
+            var requested = ++generation;
             if (projects.SelectedItem is not ProjectChoice choice)
             {
                 records = Array.Empty<DeploymentHistoryRecord>();
@@ -330,25 +346,30 @@ public sealed partial class DiagnosticsCenterForm : Form
                 RenderPage();
                 return;
             }
-            var requested = ++generation;
+            var request = new CancellationTokenSource();
+            historyRequest = request;
             var id = choice.ProjectId;
+            records = Array.Empty<DeploymentHistoryRecord>();
+            page = 0;
+            RenderPage();
             summary.Text = "Loading project history...";
             pageInfo.Text = "Loading...";
             try
             {
                 var result = await Task.Run(() =>
                 {
-                    var s = _history.GetSummary(id);
+                    var s = _history.GetSummary(id, request.Token);
                     return (Text: s is null ? string.Empty : BuildSummaryText(s),
                         Records: s?.Attempts.OrderByDescending(x => x.StartedAtUtc).ToArray() ?? Array.Empty<DeploymentHistoryRecord>());
-                });
-                if (requested != generation || IsDisposed || Disposing || tab.IsDisposed ||
+                }, request.Token);
+                if (request.IsCancellationRequested || requested != generation || IsDisposed || Disposing || tab.IsDisposed ||
                     (projects.SelectedItem as ProjectChoice)?.ProjectId != id) return;
                 records = result.Records;
                 summary.Text = records.Length == 0 ? "No deployment history has been recorded yet." : result.Text;
                 page = 0;
                 RenderPage();
             }
+            catch (OperationCanceledException) when (request.IsCancellationRequested) { }
             catch (Exception ex)
             {
                 InternalDiagnostics.Record(ex, "Load diagnostic project history");
@@ -357,12 +378,21 @@ public sealed partial class DiagnosticsCenterForm : Form
                 summary.Text = "Deployment history unavailable: " + SecretRedactor.Redact(ex.Message);
                 RenderPage();
             }
+            finally
+            {
+                if (ReferenceEquals(historyRequest, request)) historyRequest = null;
+                request.Dispose();
+            }
         }
 
         async Task LoadProjectsAsync()
         {
             if (loadingProjects) return;
             loadingProjects = true;
+            projects.Enabled = false;
+            historyRequest?.Cancel();
+            var request = new CancellationTokenSource();
+            catalogRequest = request;
             UpdateActionMenuState();
             var requested = ++generation;
             pageInfo.Text = "Loading projects...";
@@ -370,7 +400,7 @@ public sealed partial class DiagnosticsCenterForm : Form
             try
             {
                 var preferred = selectedId ?? _history.GetProjectId(_profile);
-                var summaries = await Task.Run(() => _history.GetProjectSummaries());
+                var summaries = await Task.Run(() => _history.GetProjectCatalog(request.Token), request.Token);
                 if (requested != generation || IsDisposed || Disposing || tab.IsDisposed) return;
                 selectingProjects = true;
                 projects.BeginUpdate();
@@ -389,6 +419,7 @@ public sealed partial class DiagnosticsCenterForm : Form
                 finally { projects.EndUpdate(); selectingProjects = false; }
                 await LoadProjectAsync();
             }
+            catch (OperationCanceledException) when (request.IsCancellationRequested) { }
             catch (Exception ex)
             {
                 InternalDiagnostics.Record(ex, "Load diagnostics project list");
@@ -401,7 +432,13 @@ public sealed partial class DiagnosticsCenterForm : Form
             finally
             {
                 loadingProjects = false;
-                if (!IsDisposed && !Disposing && !tab.IsDisposed) UpdateActionMenuState();
+                if (ReferenceEquals(catalogRequest, request)) catalogRequest = null;
+                request.Dispose();
+                if (!IsDisposed && !Disposing && !tab.IsDisposed)
+                {
+                    projects.Enabled = true;
+                    UpdateActionMenuState();
+                }
             }
         }
 
@@ -416,6 +453,8 @@ public sealed partial class DiagnosticsCenterForm : Form
         tab.Disposed += (_, _) =>
         {
             generation++;
+            historyRequest?.Cancel();
+            catalogRequest?.Cancel();
             _tabRefreshActions.Remove(tab);
             _tabRefreshAvailable.Remove(tab);
         };
@@ -764,7 +803,7 @@ public sealed partial class DiagnosticsCenterForm : Form
         });
     }
 
-    private static string DisplayProjectName(DeploymentProjectSummary s) => string.IsNullOrWhiteSpace(s.SiteName) ? s.ApplicationName : $"{s.ApplicationName} — {s.SiteName}";
+    private static string DisplayProjectName(DeploymentProjectCatalogEntry s) => string.IsNullOrWhiteSpace(s.SiteName) ? s.ApplicationName : $"{s.ApplicationName} — {s.SiteName}";
     private static string Dash(string value) => string.IsNullOrWhiteSpace(value) ? "—" : value;
     private static string FormatDate(DateTime? utc) => utc.HasValue ? utc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") : "—";
     private static string FormatDuration(TimeSpan duration) => duration.TotalDays >= 1 ? $"{duration.TotalDays:0.0} days" : duration.ToString(@"hh\:mm\:ss");

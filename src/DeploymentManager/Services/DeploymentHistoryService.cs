@@ -9,6 +9,8 @@ using GenericWeb.DeploymentManager.Models;
 
 namespace GenericWeb.DeploymentManager.Services;
 
+public sealed record DeploymentProjectCatalogEntry(string ProjectId, string ApplicationName, string SiteName, DateTime LatestDeploymentUtc);
+
 public sealed class DeploymentHistoryService
 {
     private readonly object _sync = new();
@@ -122,12 +124,15 @@ public sealed class DeploymentHistoryService
         Append(completed);
     }
 
-    public IReadOnlyList<DeploymentHistoryRecord> GetAttempts(string projectId)
+    public IReadOnlyList<DeploymentHistoryRecord> GetAttempts(string projectId, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
         var path = GetProjectFile(projectId);
         if (!File.Exists(path)) return Array.Empty<DeploymentHistoryRecord>();
 
-        var events = new List<DeploymentHistoryRecord>();
+        // Keep only the latest event per attempt while reading. Equal timestamps
+        // retain the first event, matching the previous stable OrderBy behavior.
+        var latest = new Dictionary<string, DeploymentHistoryRecord>(StringComparer.OrdinalIgnoreCase);
         lock (_sync)
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -135,11 +140,14 @@ public sealed class DeploymentHistoryService
             int lineNumber = 0;
             while (reader.ReadLine() is string line)
             {
+                ct.ThrowIfCancellationRequested();
                 lineNumber++;
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 try
                 {
-                    events.Add(ReadHistoryRecord(line));
+                    var record = ReadHistoryRecord(line);
+                    if (!latest.TryGetValue(record.AttemptId, out var existing) || record.EventAtUtc > existing.EventAtUtc)
+                        latest[record.AttemptId] = record;
                 }
                 catch (JsonException ex)
                 {
@@ -152,11 +160,8 @@ public sealed class DeploymentHistoryService
             }
         }
 
-        return events
-            .GroupBy(x => x.AttemptId, StringComparer.OrdinalIgnoreCase)
-            .Select(g => g.OrderByDescending(x => x.EventAtUtc).First())
-            .OrderBy(x => x.StartedAtUtc)
-            .ToArray();
+        ct.ThrowIfCancellationRequested();
+        return latest.Values.OrderBy(x => x.StartedAtUtc).ToArray();
     }
 
     public IReadOnlyList<DeploymentProjectSummary> GetProjectSummaries()
@@ -177,9 +182,31 @@ public sealed class DeploymentHistoryService
             .ToArray();
     }
 
-    public DeploymentProjectSummary? GetSummary(string projectId)
+    // The project selector needs only identity and recency; do not hold all
+    // projects' detailed attempts and build stages in memory together.
+    public IReadOnlyList<DeploymentProjectCatalogEntry> GetProjectCatalog(CancellationToken ct = default)
     {
-        var attempts = GetAttempts(projectId);
+        ct.ThrowIfCancellationRequested();
+        Directory.CreateDirectory(Root);
+        var catalog = new List<DeploymentProjectCatalogEntry>();
+        foreach (var path in Directory.EnumerateFiles(Root, "*.jsonl", SearchOption.TopDirectoryOnly))
+        {
+            ct.ThrowIfCancellationRequested();
+            var projectId = Path.GetFileNameWithoutExtension(path);
+            var attempts = GetAttempts(projectId, ct);
+            if (attempts.Count == 0) continue;
+            var latest = attempts[^1];
+            catalog.Add(new(projectId, latest.ApplicationName, latest.SiteName,
+                latest.EndedAtUtc ?? latest.StartedAtUtc));
+        }
+        return catalog.OrderByDescending(x => x.LatestDeploymentUtc)
+            .ThenBy(x => x.ApplicationName, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    public DeploymentProjectSummary? GetSummary(string projectId, CancellationToken ct = default)
+    {
+        var attempts = GetAttempts(projectId, ct);
+        ct.ThrowIfCancellationRequested();
         return attempts.Count == 0 ? null : BuildSummary(projectId, attempts);
     }
 

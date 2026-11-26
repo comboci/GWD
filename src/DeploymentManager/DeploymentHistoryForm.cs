@@ -17,6 +17,7 @@ public sealed class DeploymentHistoryForm : Form
         ReadOnly = true,
         AllowUserToAddRows = false,
         AllowUserToDeleteRows = false,
+        VirtualMode = true,
         AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.DisplayedCells,
         SelectionMode = DataGridViewSelectionMode.FullRowSelect,
         MultiSelect = false
@@ -25,6 +26,11 @@ public sealed class DeploymentHistoryForm : Form
     private IReadOnlyList<DeploymentHistoryRecord> _currentAttempts = Array.Empty<DeploymentHistoryRecord>();
     private readonly HashSet<string> _expandedAttemptIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly Font _boldAttemptFont;
+    private readonly List<(DeploymentHistoryRecord Attempt, BuildPerformanceStageHistory? Stage)> _visibleRows = new();
+    private bool _selectingProjects;
+    private bool _loadingProjects;
+    private int _generation;
+    private CancellationTokenSource? _loadRequest;
 
     public DeploymentHistoryForm(DeploymentHistoryService history, string? preferredProjectId = null, DeploymentProfile? profile = null, string? currentLog = null)
     {
@@ -45,7 +51,8 @@ public sealed class DeploymentHistoryForm : Form
         BuildUi();
         // The grid is parented now and has inherited the form's DPI-aware font.
         _boldAttemptFont = new Font(_grid.Font, FontStyle.Bold);
-        LoadProjects();
+        Shown += async (_, _) => await LoadProjectsAsync();
+        FormClosed += (_, _) => { _generation++; _loadRequest?.Cancel(); };
     }
 
     private void BuildUi()
@@ -59,13 +66,18 @@ public sealed class DeploymentHistoryForm : Form
         header.Controls.Add(new Label { Text = "Project:", AutoSize = true, Padding = new Padding(0, 8, 6, 0), Font = new Font("Segoe UI Semibold", 9.5F) });
         header.Controls.Add(_projects);
         var refresh = new Button { Text = "Refresh", Width = 95, Height = 32, Margin = new Padding(10, 2, 0, 2) };
-        refresh.Click += (_, _) => LoadProjects();
+        refresh.Click += async (_, _) => await LoadProjectsAsync();
         header.Controls.Add(refresh);
         var openFolder = new Button { Text = "Open History Folder", Width = 150, Height = 32, Margin = new Padding(10, 2, 0, 2) };
         openFolder.Click += (_, _) => OpenTarget(_history.Root);
         header.Controls.Add(openFolder);
         var export = new Button { Text = "Export Diagnostic Bundle", Width = 190, Height = 32, Margin = new Padding(10, 2, 0, 2), Enabled = _profile is not null };
-        export.Click += (_, _) => ExportDiagnosticBundle();
+        export.Click += async (_, _) =>
+        {
+            export.Enabled = false;
+            try { await ExportDiagnosticBundleAsync(); }
+            finally { if (!export.IsDisposed) export.Enabled = true; }
+        };
         header.Controls.Add(export);
         root.Controls.Add(header, 0, 0);
 
@@ -104,106 +116,189 @@ public sealed class DeploymentHistoryForm : Form
         root.Controls.Add(_status, 0, 2);
         Controls.Add(root);
 
-        _projects.SelectedIndexChanged += (_, _) => LoadSelectedProject();
+        foreach (DataGridViewColumn column in _grid.Columns)
+            column.SortMode = DataGridViewColumnSortMode.NotSortable;
+        _grid.CellValueNeeded += (_, e) =>
+        {
+            if (e.RowIndex < 0 || e.RowIndex >= _visibleRows.Count) return;
+            e.Value = GetCellValue(_visibleRows[e.RowIndex], e.ColumnIndex);
+        };
+        _grid.CellFormatting += (_, e) =>
+        {
+            if (e.RowIndex < 0 || e.RowIndex >= _visibleRows.Count) return;
+            var stage = _visibleRows[e.RowIndex].Stage;
+            if (stage is null) e.CellStyle.Font = _boldAttemptFont;
+            else
+            {
+                e.CellStyle.BackColor = Color.FromArgb(245, 248, 252);
+                e.CellStyle.ForeColor = stage.Status.Equals("FAILED", StringComparison.OrdinalIgnoreCase) ? Color.Firebrick : Color.DimGray;
+            }
+        };
+        _projects.SelectedIndexChanged += async (_, _) => { if (!_selectingProjects) await LoadSelectedProjectAsync(); };
         _grid.CellClick += (_, e) => ToggleSelectedPerformance(e.RowIndex);
         _grid.CellDoubleClick += (_, _) => OpenSelectedLog();
     }
 
-    private void ExportDiagnosticBundle()
+    private async Task ExportDiagnosticBundleAsync()
     {
         if (_profile is null) return;
         try
         {
             var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
-            Directory.CreateDirectory(desktop);
-            var path = new DiagnosticBundleService().Export(desktop, _profile, _history, _currentLog ?? string.Empty);
+            var profile = _profile;
+            var path = await Task.Run(() =>
+            {
+                Directory.CreateDirectory(desktop);
+                return new DiagnosticBundleService().Export(desktop, profile, _history, _currentLog ?? string.Empty);
+            });
+            if (IsDisposed || Disposing) return;
             MessageBox.Show(this, "Diagnostic bundle created with sensitive values redacted:\r\n" + path, "Diagnostic bundle", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
-        catch (Exception ex) { MessageBox.Show(this, ex.Message, "Diagnostic export failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        catch (Exception ex) { if (!IsDisposed && !Disposing) MessageBox.Show(this, SecretRedactor.Redact(ex.Message), "Diagnostic export failed", MessageBoxButtons.OK, MessageBoxIcon.Error); }
     }
 
-    private void LoadProjects()
+    private async Task LoadProjectsAsync()
     {
-        var summaries = _history.GetProjectSummaries();
+        if (_loadingProjects || IsDisposed || Disposing) return;
+        _loadingProjects = true;
+        _projects.Enabled = false;
+        _loadRequest?.Cancel();
+        var request = new CancellationTokenSource();
+        _loadRequest = request;
+        var generation = ++_generation;
         var selectedId = (_projects.SelectedItem as ProjectChoice)?.ProjectId ?? _preferredProjectId;
-        _projects.BeginUpdate();
+        _status.Text = "Loading projects...";
         try
         {
-            _projects.Items.Clear();
-            foreach (var item in summaries)
-                _projects.Items.Add(new ProjectChoice(item.ProjectId, DisplayProjectName(item)));
+            var catalog = await Task.Run(() => _history.GetProjectCatalog(request.Token), request.Token);
+            if (request.IsCancellationRequested || generation != _generation || IsDisposed || Disposing) return;
+            _selectingProjects = true;
+            _projects.BeginUpdate();
+            try
+            {
+                _projects.Items.Clear();
+                foreach (var item in catalog)
+                    _projects.Items.Add(new ProjectChoice(item.ProjectId, DisplayProjectName(item)));
+                if (_projects.Items.Count > 0)
+                    _projects.SelectedIndex = Enumerable.Range(0, _projects.Items.Count)
+                        .FirstOrDefault(i => (_projects.Items[i] as ProjectChoice)?.ProjectId == selectedId);
+            }
+            finally { _projects.EndUpdate(); _selectingProjects = false; }
+            await LoadSelectedProjectAsync();
         }
-        finally { _projects.EndUpdate(); }
-
-        if (_projects.Items.Count == 0)
+        catch (OperationCanceledException) when (request.IsCancellationRequested) { }
+        catch (Exception ex)
         {
-            _summary.Text = "No deployment history has been recorded yet.\r\n\r\nHistory is written when a deployment starts and completed with Successful / Failed / Cancelled outcome.";
-            _grid.DataSource = null;
+            if (!IsDisposed && !Disposing && generation == _generation)
+                _status.Text = "Project list unavailable: " + SecretRedactor.Redact(ex.Message);
+        }
+        finally
+        {
+            if (ReferenceEquals(_loadRequest, request)) _loadRequest = null;
+            request.Dispose();
+            _loadingProjects = false;
+            if (!IsDisposed && !Disposing) _projects.Enabled = true;
+        }
+    }
+
+    private async Task LoadSelectedProjectAsync()
+    {
+        _loadRequest?.Cancel();
+        var generation = ++_generation;
+        _currentAttempts = Array.Empty<DeploymentHistoryRecord>();
+        _expandedAttemptIds.Clear();
+        PopulateHistoryGrid();
+        if (_projects.SelectedItem is not ProjectChoice choice)
+        {
+            _summary.Text = "No deployment history has been recorded yet.";
             _status.Text = "History folder: " + _history.Root;
             return;
         }
-
-        var index = 0;
-        if (!string.IsNullOrWhiteSpace(selectedId))
+        var request = new CancellationTokenSource();
+        _loadRequest = request;
+        var id = choice.ProjectId;
+        _summary.Text = "Loading project history...";
+        _status.Text = "Loading...";
+        try
         {
-            for (var i = 0; i < _projects.Items.Count; i++)
+            var result = await Task.Run(() =>
             {
-                if ((_projects.Items[i] as ProjectChoice)?.ProjectId == selectedId) { index = i; break; }
-            }
+                var summary = _history.GetSummary(id, request.Token);
+                return (Text: summary is null ? "No deployment history has been recorded yet." : BuildSummaryText(summary),
+                    Attempts: summary?.Attempts.OrderByDescending(x => x.StartedAtUtc).ToArray() ?? Array.Empty<DeploymentHistoryRecord>());
+            }, request.Token);
+            if (request.IsCancellationRequested || generation != _generation || IsDisposed || Disposing ||
+                (_projects.SelectedItem as ProjectChoice)?.ProjectId != id) return;
+            _currentAttempts = result.Attempts;
+            _summary.Text = result.Text;
+            PopulateHistoryGrid();
+            _status.Text = $"{result.Attempts.Length} attempt(s) recorded. Persistent history: {_history.Root}";
         }
-        _projects.SelectedIndex = index;
-        LoadSelectedProject();
-    }
-
-    private void LoadSelectedProject()
-    {
-        if (_projects.SelectedItem is not ProjectChoice choice) return;
-        var summary = _history.GetSummary(choice.ProjectId);
-        if (summary is null) return;
-
-        _currentAttempts = summary.Attempts.OrderByDescending(x => x.StartedAtUtc).ToArray();
-        _summary.Text = BuildSummaryText(summary);
-        _expandedAttemptIds.Clear();
-        PopulateHistoryGrid();
-        _status.Text = $"{summary.TotalAttempts} attempt(s) recorded. Persistent history: {_history.Root}";
+        catch (OperationCanceledException) when (request.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            if (!IsDisposed && !Disposing && generation == _generation)
+                _summary.Text = "Deployment history unavailable: " + SecretRedactor.Redact(ex.Message);
+        }
+        finally
+        {
+            if (ReferenceEquals(_loadRequest, request)) _loadRequest = null;
+            request.Dispose();
+        }
     }
 
     private void PopulateHistoryGrid()
     {
-        _grid.Rows.Clear();
+        _visibleRows.Clear();
         foreach (var attempt in _currentAttempts)
         {
-            var performance = attempt.BuildPerformance;
-            var canExpand = performance?.Stages.Count > 0;
-            var expanded = canExpand && _expandedAttemptIds.Contains(attempt.AttemptId);
-            var total = performance is null ? (attempt.EndedAtUtc.HasValue ? TimeSpan.FromSeconds(attempt.ElapsedSeconds) : TimeSpan.Zero) : TimeSpan.FromMilliseconds(performance.TotalMilliseconds);
-            var index = _grid.Rows.Add(canExpand ? (expanded ? "▼" : "▶") : "", ToLocal(attempt.StartedAtUtc),
-                attempt.EndedAtUtc.HasValue ? attempt.Result : "In progress / interrupted", FormatDuration(total), attempt.BuildMode,
-                performance?.DependencyMode ?? (attempt.OfflineBuild ? "Offline Only" : "—"), attempt.DeploymentTargetPath);
-            var parent = _grid.Rows[index];
-            parent.Tag = attempt;
-            parent.DefaultCellStyle.Font = _boldAttemptFont;
-            if (!expanded || performance is null) continue;
-
-            foreach (var stage in performance.Stages)
-            {
-                var elapsed = TimeSpan.FromMilliseconds(Math.Max(0, stage.ElapsedMilliseconds));
-                var childIndex = _grid.Rows.Add("", "", stage.Status, elapsed.ToString(@"hh\:mm\:ss\.fff"), "    " + stage.Name, performance.DependencyMode, stage.Detail);
-                var child = _grid.Rows[childIndex];
-                child.Tag = attempt;
-                child.DefaultCellStyle.BackColor = Color.FromArgb(245, 248, 252);
-                child.DefaultCellStyle.ForeColor = stage.Status.Equals("FAILED", StringComparison.OrdinalIgnoreCase) ? Color.Firebrick : Color.DimGray;
-            }
+            _visibleRows.Add((attempt, null));
+            if (_expandedAttemptIds.Contains(attempt.AttemptId) && attempt.BuildPerformance is { } performance)
+                foreach (var stage in performance.Stages)
+                    _visibleRows.Add((attempt, stage));
         }
+        _grid.RowCount = _visibleRows.Count;
+        _grid.Invalidate();
+    }
+
+    private object? GetCellValue((DeploymentHistoryRecord Attempt, BuildPerformanceStageHistory? Stage) row, int column)
+    {
+        var attempt = row.Attempt;
+        var performance = attempt.BuildPerformance;
+        if (row.Stage is { } stage)
+            return column switch
+            {
+                0 or 1 => "",
+                2 => stage.Status,
+                3 => TimeSpan.FromMilliseconds(Math.Max(0, stage.ElapsedMilliseconds)).ToString(@"hh\:mm\:ss\.fff"),
+                4 => "    " + stage.Name,
+                5 => performance?.DependencyMode ?? "",
+                6 => stage.Detail,
+                _ => null
+            };
+        var canExpand = performance?.Stages.Count > 0;
+        var total = performance is null
+            ? (attempt.EndedAtUtc.HasValue ? TimeSpan.FromSeconds(attempt.ElapsedSeconds) : TimeSpan.Zero)
+            : TimeSpan.FromMilliseconds(performance.TotalMilliseconds);
+        return column switch
+        {
+            0 => canExpand ? (_expandedAttemptIds.Contains(attempt.AttemptId) ? "▼" : "▶") : "",
+            1 => ToLocal(attempt.StartedAtUtc),
+            2 => attempt.EndedAtUtc.HasValue ? attempt.Result : "In progress / interrupted",
+            3 => FormatDuration(total),
+            4 => attempt.BuildMode,
+            5 => performance?.DependencyMode ?? (attempt.OfflineBuild ? "Offline Only" : "—"),
+            6 => attempt.DeploymentTargetPath,
+            _ => null
+        };
     }
 
     private void ToggleSelectedPerformance(int rowIndex)
     {
-        if (rowIndex < 0 || rowIndex >= _grid.Rows.Count) return;
-        if (_grid.Rows[rowIndex].Tag is not DeploymentHistoryRecord attempt || attempt.BuildPerformance?.Stages.Count is not > 0) return;
-        var isParent = string.Equals(_grid.Rows[rowIndex].Cells["Started"].Value?.ToString(), ToLocal(attempt.StartedAtUtc), StringComparison.Ordinal);
-        if (!isParent) return;
-        if (!_expandedAttemptIds.Add(attempt.AttemptId)) _expandedAttemptIds.Remove(attempt.AttemptId);
+        if (rowIndex < 0 || rowIndex >= _visibleRows.Count) return;
+        var row = _visibleRows[rowIndex];
+        if (row.Stage is not null || row.Attempt.BuildPerformance?.Stages.Count is not > 0) return;
+        if (!_expandedAttemptIds.Add(row.Attempt.AttemptId)) _expandedAttemptIds.Remove(row.Attempt.AttemptId);
         PopulateHistoryGrid();
     }
 
@@ -256,7 +351,10 @@ public sealed class DeploymentHistoryForm : Form
 
     private void OpenSelectedLog()
     {
-        if (_grid.CurrentRow?.Tag is not DeploymentHistoryRecord row || string.IsNullOrWhiteSpace(row.SessionLog)) return;
+        var index = _grid.CurrentCell?.RowIndex ?? -1;
+        if (index < 0 || index >= _visibleRows.Count) return;
+        var row = _visibleRows[index].Attempt;
+        if (string.IsNullOrWhiteSpace(row.SessionLog)) return;
         if (!File.Exists(row.SessionLog))
         {
             MessageBox.Show(this, "The session log no longer exists at:\r\n" + row.SessionLog, "Session log not found", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -269,6 +367,7 @@ public sealed class DeploymentHistoryForm : Form
 
     protected override void Dispose(bool disposing)
     {
+        if (disposing) { _generation++; _loadRequest?.Cancel(); }
         try { base.Dispose(disposing); }
         finally
         {
@@ -289,7 +388,7 @@ public sealed class DeploymentHistoryForm : Form
         }
     }
 
-    private static string DisplayProjectName(DeploymentProjectSummary s)
+    private static string DisplayProjectName(DeploymentProjectCatalogEntry s)
     {
         var name = string.IsNullOrWhiteSpace(s.ApplicationName) ? "Unknown application" : s.ApplicationName;
         return string.IsNullOrWhiteSpace(s.SiteName) ? name : $"{name} — {s.SiteName}";

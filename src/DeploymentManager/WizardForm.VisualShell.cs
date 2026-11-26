@@ -27,12 +27,18 @@ public sealed partial class WizardForm
 
     private Control BuildDashboard()
     {
-        var dashboard = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3, RowCount = 1, Margin = new Padding(0, 0, 0, 10) };
+        var dashboard = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 3, RowCount = 2, Margin = new Padding(0, 0, 0, 10) };
         for (var i = 0; i < 3; i++) dashboard.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333F));
+        dashboard.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         dashboard.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         dashboard.Controls.Add(DashboardCard("PROJECT", _dashboardProject), 0, 0);
         dashboard.Controls.Add(DashboardCard("BUILD MODE", _dashboardMode), 1, 0);
         dashboard.Controls.Add(DashboardCard("WORKFLOW", _dashboardOperation), 2, 0);
+        var status = new Button { Text = "Deployment status & evidence…", AutoSize = true, AccessibleName = "Open deployment status and evidence",
+            Anchor = AnchorStyles.Top | AnchorStyles.Left, Margin = new Padding(0, GwdUi.SmallSpace, 0, 0) };
+        status.Click += (_, _) => OpenDashboardEvidence();
+        dashboard.Controls.Add(status, 0, 1);
+        dashboard.SetColumnSpan(status, 3);
         return dashboard;
     }
 
@@ -52,7 +58,8 @@ public sealed partial class WizardForm
     private void UpdateDashboard()
     {
         if (IsDisposed || Disposing || _visualResourcesStopped) return;
-        var name = string.IsNullOrWhiteSpace(_profile.ApplicationName) ? "No project selected" : SecretRedactor.Redact(_profile.ApplicationName);
+        var name = (string.IsNullOrWhiteSpace(_profile.SourceFolder) && string.IsNullOrWhiteSpace(_profile.ReadyPublishFolder)) ||
+            string.IsNullOrWhiteSpace(_profile.ApplicationName) ? "No project selected" : SecretRedactor.Redact(_profile.ApplicationName);
         var mode = string.IsNullOrWhiteSpace(_profile.BuildMode) ? "Not selected" : _profile.BuildMode;
         var operation = _operationRunning ? "Operation running" : _autoDeployRunning ? "Auto Deploy running" :
             _dependencySyncRunning ? "Dependency sync" : _pageActionRunning || _navigationInProgress ? "Checking..." : "Idle";
@@ -195,6 +202,7 @@ public sealed partial class WizardForm
         _visualResourcesStopped = true;
         _noticeTimer.Stop(); _noticeTimer.Dispose();
         if (_noticeWindow is { IsDisposed: false }) _noticeWindow.Close();
+        if (_dashboardWindow is { IsDisposed: false }) _dashboardWindow.Close();
         if (_liveLogWindow is { IsDisposed: false }) _liveLogWindow.Close();
     }
 }

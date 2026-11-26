@@ -14,6 +14,8 @@ public sealed record DeploymentProjectCatalogEntry(string ProjectId, string Appl
 public sealed record DeploymentHistoryPage(DeploymentProjectSummary? Summary, IReadOnlyList<DeploymentHistoryRecord> Rows,
     int PageIndex, int PageSize, int TotalAttempts);
 
+internal sealed record DashboardHistoryEvidence(DeploymentHistoryRecord? Latest, DeploymentHistoryRecord? LatestRecordedRelease);
+
 public sealed class DeploymentHistoryService
 {
     private readonly object _sync = new();
@@ -224,6 +226,26 @@ public sealed class DeploymentHistoryService
         var fallbackRows = attempts.OrderByDescending(r => r.StartedAtUtc).Skip(fallbackPage * pageSize).Take(pageSize).ToArray();
         return new(attempts.Count == 0 ? null : BuildSummary(projectId, attempts), fallbackRows,
             fallbackPage, pageSize, attempts.Count);
+    }
+
+    internal DashboardHistoryEvidence ReadDashboardHistory(string projectId, CancellationToken ct)
+    {
+        static bool IsRecordedDeployment(DeploymentHistoryRecord row) => row.EndedAtUtc.HasValue &&
+            IsResult(row, "Successful") && (row.BuildMode.Equals("Fast IIS Update", StringComparison.OrdinalIgnoreCase) ||
+                row.BuildMode.Equals("Full IIS Deploy", StringComparison.OrdinalIgnoreCase) ||
+                row.BuildMode.Equals("Prepared IIS Publish", StringComparison.OrdinalIgnoreCase) ||
+                row.BuildMode.Equals("Visual Studio prepared", StringComparison.OrdinalIgnoreCase) ||
+                row.BuildMode.Equals("Full Deploy", StringComparison.OrdinalIgnoreCase));
+
+        static DashboardHistoryEvidence Select(IReadOnlyList<DeploymentHistoryRecord> ordered)
+        {
+            var completed = ordered.Where(IsRecordedDeployment).OrderBy(r => r.EndedAtUtc).LastOrDefault();
+            return new(ordered.LastOrDefault(), completed);
+        }
+
+        return ReadIndexed(projectId, (_, snapshot) => Select(snapshot.Rows.OrderBy(r => r.StartedAtUtc)
+            .ThenBy(r => r.FirstOffset).Select(r => r.ToSummaryRecord()).ToArray()), ct)
+            ?? Select(GetAttempts(projectId, ct));
     }
 
     public IReadOnlyList<DeploymentProjectSummary> GetProjectSummaries()

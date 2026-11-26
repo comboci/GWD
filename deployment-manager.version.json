@@ -1,6 +1,6 @@
 {
-  "version": "286.0.0",
+  "version": "287.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V286-R — A07 - semantic roles, accessibility and shared visual resources; Windows acceptance pending"
+  "commitNote": "V287-R — A08 - read-only evidence dashboard for the selected project; Windows acceptance pending"
 }

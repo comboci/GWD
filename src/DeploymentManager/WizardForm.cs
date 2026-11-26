@@ -105,8 +105,12 @@ public sealed partial class WizardForm : Form
     private Label? _deploymentElapsedLabel;
     private LogViewMode _logViewMode = LogViewMode.Normal;
     private readonly List<(DateTime At, string Line)> _uiLogLines = new();
-    private const int MaxPendingUiLogLines = 8_192;
-    private const int MaxUiLogLinesPerFlush = 512;
+    private const int MaxPendingUiLogLines = 2_048;
+    private const int MaxUiLogLinesPerFlush = 256;
+    private const int MaxUiLineChars = 4_096;
+    private const int MaxUiBatchChars = 64_000;
+    private const int MaxUiHistoryChars = 1_000_000;
+    private int _uiLogChars;
     private readonly object _pendingUiLogSync = new();
     private readonly Queue<(DateTime At, string Line)> _pendingUiLogLines = new();
     private readonly System.Windows.Forms.Timer _uiLogFlushTimer = new() { Interval = 100 };
@@ -622,6 +626,7 @@ public sealed partial class WizardForm : Form
         _progress.Value = 0;
 
         _uiLogLines.Clear();
+        _uiLogChars = 0;
         // Start Over clears only the on-screen backlog. Every line was already
         // committed to its session log before being queued for display.
         lock (_pendingUiLogSync)
@@ -2406,7 +2411,10 @@ public sealed partial class WizardForm : Form
                     _pendingUiLogLines.Dequeue();
                     _droppedUiLogLines++;
                 }
-                _pendingUiLogLines.Enqueue((at, clean));
+                // Clip only the display copy; the complete line is already persisted.
+                var display = clean.Length > MaxUiLineChars
+                    ? clean[..MaxUiLineChars] + " [... UI preview clipped; full line on disk ...]" : clean;
+                _pendingUiLogLines.Enqueue((at, display));
             }
         });
     }
@@ -2421,8 +2429,14 @@ public sealed partial class WizardForm : Form
         {
             dropped = _droppedUiLogLines;
             _droppedUiLogLines = 0;
-            while (pending.Count < MaxUiLogLinesPerFlush && _pendingUiLogLines.Count > 0)
-                pending.Add(_pendingUiLogLines.Dequeue());
+            var chars = 0;
+            while (pending.Count < MaxUiLogLinesPerFlush && _pendingUiLogLines.Count > 0 &&
+                   (pending.Count == 0 || chars + _pendingUiLogLines.Peek().Line.Length <= MaxUiBatchChars))
+            {
+                var item = _pendingUiLogLines.Dequeue();
+                pending.Add(item);
+                chars += item.Line.Length;
+            }
         }
         if (pending.Count == 0 && dropped == 0) return;
 
@@ -2432,6 +2446,7 @@ public sealed partial class WizardForm : Form
         {
             var display = NormalizeLogForDisplay(text);
             _uiLogLines.Add((at, display));
+            _uiLogChars += display.Length;
             if (!ShouldShowLogLine(display)) return;
             batch.Append('[').Append(at.ToString("HH:mm:ss")).Append("] ").Append(display).Append("\r\n");
             if (!string.IsNullOrWhiteSpace(display))
@@ -2441,8 +2456,13 @@ public sealed partial class WizardForm : Form
             AddToUi(DateTime.Now,
                 $"[DEPLOYMENT LOG] {dropped} older UI-only lines skipped under load; complete session log remains on disk.");
         foreach (var (at, line) in pending) AddToUi(at, line);
-        if (_uiLogLines.Count > 5_000)
-            _uiLogLines.RemoveRange(0, _uiLogLines.Count - 4_000);
+        var remove = 0;
+        while (remove < _uiLogLines.Count && (_uiLogLines.Count - remove > 5_000 || _uiLogChars > MaxUiHistoryChars))
+        {
+            _uiLogChars -= _uiLogLines[remove].Line.Length;
+            remove++;
+        }
+        if (remove > 0) _uiLogLines.RemoveRange(0, remove);
         if (batch.Length > 0)
             _log.AppendText(batch.ToString());
         if (_log.TextLength > 300_000)
@@ -2473,10 +2493,18 @@ public sealed partial class WizardForm : Form
     {
         if (InvokeRequired) { BeginInvoke(RenderVisibleLog); return; }
         FlushPendingUiLogLines();
-        var sb = new StringBuilder();
-        foreach (var item in _uiLogLines)
-            if (ShouldShowLogLine(item.Line)) sb.Append('[').Append(item.At.ToString("HH:mm:ss")).Append("] ").AppendLine(item.Line);
-        _log.Text = sb.ToString();
+        var lines = new Stack<string>();
+        var chars = 0;
+        for (var i = _uiLogLines.Count - 1; i >= 0; i--)
+        {
+            var item = _uiLogLines[i];
+            if (!ShouldShowLogLine(item.Line)) continue;
+            var line = $"[{item.At:HH:mm:ss}] {item.Line}\r\n";
+            if (chars + line.Length > 300_000) break;
+            lines.Push(line);
+            chars += line.Length;
+        }
+        _log.Text = string.Concat(lines);
         _log.SelectionStart = _log.TextLength;
         _log.ScrollToCaret();
     }

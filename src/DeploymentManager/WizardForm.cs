@@ -2261,20 +2261,25 @@ public sealed partial class WizardForm : Form
             {
                 _deploymentCts = null;
                 _operationRunning = false;
-                if (!IsDisposed && !Disposing) UpdateNavigationState();
-            }
-            if (!IsDisposed && !Disposing)
-            {
-                UpdateDeploymentIndicator();
-                if (_pageIndex == _steps.Length - 1)
+                if (!IsDisposed && !Disposing)
                 {
-                    _next.Text = _persistentState.LastResult switch
+                    try
                     {
-                        "Failed" or "RecoveryFailed" => "Retry Deploy",
-                        "Successful" => "Deploy Again",
-                        _ => "Deploy"
-                    };
-                    BuildReviewPageRefresh();
+                        UpdateDeploymentIndicator();
+                        if (_pageIndex == _steps.Length - 1)
+                        {
+                            _next.Text = _persistentState.LastResult switch
+                            {
+                                "Failed" or "RecoveryFailed" => "Retry Deploy",
+                                "Successful" => "Deploy Again",
+                                _ => "Deploy"
+                            };
+                            // BuildReviewPage uses the operation flag when setting
+                            // local Enabled values, not just the parent panel.
+                            BuildReviewPageRefresh();
+                        }
+                    }
+                    finally { UpdateNavigationState(); }
                 }
             }
         }

@@ -1,6 +1,6 @@
 {
-  "version": "271.0.0",
+  "version": "272.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V271-R — GWD-A02.1 scan page lifecycle source candidate; Windows acceptance pending"
+  "commitNote": "V272-R — re-enable local review options after deployment ownership is released"
 }

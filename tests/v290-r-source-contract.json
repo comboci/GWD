@@ -1,0 +1,450 @@
+{
+  "schema": 1,
+  "release": "V290-R",
+  "baseline": {
+    "release": "V289-R",
+    "commit": "55dfad1ef8e3cdabd31be71d6903bcbad20b64d7"
+  },
+  "normalization": "Git blob SHA-1, raw bytes or checkout-only LF/CRLF conversion; also match committed HEAD blob. No bypass or fallback.",
+  "historicalEvidenceBlobs": {
+    "tests/v70-preservation.json": "70fb23f1dce456e30ca3bd498ee797694810a83d",
+    "tests/v71-preservation.json": "652742d01a4122c1155a562594a42907947dc7ae",
+    "tests/v269-r-preservation.json": "5796949bcd13953936fd4aacefe5de331595834b",
+    "tests/run-v269-r-review.ps1": "2876d56ab8cc3ccfe878bfbd79e88ae16fbd249e",
+    "audit/regression/V269-R.md": "dfba7f188c26cb99017f8a771e42cce969be63cb",
+    "audit/regression/final-architecture-07-checkpoint.json": "103cedc2b9dda0306fb9a334a2dc4a33e0bb976f"
+  },
+  "protectedFiles": [
+    {
+      "file": "src/DeploymentManager.Cli/Program.cs",
+      "historicalBlobSha": "f5e47bf6a77796a82af330d5fa51871b1213679c",
+      "v289BlobSha": "f5e47bf6a77796a82af330d5fa51871b1213679c",
+      "currentBlobSha": "f5e47bf6a77796a82af330d5fa51871b1213679c",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Models/DeploymentHistoryModels.cs",
+      "historicalBlobSha": "5b548f86b2114216086abb52fe87f0409fe7a0dd",
+      "v289BlobSha": "5b548f86b2114216086abb52fe87f0409fe7a0dd",
+      "currentBlobSha": "5b548f86b2114216086abb52fe87f0409fe7a0dd",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Models/DeploymentProfile.cs",
+      "historicalBlobSha": "223d8c018cc27fac2d5987c2a385ab290c58dee2",
+      "v289BlobSha": "3af1486ac40ee71434fab41dfc5c1356b7a7ba3e",
+      "currentBlobSha": "3af1486ac40ee71434fab41dfc5c1356b7a7ba3e",
+      "status": "INTENTIONAL_CHANGE",
+      "reason": "V270–V289 health profile snapshots isolate mutable UI settings from background probes."
+    },
+    {
+      "file": "src/DeploymentManager/Services/AppDataService.cs",
+      "historicalBlobSha": "48b5e5070667fff6cf5d235e154bb842196ad576",
+      "v289BlobSha": "ad28d72990eaffe25dfa02b372b6b789aa7b6216",
+      "currentBlobSha": "ad28d72990eaffe25dfa02b372b6b789aa7b6216",
+      "status": "INTENTIONAL_CHANGE",
+      "reason": "V270–V289 ordered/atomic settings and generation guards; R04 candidate hash must be pinned after its final verified source edits."
+    },
+    {
+      "file": "src/DeploymentManager/Services/BackgroundHealthMonitor.cs",
+      "historicalBlobSha": "72f2a7122ab259bc26f76991192be3c0d082e786",
+      "v289BlobSha": "f6fb5a02a4354daf5a05990d0b8bc3a5e4dc212d",
+      "currentBlobSha": "f6fb5a02a4354daf5a05990d0b8bc3a5e4dc212d",
+      "status": "INTENTIONAL_CHANGE",
+      "reason": "V270–V289 bounded single-flight scheduling, cancellation and stale-result guard."
+    },
+    {
+      "file": "src/DeploymentManager/Services/BackupIntegrity.cs",
+      "historicalBlobSha": "9eeedbf3f2c65459d38872f45f93868a40950ada",
+      "v289BlobSha": "9eeedbf3f2c65459d38872f45f93868a40950ada",
+      "currentBlobSha": "9eeedbf3f2c65459d38872f45f93868a40950ada",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/BuildPerformanceTrace.cs",
+      "historicalBlobSha": "1b212f460da5b3ec9265e785e9a7e3ffb303c8a9",
+      "v289BlobSha": "1b212f460da5b3ec9265e785e9a7e3ffb303c8a9",
+      "currentBlobSha": "1b212f460da5b3ec9265e785e9a7e3ffb303c8a9",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/CodeQualitySession.cs",
+      "historicalBlobSha": "11ead276283023a52e26383d4b6c2b7e5d2f721f",
+      "v289BlobSha": "11ead276283023a52e26383d4b6c2b7e5d2f721f",
+      "currentBlobSha": "11ead276283023a52e26383d4b6c2b7e5d2f721f",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/CommandResult.cs",
+      "historicalBlobSha": "eef837594884c37fd5ca24f561056f96c0ed4a67",
+      "v289BlobSha": "eef837594884c37fd5ca24f561056f96c0ed4a67",
+      "currentBlobSha": "eef837594884c37fd5ca24f561056f96c0ed4a67",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/CommandRunner.cs",
+      "historicalBlobSha": "65812bf895c460709a39f6866a74d235290195be",
+      "v289BlobSha": "65812bf895c460709a39f6866a74d235290195be",
+      "currentBlobSha": "65812bf895c460709a39f6866a74d235290195be",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/DeploymentLogTailReader.cs",
+      "historicalBlobSha": "824e8ce3b1db422481911d5d9bbf87e4cdd67b87",
+      "v289BlobSha": "824e8ce3b1db422481911d5d9bbf87e4cdd67b87",
+      "currentBlobSha": "824e8ce3b1db422481911d5d9bbf87e4cdd67b87",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/DeploymentPathSafety.cs",
+      "historicalBlobSha": "fea0fa5ca9ae8102a6317504c68a4ccc2d126840",
+      "v289BlobSha": "fea0fa5ca9ae8102a6317504c68a4ccc2d126840",
+      "currentBlobSha": "fea0fa5ca9ae8102a6317504c68a4ccc2d126840",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/DeploymentService.cs",
+      "historicalBlobSha": "afc7931585eef8b5f49ae7625315f6ad86e01d02",
+      "v289BlobSha": "afc7931585eef8b5f49ae7625315f6ad86e01d02",
+      "currentBlobSha": "afc7931585eef8b5f49ae7625315f6ad86e01d02",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/EmailNotificationService.cs",
+      "historicalBlobSha": "5adbb7e91e439be61cac0f30a4d2ac78e73f5d4b",
+      "v289BlobSha": "5adbb7e91e439be61cac0f30a4d2ac78e73f5d4b",
+      "currentBlobSha": "5adbb7e91e439be61cac0f30a4d2ac78e73f5d4b",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/EmailProviderPresets.cs",
+      "historicalBlobSha": "3b2bc531de660aab96471a071c9ed40fe34c637a",
+      "v289BlobSha": "3b2bc531de660aab96471a071c9ed40fe34c637a",
+      "currentBlobSha": "3b2bc531de660aab96471a071c9ed40fe34c637a",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/IisDeploymentAttempt.cs",
+      "historicalBlobSha": "2575c29d0602576973685d3976682d1431b693bd",
+      "v289BlobSha": "2575c29d0602576973685d3976682d1431b693bd",
+      "currentBlobSha": "2575c29d0602576973685d3976682d1431b693bd",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/IisDiagnostics.cs",
+      "historicalBlobSha": "b12a373a94a01aebe536ec8afc9f0aa348da90d5",
+      "v289BlobSha": "b12a373a94a01aebe536ec8afc9f0aa348da90d5",
+      "currentBlobSha": "b12a373a94a01aebe536ec8afc9f0aa348da90d5",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/IisSafety.cs",
+      "historicalBlobSha": "0fac721dbd30f2d82ef8c4aa3e46d6a4fac6f933",
+      "v289BlobSha": "0fac721dbd30f2d82ef8c4aa3e46d6a4fac6f933",
+      "currentBlobSha": "0fac721dbd30f2d82ef8c4aa3e46d6a4fac6f933",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/InternalDiagnostics.cs",
+      "historicalBlobSha": "9f09714d6a61826f9b8b404b72406173070af4fe",
+      "v289BlobSha": "9f09714d6a61826f9b8b404b72406173070af4fe",
+      "currentBlobSha": "9f09714d6a61826f9b8b404b72406173070af4fe",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/LogService.cs",
+      "historicalBlobSha": "01bd08b5f21748e36b01e09eb78080a715b0f118",
+      "v289BlobSha": "01bd08b5f21748e36b01e09eb78080a715b0f118",
+      "currentBlobSha": "01bd08b5f21748e36b01e09eb78080a715b0f118",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/PrerequisiteService.cs",
+      "historicalBlobSha": "97bcb72bc9f31776b4722e4e51783fc5e19e3677",
+      "v289BlobSha": "97bcb72bc9f31776b4722e4e51783fc5e19e3677",
+      "currentBlobSha": "97bcb72bc9f31776b4722e4e51783fc5e19e3677",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/ReleaseVersionContract.cs",
+      "historicalBlobSha": "89cf9baf0e803d176fe5ca71f118d37a7690b548",
+      "v289BlobSha": "89cf9baf0e803d176fe5ca71f118d37a7690b548",
+      "currentBlobSha": "89cf9baf0e803d176fe5ca71f118d37a7690b548",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/RemoteDeploymentService.cs",
+      "historicalBlobSha": "703585e6fd79a93ad1f2dcf4e21a34923e018203",
+      "v289BlobSha": "703585e6fd79a93ad1f2dcf4e21a34923e018203",
+      "currentBlobSha": "703585e6fd79a93ad1f2dcf4e21a34923e018203",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/RetentionPlanner.cs",
+      "historicalBlobSha": "8c1b21e3e191a2217e8c08aec83fe91b3e1c1f05",
+      "v289BlobSha": "8c1b21e3e191a2217e8c08aec83fe91b3e1c1f05",
+      "currentBlobSha": "8c1b21e3e191a2217e8c08aec83fe91b3e1c1f05",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/SecretRedactor.cs",
+      "historicalBlobSha": "d36df8e281d4825adcc378a7655d58d6e5266ab6",
+      "v289BlobSha": "d36df8e281d4825adcc378a7655d58d6e5266ab6",
+      "currentBlobSha": "d36df8e281d4825adcc378a7655d58d6e5266ab6",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/SqlConnectionStrategy.cs",
+      "historicalBlobSha": "8e664241952f609d84b4b2d9042154acc15ca514",
+      "v289BlobSha": "8e664241952f609d84b4b2d9042154acc15ca514",
+      "currentBlobSha": "8e664241952f609d84b4b2d9042154acc15ca514",
+      "status": "UNCHANGED"
+    },
+    {
+      "file": "src/DeploymentManager/Services/WorkspaceSynchronizer.cs",
+      "historicalBlobSha": "fc9d5f7a0d3b67fbde84271244aabb8a04c5e2bc",
+      "v289BlobSha": "fc9d5f7a0d3b67fbde84271244aabb8a04c5e2bc",
+      "currentBlobSha": "fc9d5f7a0d3b67fbde84271244aabb8a04c5e2bc",
+      "status": "UNCHANGED"
+    }
+  ],
+  "currentVerifiers": [
+    "tests/verify-gwd-final-architecture-07.cjs",
+    "tests/verify-iis-safety.cjs",
+    "tests/verify-static.cjs",
+    "tests/verify-ui-performance-phase-02.cjs",
+    "tests/verify-ui-performance-phase-03.cjs",
+    "tests/verify-ui-performance-phase-04.cjs",
+    "tests/verify-ui-performance-phase-05.cjs",
+    "tests/verify-ui-performance-phase-06.cjs",
+    "tests/verify-ui-performance.cjs"
+  ],
+  "anchors": [
+    {
+      "id": "STAGE-REGISTRY",
+      "file": "src/DeploymentManager/WizardForm.Navigation.cs",
+      "required": [
+        "Stages[_pageIndex].Render(this);",
+        "private readonly string[] _steps = Stages.Select(stage => stage.Caption).ToArray();"
+      ],
+      "ordered": [
+        "static wizard => wizard.BuildProjectSourcePage()",
+        "static wizard => wizard.BuildTargetPage()",
+        "static wizard => wizard.BuildScanPage()",
+        "static wizard => wizard.BuildIisPage()",
+        "static wizard => wizard.BuildInstallersPage()",
+        "static wizard => wizard.BuildSqlPage()",
+        "static wizard => wizard.BuildDeploymentLocationPage()",
+        "static wizard => wizard.BuildReviewPage()"
+      ]
+    },
+    {
+      "id": "STAGE-NAVIGATION",
+      "file": "src/DeploymentManager/WizardForm.Navigation.cs",
+      "required": [
+        "!forceRebuild && _renderedPageIndex == requested",
+        "_renderedPageIndex = _pageIndex;"
+      ],
+      "start": "private void NavigateToPage(",
+      "end": "private void DisposeContentControls()",
+      "ordered": [
+        "_content.SuspendLayout();",
+        "DisposeContentControls();",
+        "_pageIndex = requested;",
+        "Stages[_pageIndex].Render(this);",
+        "_content.ResumeLayout(true);"
+      ]
+    },
+    {
+      "id": "SHARED-LOG-AND-DEACTIVATION",
+      "file": "src/DeploymentManager/WizardForm.Navigation.cs",
+      "required": [
+        "_scanView?.Deactivate();",
+        "_reviewView?.Deactivate();",
+        "_locationView?.Deactivate();"
+      ],
+      "start": "private void DisposeContentControls()",
+      "ordered": [
+        "FlushDeferredSettingsSaves();",
+        "_log.Parent.Controls.Remove(_log);",
+        "control.Dispose();"
+      ]
+    },
+    {
+      "id": "REVIEW-RENDER",
+      "file": "src/DeploymentManager/WizardForm.cs",
+      "required": [
+        "DisposeContentControls();",
+        "BuildReviewPage();"
+      ],
+      "start": "private void BuildReviewPageRefresh()",
+      "end": "private async Task BusyAsync("
+    },
+    {
+      "id": "IIS-INVENTORY",
+      "file": "src/DeploymentManager/WizardForm.Iis.cs",
+      "required": [
+        "grid.Disposed += (_, _) => inventoryRequest?.Cancel();",
+        "ReferenceEquals(inventoryRequest, request)",
+        "var inventory = await Task.Run("
+      ]
+    },
+    {
+      "id": "STATUS-CARD",
+      "file": "src/DeploymentManager/UI/Controls/StatusCardUi.cs",
+      "required": [
+        "internal static GroupBox StatusCard(",
+        "internal static void UpdateStatusCard(",
+        "if (card.IsDisposed) return;",
+        "card.Controls[\"StatusText\"]",
+        "card.Controls[\"StatusDetail\"]"
+      ]
+    },
+    {
+      "id": "SETTINGS-OWNER",
+      "file": "src/DeploymentManager/WizardForm.Settings.cs",
+      "required": [
+        "private void QueueDeferredSettingsSave(",
+        "_settingsWriter.Enqueue"
+      ]
+    },
+    {
+      "id": "STARTUP-SETTINGS-ATOMIC",
+      "file": "src/DeploymentManager/Services/AppDataService.cs",
+      "required": [
+        "RemoteCredentialGeneration != generation",
+        "WithSettingsWriter",
+        "output.Flush(flushToDisk: true)"
+      ]
+    },
+    {
+      "id": "SOURCE-INDEPENDENT",
+      "file": "src/DeploymentManager/SourcePreviewInspector.cs",
+      "required": [
+        "_sourcePreviewSlots",
+        "environment.DetectApiProject(folder)"
+      ]
+    },
+    {
+      "id": "SOURCE-APPLY-GUARD",
+      "file": "src/DeploymentManager/WizardForm.SourceAndTarget.cs",
+      "required": [
+        "RunSourcePreflight(",
+        "RunSourceTestsAsync",
+        "preserveIdentity",
+        "string.IsNullOrWhiteSpace(app.Text)"
+      ]
+    },
+    {
+      "id": "NOTIFICATION-BOUNDED",
+      "file": "src/DeploymentManager/WizardForm.VisualShell.cs",
+      "required": [
+        "SecretRedactor.Redact(message)",
+        "duplicate.Repetitions",
+        "_pendingNotices.Count >= MaxNotices",
+        "(int)kind > (int)_activeNotice.Kind"
+      ],
+      "start": "private void NotifyUi(",
+      "end": "private void UpdateNoticeHistory("
+    },
+    {
+      "id": "NOTIFICATION-WATCH",
+      "file": "src/DeploymentManager/WizardForm.VisualShell.cs",
+      "required": [
+        "_noticeShownStamp",
+        "Stopwatch.GetElapsedTime(stamp).TotalSeconds",
+        "OrderByDescending(x => x.Kind).ThenBy(x => x.Sequence)"
+      ],
+      "start": "private void RenderNotice()",
+      "end": "private string NotificationText()",
+      "forbidden": [
+        "_notices.Clear()",
+        "_pendingNotices.Clear()"
+      ]
+    },
+    {
+      "id": "HISTORY-INDEX",
+      "file": "src/DeploymentManager/Services/DeploymentHistoryIndex.cs",
+      "required": [
+        "GetCurrentHash()",
+        "VerifyStable",
+        "ReadSidecar",
+        "ReadRow"
+      ]
+    },
+    {
+      "id": "HISTORY-GRID",
+      "file": "src/DeploymentManager/DeploymentHistoryForm.cs",
+      "required": [
+        "_history.GetHistoryPage(id, pageIndex, HistoryPageSize, request.Token)",
+        "request.IsCancellationRequested || generation != _generation",
+        "_grid.CellValueNeeded"
+      ]
+    },
+    {
+      "id": "RELEASE-IDENTITY",
+      "file": "src/DeploymentManager/WizardForm.cs",
+      "required": [
+        "VerifyRunningApiReleaseAsync(_profile, publish, ct)",
+        "VerifyRunningFrontendReleaseAsync(_profile, publish, ct)",
+        "RECOVERY REVIEW REQUIRED"
+      ]
+    },
+    {
+      "id": "USERCONTROL-DeploymentSource",
+      "file": "src/DeploymentManager/UI/Pages/DeploymentSourceView.cs",
+      "required": [
+        "DeploymentSourceView : UserControl"
+      ]
+    },
+    {
+      "id": "USERCONTROL-DeploymentTarget",
+      "file": "src/DeploymentManager/UI/Pages/DeploymentTargetView.cs",
+      "required": [
+        "DeploymentTargetView : UserControl"
+      ]
+    },
+    {
+      "id": "USERCONTROL-EnvironmentScan",
+      "file": "src/DeploymentManager/UI/Pages/EnvironmentScanView.cs",
+      "required": [
+        "EnvironmentScanView : UserControl"
+      ]
+    },
+    {
+      "id": "USERCONTROL-IisManagement",
+      "file": "src/DeploymentManager/UI/Pages/IisManagementView.cs",
+      "required": [
+        "IisManagementView : UserControl"
+      ]
+    },
+    {
+      "id": "USERCONTROL-InstallerStage",
+      "file": "src/DeploymentManager/UI/Pages/InstallerStageView.cs",
+      "required": [
+        "InstallerStageView : UserControl"
+      ]
+    },
+    {
+      "id": "USERCONTROL-SqlConfiguration",
+      "file": "src/DeploymentManager/UI/Pages/SqlConfigurationView.cs",
+      "required": [
+        "SqlConfigurationView : UserControl"
+      ]
+    },
+    {
+      "id": "USERCONTROL-DeploymentLocation",
+      "file": "src/DeploymentManager/UI/Pages/DeploymentLocationView.cs",
+      "required": [
+        "DeploymentLocationView : UserControl"
+      ]
+    },
+    {
+      "id": "USERCONTROL-ReviewStage",
+      "file": "src/DeploymentManager/UI/Pages/ReviewStageView.cs",
+      "required": [
+        "ReviewStageView : UserControl"
+      ]
+    }
+  ]
+}

@@ -4,7 +4,7 @@ const w = read('WizardForm.cs'), log = read('LogForm.cs'), reader = read('Servic
 const service = read('Services/DeploymentHistoryService.cs'), history = read('DeploymentHistoryForm.cs');
 const diag = read('DiagnosticsCenterForm.cs'), bundle = read('Services/DiagnosticBundleService.cs');
 const metrics = read('Services/RuntimeMetricsService.cs'), disk = read('Services/LogService.cs');
-const section = (s,a,b) => { const i=s.indexOf(a), j=s.indexOf(b,i+a.length); assert(i>=0&&j>i,a); return s.slice(i,j); };
+const { section } = require('./source-contract-r03.cjs');
 const checks = [
  ['bounded preview reader', reader.includes('MaxBatchBytes = 64 * 1024')&&reader.includes('Math.Min(MaxBatchBytes, length - start)')],
  ['UTF-8 boundary and offset',reader.includes('CompleteUtf8Prefix(buffer, first, count)')&&reader.includes('start + complete')],
@@ -21,7 +21,7 @@ const checks = [
  ['stream reduction with stable tie',service.includes('new Dictionary<string, DeploymentHistoryRecord>(StringComparer.OrdinalIgnoreCase)')&&service.includes('record.EventAtUtc > existing.EventAtUtc')],
  ['malformed row isolation retained',service.includes('catch (JsonException ex)')&&service.includes('ReportedDamagedRows.TryAdd')],
  ['lightweight project catalog',service.includes('GetProjectCatalog(CancellationToken ct = default)')&&diag.includes('_history.GetProjectCatalog(request.Token)')&&history.includes('_history.GetProjectCatalog(request.Token)')],
- ['history cancellation and stale guard',service.includes('GetAttempts(string projectId, CancellationToken ct = default)')&&diag.includes('historyRequest?.Cancel()')&&history.includes('generation != _generation')],
+ ['history cancellation and stale guard',service.includes('GetHistoryPage(')&&history.includes('_history.GetHistoryPage(id, pageIndex, HistoryPageSize, request.Token)')&&diag.includes('historyRequest?.Cancel()')&&history.includes('request.IsCancellationRequested || generation != _generation')],
  ['both history grids virtual',diag.includes('VirtualMode = true')&&diag.includes('grid.CellValueNeeded')&&history.includes('VirtualMode = true')&&history.includes('_grid.CellValueNeeded')&&!history.includes('_grid.Rows.Add(')],
  ['full stage expansion and log link',history.includes('_visibleRows.Add((attempt, stage))')&&history.includes('_visibleRows[index].Attempt')&&history.includes('new LogForm(row.SessionLog)')],
  ['metrics worker and single flight',w.includes('Task.Run(_runtimeMetrics.Sample)')&&w.includes('_runtimeMetricsPending is not null')],

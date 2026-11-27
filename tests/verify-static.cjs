@@ -1,10 +1,11 @@
-const fs = require('fs'), path = require('path'), crypto = require('crypto');
+const fs = require('fs'), path = require('path');
+const { verifyPreservation, unique } = require('./source-contract-r03.cjs');
 const root = path.resolve(__dirname, '..');
 const read = file => fs.readFileSync(path.join(root, file), 'utf8').replace(/\r\n/g, '\n');
-const hash = text => crypto.createHash('sha256').update(text).digest('hex');
 function member(text, name) {
     const start = new RegExp('^    (?:public|private|internal|protected) [^\\n]*\\b' + name + '\\(', 'm').exec(text);
     if (!start) throw Error('Missing member: ' + name);
+    unique(text, start[0], name);
     const tail = text.slice(start.index + start[0].length);
     const next = /^    (?:public|private|internal|protected) /m.exec(tail);
     return text.slice(start.index, next ? start.index + start[0].length + next.index : text.length).trim();
@@ -26,22 +27,12 @@ const strategy = read('src/DeploymentManager/Services/SqlConnectionStrategy.cs')
 const deploy = read('src/DeploymentManager/Services/DeploymentService.cs');
 const sync = read('src/DeploymentManager/Services/WorkspaceSynchronizer.cs');
 check(sync.includes('Hash(entry)') && sync.includes('hash == destinationHash') && !sync.includes('FileInfo'), 'Workspace Unchanged compares actual SHA256, not metadata/manifest');
-check(sync.indexOf('var verified = Verify(') >= 0 && sync.indexOf('var verified = Verify(') < sync.indexOf('File.Move(manifestPath') && sync.includes('Build/Publish blocked.'), 'Mandatory verification before manifest promotion, fail closed');
+check(sync.indexOf('var verified = Verify(') >= 0 && sync.indexOf('File.Move(manifestPath') >= 0 && sync.indexOf('var verified = Verify(') < sync.indexOf('File.Move(manifestPath') && sync.includes('Build/Publish blocked.'), 'Mandatory verification before manifest promotion, fail closed');
 check(sync.includes('"IIS-Publish"') && !/EndsWith\([^\n]*\.cs/.test(sync), 'Explicit directory exclusions, no source extension filter');
-check(deploy.indexOf('PrepareStableWorkspace(profile, ct)') >= 0 && deploy.indexOf('PrepareStableWorkspace(profile, ct)') < deploy.indexOf('Staging cleanup / create') && member(deploy, 'PrepareStableWorkspace').includes('WorkspaceSynchronizer.Sync'), 'Production source pipeline sync+verify precedes staging/build/publish');
+check(deploy.indexOf('PrepareStableWorkspace(profile, ct)') >= 0 && deploy.indexOf('Staging cleanup / create') >= 0 && deploy.indexOf('PrepareStableWorkspace(profile, ct)') < deploy.indexOf('Staging cleanup / create') && member(deploy, 'PrepareStableWorkspace').includes('WorkspaceSynchronizer.Sync'), 'Production source pipeline sync+verify precedes staging/build/publish');
 check(member(deploy, 'PublishAsync').includes('using var workspaceLease') && member(deploy, 'AcquireWorkspaceLease').includes('FileShare.None'), 'Workspace lease spans source build pipeline');
-// V70/V71 manifests remain historical evidence; current release guards pin the
-// last pre-UI-refactor V268 core files rather than asserting obsolete hashes.
 const preservation = JSON.parse(read('tests/v269-r-preservation.json'));
-function gitBlobSha(bytes) {
-    return crypto.createHash('sha1').update(Buffer.from('blob '+bytes.length+'\0')).update(bytes).digest('hex');
-}
-for (const item of preservation.files) {
-    const bytes = fs.readFileSync(path.join(root,item.file));
-    const lf = bytes.toString('utf8').replace(/\r\n/g,'\n');
-    const variants = [bytes, Buffer.from(lf,'utf8'), Buffer.from(lf.replace(/\n/g,'\r\n'),'utf8')];
-    check(variants.some(value => gitBlobSha(value) === item.blobSha), 'V268 preserved core: '+item.file);
-}
+verifyPreservation();
 check(deploy.includes('CollectStartupDiagnosticsAsync') && wizard.includes('CollectStartupDiagnosticsAsync('), 'V84: startup diagnostics remain wired after post-V70 changes');
 check(wizard.includes('VerifyRunningApiReleaseAsync(_profile, publish, ct)') && wizard.includes('VerifyRunningFrontendReleaseAsync(_profile, publish, ct)'), 'V84: changed WizardForm still invokes both live release checks');
 const source = fs.readdirSync(path.join(root, 'src/DeploymentManager/Services')).filter(f => f.endsWith('.cs')).map(f => [f, read('src/DeploymentManager/Services/' + f)]);

@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { section, ordered } = require('./source-contract-r03.cjs');
 const root = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(root,p), 'utf8');
 const engine = read('src/DeploymentManager/Services/DeploymentService.cs');
@@ -7,20 +8,6 @@ const cli = read('src/DeploymentManager.Cli/Program.cs');
 const wizard = read('src/DeploymentManager/WizardForm.cs');
 let n=0;
 function check(ok, name) { if (!ok) throw Error(name); console.log('PASS ' + name); n++; }
-function section(text, a, b) {
-    const start = text.indexOf(a), end = text.indexOf(b,start+a.length);
-    if(start < 0 || end <= start) throw Error('Missing safety section: '+a+' / '+b);
-    return text.slice(start,end);
-}
-function ordered(text, ...anchors) {
-    let offset = 0;
-    for (const anchor of anchors) {
-        const i = text.indexOf(anchor, offset);
-        if (i < 0) return false;
-        offset = i + anchor.length;
-    }
-    return true;
-}
 const activate = section(engine, 'public async Task<string> ActivateStagingAsync', 'private async Task RestoreHostedFolderSafelyAsync');
 check(ordered(activate,'ValidateIisPreflightAsync','CreateUniqueRollbackFolder'), 'preflight precedes backup creation');
 check(ordered(activate,'await StopSiteForDeploymentAsync','CopyDirectory(stagingFolder'), 'checked STOP precedes file preparation');

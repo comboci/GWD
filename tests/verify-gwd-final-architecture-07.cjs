@@ -2,7 +2,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const {execFileSync} = require('node:child_process');
+const {verifyPreservation} = require('./source-contract-r03.cjs');
 const assert = require('node:assert/strict');
 const root = path.join(__dirname, '..');
 const read = name => fs.readFileSync(path.join(root,name),'utf8').replace(/\r\n/g,'\n');
@@ -11,18 +11,12 @@ const check = (file,...anchors) => {
   const text = read(app+file);
   for (const anchor of anchors) assert(text.includes(anchor),file+' missing '+anchor);
 };
-const manifest=JSON.parse(read('tests/v269-r-preservation.json'));
-assert.equal(manifest.files.length,27);
-assert.equal(manifest.commit,'5f709d4129304a5cb902205e0b3cf8f53db097a7');
-const intentional = new Set(['Models/DeploymentProfile.cs','Services/AppDataService.cs','Services/BackgroundHealthMonitor.cs'].map(x=>app+x));
-for (const item of manifest.files) if (!intentional.has(item.file)) {
-  const sha = execFileSync('git',['rev-parse','HEAD:'+item.file],{cwd:root,encoding:'utf8'}).trim();
-  assert.equal(sha,item.blobSha,item.file);
-}
+const current=verifyPreservation();
 const version=JSON.parse(read('deployment-manager.version.json')).version;
 assert(read('Directory.Build.props').includes('<DeploymentManagerVersion>'+version+'</DeploymentManagerVersion>'));
 const ck=JSON.parse(read('audit/regression/final-architecture-07-checkpoint.json'));
-assert.equal(ck.candidate,'V'+version.split('.')[0]+'-R');
+// Immutable historical evidence, not the V290 release stamp.
+assert.equal(ck.candidate,current.baseline.release);
 assert.equal(ck.build,'NOT_RUN_POLICY');
 assert.equal(ck.tests,'NOT_RUN_POLICY');
 for(const name of ['DeploymentSource','DeploymentTarget','EnvironmentScan','IisManagement','InstallerStage','SqlConfiguration','DeploymentLocation','ReviewStage'])

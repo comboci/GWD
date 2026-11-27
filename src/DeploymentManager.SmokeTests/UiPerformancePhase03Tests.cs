@@ -1,5 +1,6 @@
 using System.Reflection;
 using GenericWeb.DeploymentManager;
+using GenericWeb.DeploymentManager.Models;
 
 namespace GenericWeb.DeploymentManager.SmokeTests;
 
@@ -58,6 +59,64 @@ internal static class UiPerformancePhase03Tests
         Check(ReferenceEquals(source, content.Controls[0]) && !source.IsDisposed,
             "source view reused on current-step selection");
 
+        var profile = (DeploymentProfile)Field("_profile").GetValue(form)!;
+        profile.ApplicationName = "Synthetic navigation project";
+        profile.SiteName = "SyntheticNavigationSite";
+        var expectedViews = new[]
+        {
+            "DeploymentSourceView", "DeploymentTargetView", "EnvironmentScanView", "IisManagementView",
+            "InstallerStageView", "SqlConfigurationView", "DeploymentLocationView", "ReviewStageView"
+        };
+        var previous = (UserControl)source;
+        for (var i = 0; i < expectedViews.Length; i++)
+        {
+            show.Invoke(form, [i]);
+            Check(content.Controls.Count == 1 && content.Controls[0] is UserControl view &&
+                view.GetType().Name == expectedViews[i] && !view.IsDisposed, "owned stage " + expectedViews[i]);
+            var current = (UserControl)content.Controls[0];
+            if (i != 0) Check(previous.IsDisposed, "outgoing stage disposed for " + expectedViews[i]);
+            show.Invoke(form, [i]);
+            Check(ReferenceEquals(current, content.Controls[0]), "same stage is not re-subscribed");
+            previous = current;
+        }
+        Check(profile.ApplicationName == "Synthetic navigation project" && profile.SiteName == "SyntheticNavigationSite" &&
+            ReferenceEquals(profile, Field("_profile").GetValue(form)), "project state survives all eight stage transitions");
+        Check(!log.IsDisposed && log.Text.Contains("Synthetic lifecycle test", StringComparison.Ordinal),
+            "shared Log remains live throughout all eight stage transitions");
+
+        var review = previous;
+        var reviewActions = review.GetType().GetField("_actions", Instance) ?? throw new MissingFieldException("Review actions");
+        Check(reviewActions.GetValue(review) is not null, "Review activation receives its controller");
+        show.Invoke(form, [2]);
+        Check(review.IsDisposed && reviewActions.GetValue(review) is null && !log.IsDisposed,
+            "Review teardown deactivates callbacks and releases the shared Log before disposal");
+
+        var scan = (UserControl)content.Controls[0];
+        var scanType = scan.GetType();
+        var activateScan = scanType.GetMethod("Activate", Instance) ?? throw new MissingMethodException("Scan Activate");
+        var deactivateScan = scanType.GetMethod("Deactivate", Instance) ?? throw new MissingMethodException("Scan Deactivate");
+        var scanButton = (Button)(scanType.GetField("_scan", Instance) ?? throw new MissingFieldException("Scan button")).GetValue(scan)!;
+        var raiseButtonClick = typeof(Button).GetMethod("OnClick", Instance) ?? throw new MissingMethodException("Button OnClick");
+        var oldCalls = 0;
+        var newCalls = 0;
+        Func<Button, Task> oldCallback = _ => { oldCalls++; return Task.CompletedTask; };
+        Func<Button, Task> newCallback = _ => { newCalls++; return Task.CompletedTask; };
+        activateScan.Invoke(scan, [oldCallback]);
+        activateScan.Invoke(scan, [newCallback]);
+        activateScan.Invoke(scan, [newCallback]);
+        raiseButtonClick.Invoke(scanButton, [EventArgs.Empty]);
+        Check(oldCalls == 0 && newCalls == 1, "repeat Activate replaces callback; click is handled exactly once");
+        deactivateScan.Invoke(scan, null);
+        raiseButtonClick.Invoke(scanButton, [EventArgs.Empty]);
+        Check(newCalls == 1, "Deactivate removes event subscription");
+        show.Invoke(form, [6]);
+        var location = (UserControl)content.Controls[0];
+        var changed = location.GetType().GetField("_changed", Instance) ?? throw new MissingFieldException("Location callback");
+        Check(changed.GetValue(location) is not null, "Location view receives controller");
+        show.Invoke(form, [7]);
+        Check(location.IsDisposed && changed.GetValue(location) is null && !log.IsDisposed,
+            "Location disposal clears callbacks and Review remounts a live shared Log");
+
         var canNavigate = Method("CanNavigateInteractively");
         Check((bool)canNavigate.Invoke(form, null)!, "idle navigation allowed");
         foreach (var flag in new[] { "_navigationInProgress", "_pageActionRunning",
@@ -69,8 +128,9 @@ internal static class UiPerformancePhase03Tests
             finally { field.SetValue(form, false); }
         }
 
-        var create = type.GetMethod("StatusCard", Static) ?? throw new MissingMethodException("StatusCard");
-        var update = type.GetMethod("UpdateStatusCard", Static) ?? throw new MissingMethodException("UpdateStatusCard");
+        var statusUi = type.Assembly.GetType("GenericWeb.DeploymentManager.UI.Controls.StatusCardUi", throwOnError: true)!;
+        var create = statusUi.GetMethod("StatusCard", Static) ?? throw new MissingMethodException("StatusCard");
+        var update = statusUi.GetMethod("UpdateStatusCard", Static) ?? throw new MissingMethodException("UpdateStatusCard");
         using var card = (GroupBox)create.Invoke(null, ["Old", "Old detail", false])!;
         var status = card.Controls["StatusText"]!;
         var detail = card.Controls["StatusDetail"]!;
@@ -78,5 +138,10 @@ internal static class UiPerformancePhase03Tests
         Check(ReferenceEquals(status, card.Controls["StatusText"]) &&
             ReferenceEquals(detail, card.Controls["StatusDetail"]) && card.Text == "New" &&
             detail.Text == "New detail" && status.Text == "● Ready", "status refresh updates existing labels");
+        var noticeTimer = (System.Windows.Forms.Timer)Field("_noticeTimer").GetValue(form)!;
+        noticeTimer.Start();
+        form.Dispose();
+        Check(form.IsDisposed && !noticeTimer.Enabled && (bool)Field("_visualResourcesStopped").GetValue(form)!,
+            "disposal stops the visual shell timer and releases notification resources");
     }
 }

@@ -478,7 +478,25 @@ public sealed class DeploymentHistoryService
             throw new JsonException("Invalid build performance history.");
         record.BuildMode = PreserveBuildMode(record.BuildMode);
         record.Result = PreserveResult(record.Result);
-        if (record.BuildPerformance is { } build) build.BuildMode = PreserveBuildMode(build.BuildMode);
+        // Legacy raw text is projected into a redacted read model only.
+        record.ApplicationName = SecretRedactor.Redact(record.ApplicationName);
+        record.SiteName = SecretRedactor.Redact(record.SiteName);
+        record.DatabaseName = SecretRedactor.Redact(record.DatabaseName);
+        record.SourceFolder = SecretRedactor.Redact(record.SourceFolder);
+        record.DeploymentTargetPath = SecretRedactor.Redact(record.DeploymentTargetPath);
+        record.ApplicationVersion = SecretRedactor.Redact(record.ApplicationVersion);
+        record.SessionLog = SecretRedactor.Redact(record.SessionLog);
+        if (record.BuildPerformance is { } build)
+        {
+            build.BuildMode = PreserveBuildMode(build.BuildMode);
+            build.DependencyMode = SecretRedactor.Redact(build.DependencyMode);
+            foreach (var stage in build.Stages)
+            {
+                stage.Name = SecretRedactor.Redact(stage.Name);
+                stage.Status = SecretRedactor.Redact(stage.Status);
+                stage.Detail = SecretRedactor.Redact(stage.Detail);
+            }
+        }
         return record;
     }
 

@@ -55,7 +55,7 @@ try {
         Invoke-Checked -Exe 'dotnet' -CommandArgs @('build','DeploymentManager.sln','-c','Release')
         $smoke = 'src/DeploymentManager.SmokeTests/DeploymentManager.SmokeTests.csproj'
         foreach ($arg in @('--ui-performance-phase-02','--ui-performance-phase-03','--ui-performance-phase-04',
-            '--ui-performance-phase-05','--ui-performance-phase-06','--diagnostic-history','--sql-strategy','--workspace-sync')) {
+            '--ui-performance-phase-05','--ui-performance-phase-06','--gwd-final-remediation-08','--diagnostic-history','--sql-strategy','--workspace-sync')) {
             Invoke-Checked -Exe 'dotnet' -CommandArgs @('run','--project',$smoke,'-c','Release','--no-build','--',$arg)
         }
         Invoke-Checked -Exe 'dotnet' -CommandArgs @('run','--project',$smoke,'-c','Release','--no-build')

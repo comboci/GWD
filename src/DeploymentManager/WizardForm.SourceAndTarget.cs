@@ -253,7 +253,10 @@ public sealed partial class WizardForm
                     if (result.CanWatch && InstallWatcher(input, prepared))
                     {
                         // A change could have happened before watching began.
+                        // Keep the originating manual preflight's options when
+                        // taking fresh evidence under the newly attached watcher.
                         Signal();
+                        RunSourcePreflight(preserveIdentity, followWithEnvironment);
                         return;
                     }
                     if (!Current()) return;

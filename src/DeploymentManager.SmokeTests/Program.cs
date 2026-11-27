@@ -14,6 +14,11 @@ internal static class Program
 
         try
         {
+            if (args.Contains("--gwd-final-remediation-08"))
+            {
+                FinalRemediation08Tests.Run(testRoot);
+                return 0;
+            }
             if (args.Contains("--ui-performance-phase-06"))
             {
                 UiPerformancePhase06Tests.Run(testRoot);

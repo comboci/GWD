@@ -1,6 +1,6 @@
 {
-  "version": "289.0.0",
+  "version": "290.0.0",
   "buildDateUtc": null,
   "commit": null,
-  "commitNote": "V289-R — A01.3 - final regression source review for A03/A05/A06; Windows acceptance pending"
+  "commitNote": "V290-R — GWD final remediation R01–R08; owner source and Windows acceptance pending"
 }

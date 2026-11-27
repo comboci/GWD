@@ -26,8 +26,9 @@
       "file": "src/DeploymentManager/Models/DeploymentHistoryModels.cs",
       "historicalBlobSha": "5b548f86b2114216086abb52fe87f0409fe7a0dd",
       "v289BlobSha": "5b548f86b2114216086abb52fe87f0409fe7a0dd",
-      "currentBlobSha": "5b548f86b2114216086abb52fe87f0409fe7a0dd",
-      "status": "UNCHANGED"
+      "currentBlobSha": "296566a486de68523c6d75975c585d7138f1f1aa",
+      "status": "INTENTIONAL_CHANGE",
+      "reason": "R05 whitelists and separates structural history counters from duration/identity and free-text redaction; no original JSONL migration or rollback-engine change."
     },
     {
       "file": "src/DeploymentManager/Models/DeploymentProfile.cs",
@@ -41,9 +42,9 @@
       "file": "src/DeploymentManager/Services/AppDataService.cs",
       "historicalBlobSha": "48b5e5070667fff6cf5d235e154bb842196ad576",
       "v289BlobSha": "ad28d72990eaffe25dfa02b372b6b789aa7b6216",
-      "currentBlobSha": "ad28d72990eaffe25dfa02b372b6b789aa7b6216",
+      "currentBlobSha": "ee5ca9cd7658b524200d2f2f7e42d5a3e87c75e9",
       "status": "INTENTIONAL_CHANGE",
-      "reason": "V270–V289 ordered/atomic settings and generation guards; R04 candidate hash must be pinned after its final verified source edits."
+      "reason": "V270–V289 introduced ordered/atomic settings and credential generations. R04 adds source-only revision CAS, fail-closed corruption recovery and same-directory atomic replacement; legacy Registry is not a universal transaction."
     },
     {
       "file": "src/DeploymentManager/Services/BackgroundHealthMonitor.cs",

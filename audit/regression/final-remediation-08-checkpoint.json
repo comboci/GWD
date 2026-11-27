@@ -1,0 +1,210 @@
+{
+  "schemaVersion": 1,
+  "task": "GWD-FINAL-REMEDIATION-08",
+  "repository": "comboci/GWD",
+  "branch": "fix/ui-performance-phase-01",
+  "baseline": {
+    "release": "V289-R",
+    "commit": "55dfad1ef8e3cdabd31be71d6903bcbad20b64d7"
+  },
+  "candidate": {
+    "release": "V290-R",
+    "version": "290.0.0",
+    "status": "SOURCE_COMPLETE / RUNTIME_PENDING",
+    "commitReference": "This checkpoint's containing commit (not embedded)."
+  },
+  "stages": [
+    {
+      "id": "R01",
+      "commit": "c792b23724711e3a33fd0c3e63da4c350afab2ec",
+      "checkpoint": "audit/regression/remediation-08/R01-fa.md",
+      "changedPaths": [
+        "audit/regression/remediation-08/R01-fa.md",
+        "src/DeploymentManager.SmokeTests/UiPerformancePhase05Tests.cs"
+      ],
+      "sourceStatus": "SOURCE_COMPLETE",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "R02",
+      "commit": "58b5d48d006caafac681d0e40f6f296424f8e291",
+      "checkpoint": "audit/regression/remediation-08/R02-fa.md",
+      "changedPaths": [
+        "audit/regression/remediation-08/R02-fa.md",
+        "src/DeploymentManager.SmokeTests/UiPerformancePhase03Tests.cs"
+      ],
+      "sourceStatus": "SOURCE_COMPLETE",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "R03",
+      "commit": "6dfe7b852e2ce79671097e0684a6dda2cf31943d",
+      "checkpoint": "audit/regression/remediation-08/R03-fa.md",
+      "changedPaths": [
+        "audit/regression/remediation-08/R03-fa.md",
+        "tests/run-v290-r-review.ps1",
+        "tests/source-contract-r03.cjs",
+        "tests/v290-r-source-contract.json",
+        "tests/verify-gwd-final-architecture-07.cjs",
+        "tests/verify-iis-safety.cjs",
+        "tests/verify-static.cjs",
+        "tests/verify-ui-performance-phase-02.cjs",
+        "tests/verify-ui-performance-phase-03.cjs",
+        "tests/verify-ui-performance-phase-04.cjs",
+        "tests/verify-ui-performance-phase-05.cjs",
+        "tests/verify-ui-performance-phase-06.cjs",
+        "tests/verify-ui-performance.cjs",
+        "tests/verify-v290-r-source-contract.cjs"
+      ],
+      "sourceStatus": "SOURCE_COMPLETE",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "R04",
+      "commit": "c6e744e52b11941891939f67aa342bccfb6ea94b",
+      "checkpoint": "audit/regression/remediation-08/R04-fa.md",
+      "changedPaths": [
+        "audit/regression/remediation-08/R04-fa.md",
+        "src/DeploymentManager/Services/AppDataService.cs",
+        "src/DeploymentManager/Services/OrderedSettingsWriter.cs",
+        "src/DeploymentManager/SettingsForm.cs",
+        "src/DeploymentManager/WizardForm.Settings.cs",
+        "src/DeploymentManager/WizardForm.cs"
+      ],
+      "sourceStatus": "SOURCE_COMPLETE",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "R05",
+      "commit": "4c789a047949e7f493cf2ea348f0dbb05fa464c7",
+      "checkpoint": "audit/regression/remediation-08/R05-fa.md",
+      "changedPaths": [
+        "audit/regression/remediation-08/R05-fa.md",
+        "src/DeploymentManager/DeploymentHistoryForm.cs",
+        "src/DeploymentManager/DiagnosticsCenterForm.cs",
+        "src/DeploymentManager/Models/DeploymentHistoryModels.cs",
+        "src/DeploymentManager/Services/DeploymentHistoryIndex.cs",
+        "src/DeploymentManager/Services/DeploymentHistoryService.cs",
+        "src/DeploymentManager/WizardForm.Dashboard.cs"
+      ],
+      "sourceStatus": "SOURCE_COMPLETE",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "R06",
+      "commit": "f48eba234f571a27616cbb4c3629a6d7765b0c63",
+      "checkpoint": "audit/regression/remediation-08/R06-fa.md",
+      "changedPaths": [
+        "audit/regression/remediation-08/R06-fa.md",
+        "src/DeploymentManager/SourcePreviewInspector.cs",
+        "src/DeploymentManager/WizardForm.Navigation.cs",
+        "src/DeploymentManager/WizardForm.SourceAndTarget.cs",
+        "src/DeploymentManager/WizardForm.cs"
+      ],
+      "sourceStatus": "SOURCE_COMPLETE",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "R07",
+      "commit": "94df5e6c1d453f74a03504bbf5b48068b8e748d7",
+      "checkpoint": "audit/regression/remediation-08/R07-fa.md",
+      "changedPaths": [
+        "audit/regression/HISTORY-INDEX-R05-R07-FA.md",
+        "audit/regression/remediation-08/R07-fa.md",
+        "src/DeploymentManager/DiagnosticsCenterForm.cs",
+        "src/DeploymentManager/Services/DeploymentHistoryService.cs"
+      ],
+      "sourceStatus": "SOURCE_COMPLETE_WITH_OPEN_PREFIX_COST",
+      "execution": "NOT_RUN"
+    },
+    {
+      "id": "R08",
+      "commit": "CONTAINING_COMMIT",
+      "checkpoint": "audit/regression/remediation-08/R08-fa.md",
+      "changedPaths": [
+        "Directory.Build.props",
+        "deployment-manager.version.json",
+        "src/DeploymentManager.SmokeTests/FinalRemediation08Tests.cs",
+        "src/DeploymentManager.SmokeTests/Program.cs",
+        "src/DeploymentManager/WizardForm.cs",
+        "tests/run-v290-r-review.ps1",
+        "tests/verify-gwd-final-remediation-08.cjs",
+        "tests/v290-r-source-contract.json",
+        "audit/regression/V290-R.md",
+        "audit/regression/GWD-FINAL-REMEDIATION-08-CLOSEOUT-fa.md",
+        "audit/regression/final-remediation-08-checkpoint.json",
+        "audit/regression/remediation-08/R08-fa.md",
+        "audit/regression/remediation-08/R09-fa.md",
+        "src/DeploymentManager/WizardForm.SourceAndTarget.cs",
+        "audit/regression/remediation-08/R10-fa.md",
+        "src/DeploymentManager/Services/DeploymentHistoryService.cs",
+        "audit/regression/remediation-08/R11-fa.md"
+      ],
+      "sourceStatus": "SOURCE_COMPLETE",
+      "execution": "NOT_RUN"
+    }
+  ],
+  "additionalFindings": [
+    {
+      "id": "R09",
+      "checkpoint": "audit/regression/remediation-08/R09-fa.md",
+      "sourceStatus": "SOURCE_COMPLETE",
+      "execution": "NOT_RUN",
+      "commit": "CONTAINING_COMMIT"
+    },
+    {
+      "id": "R10",
+      "checkpoint": "audit/regression/remediation-08/R10-fa.md",
+      "sourceStatus": "SOURCE_COMPLETE",
+      "execution": "NOT_RUN",
+      "commit": "CONTAINING_COMMIT"
+    },
+    {
+      "id": "R11",
+      "checkpoint": "audit/regression/remediation-08/R11-fa.md",
+      "sourceStatus": "SOURCE_COMPLETE",
+      "execution": "NOT_RUN",
+      "commit": "CONTAINING_COMMIT"
+    }
+  ],
+  "verification": {
+    "diffWhitespace": "CHECKED",
+    "sourceScripts": "NOT_RUN",
+    "compile": "NOT_RUN",
+    "build": "NOT_RUN",
+    "windowsSmoke": "NOT_RUN",
+    "windowsManual": "NOT_RUN",
+    "performanceBenchmark": "NOT_RUN",
+    "remoteOrNetworkFixture": "NOT_RUN",
+    "iisSqlAcceptance": "NOT_RUN",
+    "deployment": "NOT_RUN",
+    "ci": "NOT_RUN"
+  },
+  "ownerReview": {
+    "runner": "tests/run-v290-r-review.ps1",
+    "phaseMatrix": "audit/regression/V290-R.md",
+    "report": "audit/regression/GWD-FINAL-REMEDIATION-08-CLOSEOUT-fa.md"
+  },
+  "open": [
+    {
+      "id": "R07-PREFIX-HASH",
+      "status": "OPEN",
+      "condition": "Full prefix hashing remains linear; safe equivalent caching/segmentation not established."
+    },
+    {
+      "id": "R04-REGISTRY",
+      "status": "OWNER_VERIFICATION_PENDING",
+      "condition": "Multi-value Windows Registry writes are protected by the matching writer lock and baseline but are not a cross-process universal transaction."
+    },
+    {
+      "id": "R06-NETWORK",
+      "status": "OWNER_VERIFICATION_PENDING",
+      "condition": "Blocked OS filesystem operations may retain the single preview slot until Windows returns."
+    },
+    {
+      "id": "OWNER-ACCEPTANCE",
+      "status": "NOT_RUN",
+      "condition": "Exact commit verification, isolated Windows suite and manual DPI/network/safety matrix remain owner-only."
+    }
+  ]
+}

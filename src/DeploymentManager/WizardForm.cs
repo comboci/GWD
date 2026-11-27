@@ -124,7 +124,12 @@ public sealed partial class WizardForm : Form
     private CancellationTokenSource? _autoDeployCts;
     private string ProfilesFolder => Path.Combine(_appData.Root, "Profiles");
 
-    public WizardForm()
+    private bool _ownedResourcesReleased;
+
+    public WizardForm() : this(startBackgroundHealth: true) { }
+
+    // The isolated Windows owner fixture exercises disposal without host probes.
+    private WizardForm(bool startBackgroundHealth)
     {
         _logService = new LogService(_appData);
         _persistentState = _appData.LoadState();
@@ -208,9 +213,7 @@ public sealed partial class WizardForm : Form
             _runtimeMetricsTimer.Start();
             await UpdateRuntimeMetricsAsync();
         };
-        Disposed += (_, _) => StopRuntimeMetrics();
-        Disposed += (_, _) => StopVisualResources();
-        Disposed += (_, _) => { if (!_log.IsDisposed) _log.Dispose(); };
+        Disposed += (_, _) => ReleaseOwnedResources();
         FormClosing += WizardForm_FormClosing;
         Shown += (_, _) =>
         {
@@ -219,9 +222,8 @@ public sealed partial class WizardForm : Form
             if (status.Warning is string warning)
                 MessageBox.Show(this, warning, "Settings read-only", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         };
-        Disposed += (_, _) => CancelNavigationSourceProbe();
         _healthMonitor.Updated += OnHealthUpdated;
-        _healthMonitor.Start();
+        if (startBackgroundHealth) _healthMonitor.Start();
         ShowPage(0);
         AppendLog($"Deployment Manager {ProductInfo.DisplayVersion} started. GUI and headless CLI share the deployment services. Persistent state: {_appData.StateFile}");
         AppendLog("Deployment history: " + _history.Root);
@@ -2393,9 +2395,17 @@ public sealed partial class WizardForm : Form
             "Some settings could not be saved. Check Diagnostics. Close without those changes?",
             "Settings not fully saved", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
         { _settingsWriter.ResumeAccepting(); e.Cancel = true; return; }
+        RecordClosingState();
+        ReleaseOwnedResources();
+    }
+
+    private void ReleaseOwnedResources()
+    {
+        if (_ownedResourcesReleased) return;
+        _ownedResourcesReleased = true;
+        _acceptUiLogLines = false;
         CancelNavigationSourceProbe();
         CancelBackgroundVerification();
-        _acceptUiLogLines = false;
         _uiLogFlushTimer.Stop();
         _uiLogFlushTimer.Dispose();
         _trayBlinkTimer.Stop();
@@ -2410,14 +2420,24 @@ public sealed partial class WizardForm : Form
         StopVisualResources();
         _healthTip.Dispose();
         _settingsSaveTimer.Dispose();
+        if (!_log.IsDisposed) _log.Dispose();
+        try { _logService.CloseSession(); }
+        catch (Exception ex) { InternalDiagnostics.Record(ex, "Close active log session"); }
+    }
+
+    private void RecordClosingState()
+    {
         _persistentState.LastStage = _steps[Math.Clamp(_pageIndex,0,_steps.Length-1)];
         _persistentState.LastSourceFolder = _profile.SourceFolder;
         _persistentState.LastSiteName = _profile.SiteName;
         _persistentState.UpdatedAt = DateTime.Now;
-        _appData.SaveState(_persistentState);
-        try { _logService.CloseSession(); }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Close active log session"); }
+        try { _appData.SaveState(_persistentState); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            InternalDiagnostics.Record(new IOException("Last wizard state could not be persisted (" + ex.GetType().Name + ")."), "Close wizard");
+        }
     }
+
     private static string SanitizeFileName(string value)
     {
         var invalid = Path.GetInvalidFileNameChars();

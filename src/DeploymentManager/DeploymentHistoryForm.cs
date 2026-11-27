@@ -300,7 +300,7 @@ public sealed class DeploymentHistoryForm : Form
         {
             0 => canExpand ? (_expandedAttemptIds.Contains(attempt.AttemptId) ? "▼" : "▶") : "",
             1 => ToLocal(attempt.StartedAtUtc),
-            2 => attempt.EndedAtUtc.HasValue ? attempt.Result : "In progress / interrupted",
+            2 => DeploymentHistoryService.DescribeAttemptResult(attempt),
             3 => FormatDuration(total),
             4 => attempt.BuildMode,
             5 => performance?.DependencyMode ?? (attempt.OfflineBuild ? "Offline Only" : "—"),
@@ -328,35 +328,37 @@ public sealed class DeploymentHistoryForm : Form
             $"Database                 : {BlankAsDash(s.DatabaseName)}",
             $"Project ID               : {s.ProjectId}",
             "",
-            $"Total deployment attempts: {s.TotalAttempts}",
-            $"Successful               : {s.SuccessfulAttempts}",
+            $"Total recorded attempts  : {s.TotalAttempts}",
+            $"Successful attempts      : {s.SuccessfulAttempts}",
+            $"Hosted / local / unknown : {s.RecordedHostedSuccesses} / {s.SuccessfulLocalTests} / {s.SuccessfulUnknownMode}",
+            $"Unrecognized results     : {s.UnknownResultAttempts}",
             $"Failed                   : {s.FailedAttempts}",
             $"Cancelled                : {s.CancelledAttempts}",
             $"Incomplete/interrupted   : {s.IncompleteAttempts}",
-            $"Distinct released versions: {(s.DistinctVersions > 0 ? s.DistinctVersions.ToString() : "Version metadata unavailable")}",
+            $"Distinct recorded hosted versions: {(s.DistinctVersions > 0 ? s.DistinctVersions.ToString() : "Version metadata unavailable")}",
             "",
-            $"First deployment         : {FormatDate(s.FirstDeploymentUtc)}",
-            $"Latest deployment        : {FormatDate(s.LatestDeploymentUtc)}",
+            $"First attempt         : {FormatDate(s.FirstDeploymentUtc)}",
+            $"Latest attempt        : {FormatDate(s.LatestDeploymentUtc)}",
             $"Calendar lifetime        : {FormatLifetime(s.CalendarLifetime)}",
-            $"Cumulative deploy runtime: {FormatDuration(s.CumulativeRuntime)}",
-            $"Average deployment       : {FormatDuration(s.AverageRuntime)}",
-            $"Average successful deploy: {FormatDuration(s.AverageSuccessfulRuntime)}",
-            $"Fastest deployment       : {FormatDuration(s.FastestRuntime)}",
-            $"Slowest deployment       : {FormatDuration(s.SlowestRuntime)}",
-            $"Average deploy interval  : {FormatDuration(s.AverageInterval)}",
+            $"Cumulative attempt runtime: {FormatDuration(s.CumulativeRuntime)}",
+            $"Average attempt       : {FormatDuration(s.AverageRuntime)}",
+            $"Average successful attempt: {FormatDuration(s.AverageSuccessfulRuntime)}",
+            $"Fastest attempt       : {FormatDuration(s.FastestRuntime)}",
+            $"Slowest attempt       : {FormatDuration(s.SlowestRuntime)}",
+            $"Average attempt interval  : {FormatDuration(s.AverageInterval)}",
             "",
             $"Fast local/IIS count      : {s.SmartDeployCount}",
             $"Full IIS Deploy count     : {s.FullDeployCount}",
             $"Prepared deploy count    : {s.PreparedDeployCount}",
             "",
-            "RELEASE / DEPLOYMENT TIMELINE — current page",
+            "ATTEMPT TIMELINE — current page",
             new string('-', 72)
         };
 
         foreach (var item in page.OrderBy(x => x.StartedAtUtc))
         {
             var version = string.IsNullOrWhiteSpace(item.ApplicationVersion) ? "version ?" : "V" + item.ApplicationVersion.TrimStart('V', 'v');
-            var result = item.EndedAtUtc.HasValue ? item.Result : "In progress / interrupted";
+            var result = DeploymentHistoryService.DescribeAttemptResult(item);
             var duration = item.EndedAtUtc.HasValue ? FormatDuration(TimeSpan.FromSeconds(item.ElapsedSeconds)) : "—";
             var interval = item.IntervalSincePreviousSeconds.HasValue ? $" | since previous: {FormatDuration(TimeSpan.FromSeconds(item.IntervalSincePreviousSeconds.Value))}" : string.Empty;
             lines.Add($"{ToLocal(item.StartedAtUtc)} | {version} | {result} | {item.BuildMode} | {duration}{interval}");

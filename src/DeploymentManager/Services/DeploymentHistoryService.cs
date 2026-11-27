@@ -79,6 +79,9 @@ public sealed class DeploymentHistoryService
         };
 
         Append(record);
+        record.BuildMode = PreserveBuildMode(record.BuildMode);
+        record.Result = PreserveResult(record.Result);
+        if (record.BuildPerformance is { } build) build.BuildMode = PreserveBuildMode(build.BuildMode);
         return record;
     }
 
@@ -230,16 +233,9 @@ public sealed class DeploymentHistoryService
 
     internal DashboardHistoryEvidence ReadDashboardHistory(string projectId, CancellationToken ct)
     {
-        static bool IsRecordedDeployment(DeploymentHistoryRecord row) => row.EndedAtUtc.HasValue &&
-            IsResult(row, "Successful") && (row.BuildMode.Equals("Fast IIS Update", StringComparison.OrdinalIgnoreCase) ||
-                row.BuildMode.Equals("Full IIS Deploy", StringComparison.OrdinalIgnoreCase) ||
-                row.BuildMode.Equals("Prepared IIS Publish", StringComparison.OrdinalIgnoreCase) ||
-                row.BuildMode.Equals("Visual Studio prepared", StringComparison.OrdinalIgnoreCase) ||
-                row.BuildMode.Equals("Full Deploy", StringComparison.OrdinalIgnoreCase));
-
         static DashboardHistoryEvidence Select(IReadOnlyList<DeploymentHistoryRecord> ordered)
         {
-            var completed = ordered.Where(IsRecordedDeployment).OrderBy(r => r.EndedAtUtc).LastOrDefault();
+            var completed = ordered.Where(IsRecordedHostedDeployment).OrderBy(r => r.EndedAtUtc).LastOrDefault();
             return new(ordered.LastOrDefault(), completed);
         }
 
@@ -317,7 +313,8 @@ public sealed class DeploymentHistoryService
             .Where(x => x.IntervalSincePreviousSeconds.HasValue)
             .Select(x => TimeSpan.FromSeconds(Math.Max(0, x.IntervalSincePreviousSeconds!.Value)))
             .ToArray();
-        var successful = completed.Where(x => IsResult(x, "Successful")).ToArray();
+        var hostedSuccesses = completed.Where(IsRecordedHostedDeployment).ToArray();
+        var localSuccesses = completed.Count(x => IsResult(x, "Successful") && IsLocalTest(x.BuildMode));
         var first = ordered.FirstOrDefault();
         var latest = ordered.LastOrDefault();
 
@@ -330,9 +327,14 @@ public sealed class DeploymentHistoryService
             TotalAttempts = ordered.Length,
             SuccessfulAttempts = completed.Count(x => IsResult(x, "Successful")),
             FailedAttempts = completed.Count(x => IsResult(x, "Failed") || IsResult(x, "RecoveryFailed")),
+            RecordedHostedSuccesses = hostedSuccesses.Length,
+            SuccessfulLocalTests = localSuccesses,
+            SuccessfulUnknownMode = completed.Count(x => IsResult(x, "Successful")) - hostedSuccesses.Length - localSuccesses,
+            UnknownResultAttempts = completed.Count(x => !IsResult(x, "Successful") && !IsResult(x, "Failed") &&
+                !IsResult(x, "RecoveryFailed") && !IsResult(x, "Cancelled")),
             CancelledAttempts = completed.Count(x => IsResult(x, "Cancelled")),
             IncompleteAttempts = ordered.Count(x => !x.EndedAtUtc.HasValue),
-            DistinctVersions = successful
+            DistinctVersions = hostedSuccesses
                 .Select(x => x.ApplicationVersion)
                 .Where(x => !string.IsNullOrWhiteSpace(x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -350,7 +352,7 @@ public sealed class DeploymentHistoryService
             AverageInterval = Average(intervals),
             SmartDeployCount = completed.Count(x => string.Equals(x.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase) || string.Equals(x.BuildMode, "Fast IIS Update", StringComparison.OrdinalIgnoreCase) || string.Equals(x.BuildMode, "Fast Build", StringComparison.OrdinalIgnoreCase) || string.Equals(x.BuildMode, "Smart Deploy", StringComparison.OrdinalIgnoreCase)),
             FullDeployCount = completed.Count(x => string.Equals(x.BuildMode, "Full IIS Deploy", StringComparison.OrdinalIgnoreCase) || string.Equals(x.BuildMode, "Full Deploy", StringComparison.OrdinalIgnoreCase)),
-            PreparedDeployCount = completed.Count(x => x.BuildMode.Contains("prepared", StringComparison.OrdinalIgnoreCase) || x.BuildMode.Contains("publish folder", StringComparison.OrdinalIgnoreCase)),
+            PreparedDeployCount = completed.Count(x => x.BuildMode is "Prepared IIS Publish" or "Visual Studio prepared" or "Publish folder"),
             Attempts = ordered
         };
     }
@@ -384,19 +386,23 @@ public sealed class DeploymentHistoryService
         // Explicit nulls/invalid numeric data must not crash the entire history
         // screen or be silently converted into a successful attempt. Missing
         // optional legacy fields continue to use model defaults.
-        static bool ValidDuration(double seconds) => double.IsFinite(seconds) &&
-            seconds >= 0 && seconds < TimeSpan.MaxValue.TotalSeconds;
         if (record.BuildMode is null || record.Result is null ||
-            !ValidDuration(record.ElapsedSeconds) ||
-            (record.IntervalSincePreviousSeconds is double interval && !ValidDuration(interval)))
+            !IsValidDuration(record.ElapsedSeconds) ||
+            (record.IntervalSincePreviousSeconds is double interval && !IsValidDuration(interval)))
             throw new JsonException("Invalid history mode, result or duration.");
         if (record.BuildPerformance is { } performance &&
-            (performance.Stages is null || !ValidDuration(performance.TotalMilliseconds / 1000d) ||
+            (performance.Stages is null || !IsValidDuration(performance.TotalMilliseconds / 1000d) ||
              performance.Stages.Any(stage => stage is null || stage.Status is null ||
-                 !ValidDuration(stage.ElapsedMilliseconds / 1000d))))
+                 !IsValidDuration(stage.ElapsedMilliseconds / 1000d))))
             throw new JsonException("Invalid build performance history.");
+        record.BuildMode = PreserveBuildMode(record.BuildMode);
+        record.Result = PreserveResult(record.Result);
+        if (record.BuildPerformance is { } build) build.BuildMode = PreserveBuildMode(build.BuildMode);
         return record;
     }
+
+    internal static bool IsValidDuration(double seconds) => double.IsFinite(seconds) &&
+        seconds >= 0 && seconds < TimeSpan.MaxValue.TotalSeconds;
 
     // Redact text BEFORE writing JSON. Replacing arbitrary substrings in the
     // serialized document destroys timestamps, IDs and numeric measurements
@@ -410,11 +416,14 @@ public sealed class DeploymentHistoryService
                 if (obj[name] is JsonValue value && value.TryGetValue<string>(out var text))
                     obj[name] = SecretRedactor.Redact(text);
         }
+        root["BuildMode"] = PreserveBuildMode(record.BuildMode);
+        root["Result"] = PreserveResult(record.Result);
         Clean(root, "ApplicationName", "SiteName", "DatabaseName", "SourceFolder",
-            "DeploymentTargetPath", "ApplicationVersion", "SessionLog", "BuildMode");
+            "DeploymentTargetPath", "ApplicationVersion", "SessionLog");
         if (root["BuildPerformance"] is JsonObject performance)
         {
-            Clean(performance, "BuildMode", "DependencyMode");
+            performance["BuildMode"] = PreserveBuildMode(record.BuildPerformance?.BuildMode);
+            Clean(performance, "DependencyMode");
             if (performance["Stages"] is JsonArray stages)
                 foreach (var stage in stages.OfType<JsonObject>())
                     Clean(stage, "Name", "Status", "Detail");
@@ -440,8 +449,46 @@ public sealed class DeploymentHistoryService
         return "Failed";
     }
 
+    private static readonly string[] HistoryResults =
+        ["InProgress", "Successful", "Failed", "Cancelled", "RecoveryFailed"];
+    private static readonly string[] HostedModes =
+        ["Fast IIS Update", "Full IIS Deploy", "Prepared IIS Publish", "Visual Studio prepared", "Full Deploy"];
+    private static readonly string[] OtherModes = ["Fast Local Test", "Fast Build", "Smart Deploy", "Publish folder"];
+
+    // These finite vocabularies are generated metadata. Unknown and partly
+    // redacted historical values must never be promoted to a known outcome.
+    private static string PreserveMetadata(string? value, params string[][] groups)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "";
+        foreach (var group in groups)
+            foreach (var option in group)
+                if (option.Equals(value, StringComparison.OrdinalIgnoreCase)) return option;
+        const string unknown = "Unrecognized: ";
+        if (value.StartsWith(unknown, StringComparison.Ordinal)) value = value[unknown.Length..];
+        return unknown + SecretRedactor.Redact(value);
+    }
+
+    internal static string PreserveBuildMode(string? value) => PreserveMetadata(value, HostedModes, OtherModes);
+    internal static string PreserveResult(string? value) => PreserveMetadata(value, HistoryResults);
+
     private static bool IsResult(DeploymentHistoryRecord record, string result) =>
         string.Equals(record.Result, result, StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsLocalTest(string mode) => string.Equals(mode, "Fast Local Test", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsRecordedHostedDeployment(DeploymentHistoryRecord row) =>
+        row.EndedAtUtc.HasValue && IsResult(row, "Successful") &&
+        HostedModes.Contains(row.BuildMode, StringComparer.OrdinalIgnoreCase);
+
+    internal static string DescribeAttemptResult(DeploymentHistoryRecord row)
+    {
+        if (!row.EndedAtUtc.HasValue) return "In progress / interrupted";
+        if (!IsResult(row, "Successful"))
+            return string.IsNullOrWhiteSpace(row.Result) ? "Unrecognized result" : row.Result;
+        if (IsLocalTest(row.BuildMode)) return "Successful local test — IIS unchanged";
+        if (IsRecordedHostedDeployment(row)) return "Recorded hosted success";
+        return "Successful attempt — hosting not established";
+    }
 
     private static TimeSpan Sum(IEnumerable<TimeSpan> values) => TimeSpan.FromTicks(values.Sum(x => x.Ticks));
     private static TimeSpan Average(IReadOnlyCollection<TimeSpan> values) => values.Count == 0 ? TimeSpan.Zero : TimeSpan.FromTicks((long)values.Average(x => x.Ticks));

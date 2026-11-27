@@ -9,7 +9,7 @@ namespace GenericWeb.DeploymentManager.Services;
 // verified JSONL prefix, never to another file or to exported artifacts.
 internal static class DeploymentHistoryIndex
 {
-    private const int Version = 1;
+    private const int Version = 2;
     private const int BufferSize = 64 * 1024;
     private const int MaximumIndexedLine = 4 * 1024 * 1024;
     private static readonly UTF8Encoding Utf8 = new(false, true);
@@ -22,7 +22,7 @@ internal static class DeploymentHistoryIndex
             new(offset, length, firstOffset, r.AttemptId, r.EventAtUtc, r.StartedAtUtc, r.EndedAtUtc,
                 SecretRedactor.Redact(r.ApplicationName ?? ""), SecretRedactor.Redact(r.SiteName ?? ""),
                 SecretRedactor.Redact(r.DatabaseName ?? ""), SecretRedactor.Redact(r.ApplicationVersion ?? ""),
-                SecretRedactor.Redact(r.BuildMode), SecretRedactor.Redact(r.Result), r.ElapsedSeconds, r.IntervalSincePreviousSeconds);
+                r.BuildMode, r.Result, r.ElapsedSeconds, r.IntervalSincePreviousSeconds);
 
         internal DeploymentHistoryRecord ToSummaryRecord() => new()
         {
@@ -40,7 +40,7 @@ internal static class DeploymentHistoryIndex
     {
         var length = source.Length;
         var modified = File.GetLastWriteTimeUtc(path);
-        var sidecar = Path.Combine(Path.GetDirectoryName(path)!, ".index-v1", Path.GetFileName(path) + ".index.json");
+        var sidecar = Path.Combine(Path.GetDirectoryName(path)!, ".index-v2", Path.GetFileName(path) + ".index.json");
         var cached = ReadSidecar(sidecar, length);
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var buffer = new byte[BufferSize];
@@ -165,7 +165,9 @@ internal static class DeploymentHistoryIndex
             if (saved is null || saved.Version != Version || saved.Processed < 0 || saved.Processed > length || saved.Lines < 0 ||
                 saved.PrefixHash is null || saved.PrefixHash.Length != 64 || saved.Rows is null ||
                 saved.Rows.Any(r => r is null || !Guid.TryParseExact(r.AttemptId, "N", out _) || r.Offset < 0 || r.Length <= 0 ||
-                    r.Length > MaximumIndexedLine || r.Offset > saved.Processed - r.Length || r.FirstOffset < 0 || r.FirstOffset > r.Offset) ||
+                    r.Length > MaximumIndexedLine || r.StartedAtUtc == default || r.BuildMode is null ||
+                    r.Result is null || !DeploymentHistoryService.IsValidDuration(r.ElapsedSeconds) ||
+                    (r.IntervalSincePreviousSeconds is double interval && !DeploymentHistoryService.IsValidDuration(interval)) || r.Offset > saved.Processed - r.Length || r.FirstOffset < 0 || r.FirstOffset > r.Offset) ||
                 saved.Rows.Select(r => r.AttemptId).Distinct(StringComparer.OrdinalIgnoreCase).Count() != saved.Rows.Length) return null;
             return saved;
         }

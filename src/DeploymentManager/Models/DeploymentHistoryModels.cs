@@ -50,6 +50,10 @@ public sealed class DeploymentProjectSummary
     public string DatabaseName { get; init; } = string.Empty;
     public int TotalAttempts { get; init; }
     public int SuccessfulAttempts { get; init; }
+    public int RecordedHostedSuccesses { get; init; }
+    public int SuccessfulLocalTests { get; init; }
+    public int SuccessfulUnknownMode { get; init; }
+    public int UnknownResultAttempts { get; init; }
     public int FailedAttempts { get; init; }
     public int CancelledAttempts { get; init; }
     public int IncompleteAttempts { get; init; }

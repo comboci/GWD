@@ -1,3 +1,5 @@
+using System.Collections;
+using System.Diagnostics;
 using System.Reflection;
 using GenericWeb.DeploymentManager;
 using GenericWeb.DeploymentManager.Services;
@@ -60,35 +62,92 @@ internal static class UiPerformancePhase05Tests
         var noticeText = (Label)Field("_noticeText").GetValue(wizard)!;
         var historyText = Method("NotificationText");
         var dismiss = Method("DismissNotice");
-        dismiss.Invoke(wizard, null);
-        notify.Invoke(wizard, [Kind("Info"), "synthetic information"]);
-        Check(Field("_noticeExpires").GetValue(wizard) is DateTimeOffset &&
-            noticeText.Text.Contains("synthetic information"), "informational countdown");
-        notify.Invoke(wizard, [Kind("Warning"), "synthetic recovery warning"]);
-        Check(Field("_noticeExpires").GetValue(wizard) is null, "warning does not auto-expire");
-        notify.Invoke(wizard, [Kind("Success"), "synthetic later information"]);
-        Check(noticeText.Text.Contains("synthetic recovery warning"), "info cannot hide a persistent warning");
-        dismiss.Invoke(wizard, null);
-        Check(Field("_activeNotice").GetValue(wizard) is null &&
-            ((string)historyText.Invoke(wizard, null)!).Contains("synthetic recovery warning"),
-            "dismiss only clears banner, not session history");
-        SecretRedactor.Register("SyntheticPhase05Secret");
-        notify.Invoke(wizard, [Kind("Info"), "password=SyntheticPhase05Secret"]);
-        Check(!((string)historyText.Invoke(wizard, null)!).Contains("SyntheticPhase05Secret"), "notification redaction");
-        for (var i = 0; i < 110; i++) notify.Invoke(wizard, [Kind("Info"), "bounded notice " + i]);
-        var notices = Field("_notices").GetValue(wizard)!;
-        Check((int)notices.GetType().GetProperty("Count")!.GetValue(notices)! == 100, "notification history bounded");
+        var render = Method("RenderNotice");
+        var timer = (System.Windows.Forms.Timer)Field("_noticeTimer").GetValue(wizard)!;
+        var notices = (IList)Field("_notices").GetValue(wizard)!;
+        var queue = (IList)Field("_pendingNotices").GetValue(wizard)!;
+        var stamp = Field("_noticeShownStamp");
+        var active = Field("_activeNotice");
+        void Send(string level, string text) => notify.Invoke(wizard, [Kind(level), text]);
+        string History() => (string)historyText.Invoke(wizard, null)!;
+        void DismissAll()
+        {
+            for (var i = 0; i < 102 && active.GetValue(wizard) is not null; i++) dismiss.Invoke(wizard, null);
+            Check(active.GetValue(wizard) is null && queue.Count == 0 && !timer.Enabled,
+                "draining explicitly ends queue and countdown");
+        }
+        void Banner(string text) => Check(noticeText.Text.Contains(text, StringComparison.Ordinal),
+            "visible notification: " + text);
 
-        dismiss.Invoke(wizard, null);
+        DismissAll();
+        var before = Stopwatch.GetTimestamp();
+        Send("Info", "synthetic information");
+        Check(stamp.GetValue(wizard) is long shown && shown >= before &&
+            shown <= Stopwatch.GetTimestamp() && timer.Enabled, "informational countdown uses Stopwatch clock and arms timer");
+        Banner("synthetic information");
+        stamp.SetValue(wizard, Stopwatch.GetTimestamp() - Stopwatch.Frequency * 7);
+        render.Invoke(wizard, null);
+        Check(active.GetValue(wizard) is null && !timer.Enabled, "expired countdown advances without wall-clock wait");
+
+        Send("Success", "synthetic success");
+        Check(stamp.GetValue(wizard) is long && timer.Enabled, "success uses countdown");
+        Send("Info", "synthetic queue info");
+        Send("Warning", "synthetic warning");
+        Check(stamp.GetValue(wizard) is null && !timer.Enabled, "warning persists and preempts success");
+        Send("Error", "synthetic error");
+        Check(stamp.GetValue(wizard) is null && !timer.Enabled, "error persists and preempts warning");
+        Send("Critical", "synthetic critical");
+        Send("Success", "synthetic later success");
+        var historyCount = notices.Count;
+        Send("Critical", "synthetic critical");
+        Send("Warning", "synthetic warning");
+        Check(notices.Count == historyCount && History().Contains("synthetic warning ×2", StringComparison.Ordinal),
+            "duplicate active and queued notices reuse history and increment repetitions");
+        Banner("synthetic critical ×2");
+        Check(stamp.GetValue(wizard) is null && !timer.Enabled, "critical stays visible over success");
+        dismiss.Invoke(wizard, null); Banner("synthetic error");
+        dismiss.Invoke(wizard, null); Banner("synthetic warning ×2");
+        dismiss.Invoke(wizard, null); Banner("synthetic success");
+        dismiss.Invoke(wizard, null); Banner("synthetic later success");
+        dismiss.Invoke(wizard, null); Banner("synthetic queue info");
+        DismissAll();
+        Check(History().Contains("synthetic critical ×2", StringComparison.Ordinal), "dismissal preserves redacted session history");
+
+        SecretRedactor.Register("SyntheticPhase05Secret");
+        Send("Info", "password=SyntheticPhase05Secret");
+        Check(!History().Contains("SyntheticPhase05Secret", StringComparison.Ordinal) &&
+            !noticeText.Text.Contains("SyntheticPhase05Secret", StringComparison.Ordinal), "banner and history redact credentials");
+        for (var i = 0; i < 110; i++) Send("Info", "bounded notice " + i);
+        Check(notices.Count == 100 && queue.Count == 100 && History().Contains("Banner limit", StringComparison.Ordinal),
+            "history and pending queue are separately bounded and dropped messages are disclosed");
+        DismissAll();
+
         Field("_deploymentStatus").SetValue(wizard, "FAST LOCAL TEST PASSED — HOSTED IIS UNCHANGED");
         Method("UpdateDeploymentIndicator").Invoke(wizard, null);
         Check(noticeText.Text.Contains("hosted IIS is unchanged", StringComparison.OrdinalIgnoreCase),
             "local compile is not represented as hosted IIS deployment");
-        Field("_deploymentStatus").SetValue(wizard, "DEPLOYMENT FAILED — RECOVERY FAILED");
-        Method("UpdateDeploymentIndicator").Invoke(wizard, null);
-        dismiss.Invoke(wizard, null);
-        Check(((Label)Field("_deploymentIndicator").GetValue(wizard)!).Text.Contains("RECOVERY REVIEW REQUIRED"),
-            "dismissal cannot remove persistent recovery warning");
+        DismissAll();
+
+        // Synthetic journal/marker in an isolated temporary root: do not touch IIS or an actual site's markers.
+        var root = Path.Combine(Path.GetTempPath(), "gwd-notice-recovery-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var locks = Path.Combine(root, "locks");
+            using var attempt = new IisDeploymentAttempt(locks, Path.Combine(root, "journal"),
+                ["synthetic-notification-target"], "qa-notification-dismiss", _ => { });
+            attempt.BeginMutation();
+            var marker = Directory.GetFiles(locks, "*.unresolved").Single();
+            var intact = File.ReadAllBytes(marker);
+            var persistent = (DeploymentState)Field("_persistentState").GetValue(wizard)!;
+            persistent.LastResult = "RecoveryFailed";
+            Field("_deploymentStatus").SetValue(wizard, "DEPLOYMENT FAILED — RECOVERY FAILED");
+            Method("UpdateDeploymentIndicator").Invoke(wizard, null);
+            dismiss.Invoke(wizard, null);
+            Check(((Label)Field("_deploymentIndicator").GetValue(wizard)!).Text.Contains("RECOVERY REVIEW REQUIRED") &&
+                persistent.LastResult == "RecoveryFailed" && !attempt.Resolved &&
+                File.ReadAllBytes(marker).SequenceEqual(intact), "dismissing a critical banner preserves unresolved recovery evidence");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
 
         var menu = wizard.MainMenuStrip ?? throw new InvalidOperationException("Main menu missing");
         var commands = menu.Items.OfType<ToolStripMenuItem>()

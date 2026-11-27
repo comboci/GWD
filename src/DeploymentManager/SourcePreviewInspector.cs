@@ -13,6 +13,7 @@ public sealed partial class WizardForm
 
     private static bool ShouldIgnorePreviewChange(string root, string path)
     {
+        // The path supplied by the watcher is fully qualified.
         var relative = Path.GetRelativePath(root, path);
         var segments = relative.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
         return segments.Take(Math.Max(0, segments.Length - 1)).Any(PreviewIgnoredDirectories.Contains);
@@ -92,7 +93,20 @@ public sealed partial class WizardForm
             api, sourceRoot, name, major, requiresNode, CanWatch: true);
     }
 
-    private readonly SemaphoreSlim _sourcePreviewSlots = new(2, 2);
+    private static bool IsDegradedPreviewPath(string path)
+    {
+        try
+        {
+            var full = Path.GetFullPath(path);
+            if (full.StartsWith(@"\\", StringComparison.Ordinal)) return true;
+            var root = Path.GetPathRoot(full);
+            return string.IsNullOrWhiteSpace(root) || new DriveInfo(root).DriveType is DriveType.Network or DriveType.NoRootDirectory or DriveType.Unknown;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException or NotSupportedException)
+        { return true; }
+    }
+
+    private readonly SemaphoreSlim _sourcePreviewSlots = new(1, 1);
     private readonly SemaphoreSlim _browseFolderLookupSlot = new(1, 1);
 
     private async Task<SourcePreview> InspectSourcePreviewAsync(bool prepared, string folder, CancellationToken token)

@@ -82,7 +82,11 @@ public sealed partial class WizardForm
         _reviewView = null;
         _locationView?.Deactivate();
         _locationView = null;
-        if (_pageIndex == 0) CancelBackgroundVerification();
+        if (_pageIndex == 0)
+        {
+            CancelBackgroundVerification();
+            InvalidateNavigationSourceReadiness();
+        }
         // Source/target controls may own the latest unsaved edit. Their queued
         // actions must execute while controls are still alive.
         FlushDeferredSettingsSaves();

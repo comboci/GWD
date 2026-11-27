@@ -779,6 +779,9 @@ public sealed partial class WizardForm : Form
         return (prepared, (prepared ? _profile.ReadyPublishFolder : _profile.SourceFolder).Trim());
     }
 
+    private long _navigationSourceCheckedAt;
+    private Func<bool>? _sourcePresenterFresh;
+
     private void CancelNavigationSourceProbe()
     {
         var request = _navigationProbeCts;
@@ -791,6 +794,7 @@ public sealed partial class WizardForm : Form
         CancelNavigationSourceProbe();
         _navigationSourceKey = null;
         _navigationSourceReady = false;
+        _navigationSourceCheckedAt = 0;
     }
 
     private void RememberNavigationSourceReadiness(bool prepared, string folder, bool ready)
@@ -800,13 +804,21 @@ public sealed partial class WizardForm : Form
         CancelNavigationSourceProbe();
         _navigationSourceKey = key;
         _navigationSourceReady = ready;
+        _navigationSourceCheckedAt = Environment.TickCount64;
     }
 
     private bool EnsureNavigationSourceReadiness()
     {
         var key = NavigationSourceKey();
-        if (_navigationSourceKey == key) return _navigationSourceReady;
+        if (_pageIndex == 0 && _sourcePresenterFresh?.Invoke() != true) return false;
+        if (_navigationSourceKey == key &&
+            (_pageIndex == 0 || _navigationProbeCts is not null ||
+             Environment.TickCount64 - _navigationSourceCheckedAt < 15000))
+            return _navigationSourceReady;
         InvalidateNavigationSourceReadiness();
+        // The active Source presenter owns its watcher and preview; a second
+        // navigation probe cannot accidentally certify one of its stale scans.
+        if (_pageIndex == 0) return false;
         if (string.IsNullOrWhiteSpace(key.Folder))
         {
             _navigationSourceKey = key;
@@ -828,9 +840,7 @@ public sealed partial class WizardForm : Form
         try
         {
             await Task.Delay(200, request.Token);
-            ready = await Task.Run(() => key.Prepared
-                ? DeploymentService.ValidatePreparedPublish(key.Folder).Ok
-                : !string.IsNullOrWhiteSpace(_environment.DetectApiProject(key.Folder)), request.Token);
+            ready = (await InspectSourcePreviewAsync(key.Prepared, key.Folder, request.Token)).Ready;
         }
         catch (OperationCanceledException) when (request.IsCancellationRequested) { }
         catch (Exception ex) { InternalDiagnostics.Record(ex, "Navigation source readiness"); }
@@ -846,6 +856,7 @@ public sealed partial class WizardForm : Form
                 _navigationSourceKey == key && NavigationSourceKey() == key)
             {
                 _navigationSourceReady = ready;
+                _navigationSourceCheckedAt = Environment.TickCount64;
                 UpdateNavigationState();
             }
         }

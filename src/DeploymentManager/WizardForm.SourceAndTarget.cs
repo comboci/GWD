@@ -54,11 +54,17 @@ public sealed partial class WizardForm
         _content.Controls.Add(view);
 
         CancellationTokenSource? sourcePreflightCts = null;
-        var sourcePreflightGeneration = 0;
-        FileSystemWatcher? watcher = null;
-        string? watchedPath = null;
+        long sourcePreflightGeneration = 0;
+        long changeStamp = 0, observedStamp = 0, scheduledStamp = 0;
+        long lastSignalAt = 0, nextPollAt = 0;
+        long acceptedStamp = -1;
+        Func<bool> presenterFresh = () => Interlocked.Read(ref changeStamp) == acceptedStamp;
+        _sourcePresenterFresh = presenterFresh;
+        int watcherGeneration = 0, watcherFault = 0;
+        FileSystemWatcher? watcher = null, parentWatcher = null;
+        string watchedPath = "";
         bool watcherPrepared = false;
-        var watchRefreshQueued = 0;
+        var watchTimer = new System.Windows.Forms.Timer { Interval = 350 };
 
         void StopSourcePreflight()
         {
@@ -66,71 +72,132 @@ public sealed partial class WizardForm
             sourcePreflightCts?.Cancel();
         }
 
-        void ResetWatcher(string folder, bool prepared)
+        void DisposeWatcher()
         {
-            if (watchedPath == folder && watcherPrepared == prepared && watcher is not null) return;
+            Interlocked.Increment(ref watcherGeneration);
             watcher?.Dispose();
-            watcher = null;
-            watchedPath = folder;
-            watcherPrepared = prepared;
-            if (string.IsNullOrWhiteSpace(folder) || folder.StartsWith(@"\\", StringComparison.Ordinal)) return;
-            void PostRefresh()
+            parentWatcher?.Dispose();
+            watcher = parentWatcher = null;
+        }
+
+        void Signal(bool fault = false)
+        {
+            if (fault) Interlocked.Exchange(ref watcherFault, 1);
+            Interlocked.Exchange(ref lastSignalAt, Environment.TickCount64);
+            Interlocked.Increment(ref changeStamp);
+        }
+
+        bool InstallWatcher(string folder, bool prepared)
+        {
+            if (watcher is not null || IsDegradedPreviewPath(folder)) return false;
+            var ticket = Volatile.Read(ref watcherGeneration);
+            void OnChange(object sender, FileSystemEventArgs e)
             {
-                if (Interlocked.Exchange(ref watchRefreshQueued, 1) != 0) return;
-                try
-                {
-                    BeginInvoke(new Action(() =>
-                    {
-                        Interlocked.Exchange(ref watchRefreshQueued, 0);
-                        if (!IsDisposed && !view.IsDisposed && !view.Disposing && _pageIndex == 0 && watchedPath == folder &&
-                            watcherPrepared == prepared && CanNavigateInteractively())
-                            RunSourcePreflight(preserveIdentity: true);
-                    }));
-                }
-                catch (InvalidOperationException) { Interlocked.Exchange(ref watchRefreshQueued, 0); }
+                if (ticket != Volatile.Read(ref watcherGeneration)) return;
+                if (prepared || !ShouldIgnorePreviewChange(folder, e.FullPath) ||
+                    e is RenamedEventArgs renamed && !ShouldIgnorePreviewChange(folder, renamed.OldFullPath))
+                    Signal();
+            }
+            void OnRootChange(object sender, FileSystemEventArgs e)
+            {
+                if (ticket != Volatile.Read(ref watcherGeneration)) return;
+                var leaf = Path.GetFileName(Path.TrimEndingDirectorySeparator(folder));
+                if (string.Equals(e.Name, leaf, StringComparison.OrdinalIgnoreCase) ||
+                    e is RenamedEventArgs renamed && string.Equals(renamed.OldName, leaf, StringComparison.OrdinalIgnoreCase))
+                    Signal(fault: true);
+            }
+            void OnError(object sender, ErrorEventArgs e)
+            {
+                if (ticket == Volatile.Read(ref watcherGeneration)) Signal(fault: true);
             }
             try
             {
-                // Only start after successful background path verification. No
-                // watcher is ever cached across page disposal or path changes.
-                var candidate = new FileSystemWatcher(folder) { IncludeSubdirectories = !prepared,
-                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.Size };
-                watcher = candidate;
-                void OnChange(object sender, FileSystemEventArgs e)
+                // Local paths only. Network or unsupported watchers use bounded
+                // advisory polling through the same single-flight preview lane.
+                watcher = new FileSystemWatcher(folder)
                 {
-                    if (!ShouldIgnorePreviewChange(folder, e.FullPath) && (prepared || e.ChangeType != WatcherChangeTypes.Changed ||
-                        e.FullPath.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ||
-                        e.FullPath.EndsWith(".sln", StringComparison.OrdinalIgnoreCase) ||
-                        e.FullPath.EndsWith("package.json", StringComparison.OrdinalIgnoreCase) ||
-                        e.FullPath.EndsWith("index.html", StringComparison.OrdinalIgnoreCase) ||
-                        Path.GetFileName(e.FullPath).StartsWith("vite.config.", StringComparison.OrdinalIgnoreCase)))
-                        PostRefresh();
+                    IncludeSubdirectories = true,
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.Size
+                };
+                watcher.Changed += OnChange;
+                watcher.Created += OnChange;
+                watcher.Deleted += OnChange;
+                watcher.Renamed += OnChange;
+                watcher.Error += OnError;
+                var parent = Path.GetDirectoryName(Path.TrimEndingDirectorySeparator(folder));
+                if (parent is not null && Directory.Exists(parent))
+                {
+                    parentWatcher = new FileSystemWatcher(parent)
+                    {
+                        IncludeSubdirectories = false,
+                        NotifyFilter = NotifyFilters.DirectoryName
+                    };
+                    parentWatcher.Created += OnRootChange;
+                    parentWatcher.Deleted += OnRootChange;
+                    parentWatcher.Renamed += OnRootChange;
+                    parentWatcher.Error += OnError;
+                    parentWatcher.EnableRaisingEvents = true;
                 }
-                candidate.Changed += OnChange;
-                candidate.Created += OnChange;
-                candidate.Deleted += OnChange;
-                candidate.Renamed += (_, _) => PostRefresh();
-                candidate.Error += (_, _) => PostRefresh();
-                candidate.EnableRaisingEvents = true;
+                watcher.EnableRaisingEvents = true;
+                return true;
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException or PlatformNotSupportedException)
             {
-                watcher?.Dispose();
-                watcher = null;
-                InternalDiagnostics.Record(ex, "Watch current source preview");
+                DisposeWatcher();
+                InternalDiagnostics.Record(ex, "Watch current source preview; degraded polling");
+                return false;
             }
         }
 
+        void OnPreviewActivated(object? sender, EventArgs args)
+        {
+            if (watcher is null && watchedPath.Length > 0) Signal();
+        }
+        Activated += OnPreviewActivated;
+        watchTimer.Tick += (_, _) =>
+        {
+            if (view.IsDisposed || view.Disposing || IsDisposed || Disposing || _pageIndex != 0) return;
+            var now = Environment.TickCount64;
+            if (Interlocked.Exchange(ref watcherFault, 0) != 0)
+            {
+                DisposeWatcher();
+                nextPollAt = now + 10000;
+            }
+            // Changes received while Busy remain dirty. Poll only for degraded
+            // roots, and do not pile up network requests while a scan is active.
+            if (watcher is null && watchedPath.Length > 0 && sourcePreflightCts is null && now >= nextPollAt)
+            {
+                nextPollAt = now + 15000;
+                Signal();
+            }
+            var stamp = Interlocked.Read(ref changeStamp);
+            if (stamp != observedStamp)
+            {
+                observedStamp = stamp;
+                var key = NavigationSourceKey();
+                RememberNavigationSourceReadiness(key.Prepared, key.Folder, false);
+                UpdateNavigationState();
+            }
+            if (stamp != scheduledStamp && sourcePreflightCts is null && CanNavigateInteractively() &&
+                now - Interlocked.Read(ref lastSignalAt) >= 300)
+                RunSourcePreflight();
+        };
+        watchTimer.Start();
         view.Disposed += (_, _) =>
         {
+            Activated -= OnPreviewActivated;
+            watchTimer.Stop();
+            watchTimer.Dispose();
+            if (_sourcePresenterFresh == presenterFresh) _sourcePresenterFresh = null;
             StopSourcePreflight();
-            watcher?.Dispose();
-            watcher = null;
+            DisposeWatcher();
+            InvalidateNavigationSourceReadiness();
         };
 
         void RunSourcePreflight(bool preserveIdentity = true, bool followWithEnvironment = false)
         {
             StopSourcePreflight();
+            acceptedStamp = -1;
             var mode = _profile.BuildMode;
             var selectedSource = _profile.SourceFolder = source.Text.Trim();
             var selectedPrepared = _profile.ReadyPublishFolder = preparedPublish.Text.Trim();
@@ -139,12 +206,16 @@ public sealed partial class WizardForm
             var expected = (App: app.Text, Site: site.Text, Db: database.Text);
             preparedPublish.Enabled = browsePreparedPublish.Enabled = prepared;
             repository.Enabled = browseRepository.Enabled = workspace.Enabled = browseWorkspace.Enabled = dependencyMode.Enabled = !prepared;
-            if (watchedPath != input || watcherPrepared != prepared)
+            if (!string.Equals(watchedPath, input, StringComparison.OrdinalIgnoreCase) || watcherPrepared != prepared)
             {
-                watcher?.Dispose();
-                watcher = null;
-                watchedPath = null;
+                DisposeWatcher();
+                Interlocked.Exchange(ref watcherFault, 0);
+                watchedPath = input;
+                watcherPrepared = prepared;
             }
+            nextPollAt = Environment.TickCount64 + 15000;
+            var scannedStamp = Interlocked.Read(ref changeStamp);
+            scheduledStamp = observedStamp = scannedStamp;
             RememberNavigationSourceReadiness(prepared, input, false);
             preparedValidation.Text = prepared ? "Checking prepared publish..." : "Not applicable for source-build mode.";
             preparedValidation.ForeColor = Color.DimGray;
@@ -167,6 +238,7 @@ public sealed partial class WizardForm
             _ = RunSourceTestsAsync();
 
             bool Current() => !request.IsCancellationRequested && generation == sourcePreflightGeneration &&
+                scannedStamp == Interlocked.Read(ref changeStamp) &&
                 !IsDisposed && !Disposing && !view.IsDisposed && !view.Disposing && _pageIndex == 0 &&
                 string.Equals(mode, _profile.BuildMode, StringComparison.Ordinal) &&
                 string.Equals(input, (prepared ? preparedPublish.Text : source.Text).Trim(), StringComparison.Ordinal);
@@ -178,7 +250,13 @@ public sealed partial class WizardForm
                     await Task.Delay(200, request.Token);
                     var result = await InspectSourcePreviewAsync(prepared, input, request.Token);
                     if (!Current()) return;
-                    if (result.CanWatch) ResetWatcher(input, prepared);
+                    if (result.CanWatch && InstallWatcher(input, prepared))
+                    {
+                        // A change could have happened before watching began.
+                        Signal();
+                        return;
+                    }
+                    if (!Current()) return;
                     if (prepared)
                     {
                         preparedValidation.Text = result.Detail;
@@ -202,6 +280,7 @@ public sealed partial class WizardForm
                     }
                     sourceTestResult.Text = string.Join(Environment.NewLine, result.Lines);
                     sourceTestResult.ForeColor = result.Failures == 0 ? Color.ForestGreen : Color.Firebrick;
+                    acceptedStamp = scannedStamp;
                     RememberNavigationSourceReadiness(prepared, input, result.Ready);
                     UpdateNavigationState();
                     if (!prepared) AppendLog($"Source preflight completed: {Math.Max(0, result.Lines.Length - result.Failures)} passed, {result.Failures} failed.");

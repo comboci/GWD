@@ -213,21 +213,21 @@ public sealed class DeploymentHistoryService
         {
             var sorted = snapshot.Rows.OrderBy(r => r.StartedAtUtc).ThenBy(r => r.FirstOffset).ToArray();
             var page = ClampPage(sorted.Length);
-            var rows = sorted.OrderByDescending(r => r.StartedAtUtc).ThenBy(r => r.FirstOffset)
+            var rows = NewestFirst(sorted, r => r.StartedAtUtc, ct)
                 .Skip(page * pageSize).Take(pageSize).Select(row =>
                 {
                     ct.ThrowIfCancellationRequested();
                     return DeploymentHistoryIndex.ReadRow(source, row);
                 }).ToArray();
-            var summary = sorted.Length == 0 ? null : BuildSummary(projectId, sorted.Select(r => r.ToSummaryRecord()).ToArray());
+            var summary = sorted.Length == 0 ? null : BuildSummary(projectId, sorted.Select(r => r.ToSummaryRecord()).ToArray(), ct);
             return new DeploymentHistoryPage(summary, rows, page, pageSize, sorted.Length);
         }, ct);
         if (indexed is not null) return indexed;
 
         var attempts = GetAttempts(projectId, ct);
         var fallbackPage = ClampPage(attempts.Count);
-        var fallbackRows = attempts.OrderByDescending(r => r.StartedAtUtc).Skip(fallbackPage * pageSize).Take(pageSize).ToArray();
-        return new(attempts.Count == 0 ? null : BuildSummary(projectId, attempts), fallbackRows,
+        var fallbackRows = NewestFirst(attempts, r => r.StartedAtUtc, ct).Skip(fallbackPage * pageSize).Take(pageSize).ToArray();
+        return new(attempts.Count == 0 ? null : BuildSummary(projectId, attempts, ct), fallbackRows,
             fallbackPage, pageSize, attempts.Count);
     }
 
@@ -239,9 +239,45 @@ public sealed class DeploymentHistoryService
             return new(ordered.LastOrDefault(), completed);
         }
 
-        return ReadIndexed(projectId, (_, snapshot) => Select(snapshot.Rows.OrderBy(r => r.StartedAtUtc)
-            .ThenBy(r => r.FirstOffset).Select(r => r.ToSummaryRecord()).ToArray()), ct)
-            ?? Select(GetAttempts(projectId, ct));
+        return ReadIndexed(projectId, (_, snapshot) =>
+        {
+            DeploymentHistoryIndex.Row? latest = null, release = null;
+            foreach (var row in snapshot.Rows)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (latest is null || (row.StartedAtUtc, row.FirstOffset).CompareTo((latest.StartedAtUtc, latest.FirstOffset)) > 0)
+                    latest = row;
+                if (IsRecordedHostedDeployment(row.EndedAtUtc, row.Result, row.BuildMode) &&
+                    (release is null || (row.EndedAtUtc, row.StartedAtUtc, row.FirstOffset)
+                        .CompareTo((release.EndedAtUtc, release.StartedAtUtc, release.FirstOffset)) > 0))
+                    release = row;
+            }
+            return new DashboardHistoryEvidence(latest?.ToSummaryRecord(), release?.ToSummaryRecord());
+        }, ct) ?? Select(GetAttempts(projectId, ct));
+    }
+
+    // Reverse the chronological groups, not the equal-time peers within each
+    // group. This retains source order for equal timestamps while avoiding a
+    // second sort and sorted copy of the full index on every page.
+    private static IEnumerable<T> NewestFirst<T>(IReadOnlyList<T> ordered, Func<T, DateTime> started, CancellationToken ct)
+    {
+        var end = ordered.Count;
+        while (end > 0)
+        {
+            var begin = end - 1;
+            var time = started(ordered[begin]);
+            while (begin > 0 && started(ordered[begin - 1]) == time)
+            {
+                ct.ThrowIfCancellationRequested();
+                begin--;
+            }
+            for (var i = begin; i < end; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                yield return ordered[i];
+            }
+            end = begin;
+        }
     }
 
     public IReadOnlyList<DeploymentProjectSummary> GetProjectSummaries()
@@ -275,7 +311,14 @@ public sealed class DeploymentHistoryService
             var projectId = Path.GetFileNameWithoutExtension(path);
             var indexed = ReadIndexed(projectId, (_, snapshot) =>
             {
-                var row = snapshot.Rows.OrderBy(x => x.StartedAtUtc).ThenBy(x => x.FirstOffset).LastOrDefault();
+                DeploymentHistoryIndex.Row? row = null;
+                foreach (var candidate in snapshot.Rows)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (row is null || (candidate.StartedAtUtc, candidate.FirstOffset)
+                        .CompareTo((row.StartedAtUtc, row.FirstOffset)) > 0)
+                        row = candidate;
+                }
                 return new CatalogLookup(row is null ? null : new(projectId, row.ApplicationName, row.SiteName,
                     row.EndedAtUtc ?? row.StartedAtUtc));
             }, ct);
@@ -300,23 +343,66 @@ public sealed class DeploymentHistoryService
     {
         var attempts = GetAttempts(projectId, ct);
         ct.ThrowIfCancellationRequested();
-        return attempts.Count == 0 ? null : BuildSummary(projectId, attempts);
+        return attempts.Count == 0 ? null : BuildSummary(projectId, attempts, ct);
     }
 
-    private DeploymentProjectSummary BuildSummary(string projectId, IReadOnlyList<DeploymentHistoryRecord> attempts)
+    private DeploymentProjectSummary BuildSummary(string projectId, IReadOnlyList<DeploymentHistoryRecord> attempts, CancellationToken ct = default)
     {
-        var ordered = attempts.OrderBy(x => x.StartedAtUtc).ToArray();
-        var completed = ordered.Where(x => x.EndedAtUtc.HasValue).ToArray();
-        var durations = completed.Select(x => TimeSpan.FromSeconds(Math.Max(0, x.ElapsedSeconds))).ToArray();
-        var successfulDurations = completed.Where(x => IsResult(x, "Successful")).Select(x => TimeSpan.FromSeconds(Math.Max(0, x.ElapsedSeconds))).ToArray();
-        var intervals = completed
-            .Where(x => x.IntervalSincePreviousSeconds.HasValue)
-            .Select(x => TimeSpan.FromSeconds(Math.Max(0, x.IntervalSincePreviousSeconds!.Value)))
-            .ToArray();
-        var hostedSuccesses = completed.Where(IsRecordedHostedDeployment).ToArray();
-        var localSuccesses = completed.Count(x => IsResult(x, "Successful") && IsLocalTest(x.BuildMode));
-        var first = ordered.FirstOrDefault();
-        var latest = ordered.LastOrDefault();
+        // Both JSONL readers pass chronological records. Aggregate without
+        // allocating separate arrays for outcomes, durations or intervals.
+        var first = attempts.Count == 0 ? null : attempts[0];
+        var latest = attempts.Count == 0 ? null : attempts[^1];
+        int completed = 0, success = 0, hosted = 0, local = 0, failed = 0, cancelled = 0;
+        int unknown = 0, smart = 0, full = 0, prepared = 0, intervalCount = 0;
+        decimal runtimeTicks = 0, successfulTicks = 0, intervalTicks = 0;
+        long fastest = long.MaxValue, slowest = 0;
+        var versions = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in attempts)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (!row.EndedAtUtc.HasValue) continue;
+            completed++;
+            var ticks = TimeSpan.FromSeconds(row.ElapsedSeconds).Ticks;
+            runtimeTicks += ticks;
+            fastest = Math.Min(fastest, ticks);
+            slowest = Math.Max(slowest, ticks);
+            if (row.IntervalSincePreviousSeconds is double interval)
+            {
+                intervalCount++;
+                intervalTicks += TimeSpan.FromSeconds(interval).Ticks;
+            }
+            switch (row.Result)
+            {
+                case "Successful":
+                    success++;
+                    successfulTicks += ticks;
+                    if (IsRecordedHostedDeployment(row))
+                    {
+                        hosted++;
+                        if (!string.IsNullOrWhiteSpace(row.ApplicationVersion)) versions.Add(row.ApplicationVersion);
+                    }
+                    else if (IsLocalTest(row.BuildMode)) local++;
+                    break;
+                case "Failed":
+                case "RecoveryFailed": failed++; break;
+                case "Cancelled": cancelled++; break;
+                default: unknown++; break;
+            }
+            switch (row.BuildMode)
+            {
+                case "Fast Local Test":
+                case "Fast IIS Update":
+                case "Fast Build":
+                case "Smart Deploy": smart++; break;
+                case "Full IIS Deploy":
+                case "Full Deploy": full++; break;
+                case "Prepared IIS Publish":
+                case "Visual Studio prepared":
+                case "Publish folder": prepared++; break;
+            }
+        }
+        static TimeSpan Duration(decimal ticks) => TimeSpan.FromTicks((long)Math.Min(ticks, long.MaxValue));
+        static TimeSpan AverageDuration(decimal ticks, int count) => Duration(count == 0 ? 0 : ticks / count);
 
         return new DeploymentProjectSummary
         {
@@ -324,36 +410,31 @@ public sealed class DeploymentHistoryService
             ApplicationName = latest?.ApplicationName ?? first?.ApplicationName ?? "Unknown application",
             SiteName = latest?.SiteName ?? first?.SiteName ?? string.Empty,
             DatabaseName = latest?.DatabaseName ?? first?.DatabaseName ?? string.Empty,
-            TotalAttempts = ordered.Length,
-            SuccessfulAttempts = completed.Count(x => IsResult(x, "Successful")),
-            FailedAttempts = completed.Count(x => IsResult(x, "Failed") || IsResult(x, "RecoveryFailed")),
-            RecordedHostedSuccesses = hostedSuccesses.Length,
-            SuccessfulLocalTests = localSuccesses,
-            SuccessfulUnknownMode = completed.Count(x => IsResult(x, "Successful")) - hostedSuccesses.Length - localSuccesses,
-            UnknownResultAttempts = completed.Count(x => !IsResult(x, "Successful") && !IsResult(x, "Failed") &&
-                !IsResult(x, "RecoveryFailed") && !IsResult(x, "Cancelled")),
-            CancelledAttempts = completed.Count(x => IsResult(x, "Cancelled")),
-            IncompleteAttempts = ordered.Count(x => !x.EndedAtUtc.HasValue),
-            DistinctVersions = hostedSuccesses
-                .Select(x => x.ApplicationVersion)
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Count(),
+            TotalAttempts = attempts.Count,
+            SuccessfulAttempts = success,
+            FailedAttempts = failed,
+            RecordedHostedSuccesses = hosted,
+            SuccessfulLocalTests = local,
+            SuccessfulUnknownMode = success - hosted - local,
+            UnknownResultAttempts = unknown,
+            CancelledAttempts = cancelled,
+            IncompleteAttempts = attempts.Count - completed,
+            DistinctVersions = versions.Count,
             FirstDeploymentUtc = first?.StartedAtUtc,
             LatestDeploymentUtc = latest?.EndedAtUtc ?? latest?.StartedAtUtc,
             CalendarLifetime = first is null || latest is null
                 ? TimeSpan.Zero
                 : (latest.EndedAtUtc ?? latest.StartedAtUtc) - first.StartedAtUtc,
-            CumulativeRuntime = Sum(durations),
-            AverageRuntime = Average(durations),
-            AverageSuccessfulRuntime = Average(successfulDurations),
-            FastestRuntime = durations.Length == 0 ? TimeSpan.Zero : durations.Min(),
-            SlowestRuntime = durations.Length == 0 ? TimeSpan.Zero : durations.Max(),
-            AverageInterval = Average(intervals),
-            SmartDeployCount = completed.Count(x => string.Equals(x.BuildMode, "Fast Local Test", StringComparison.OrdinalIgnoreCase) || string.Equals(x.BuildMode, "Fast IIS Update", StringComparison.OrdinalIgnoreCase) || string.Equals(x.BuildMode, "Fast Build", StringComparison.OrdinalIgnoreCase) || string.Equals(x.BuildMode, "Smart Deploy", StringComparison.OrdinalIgnoreCase)),
-            FullDeployCount = completed.Count(x => string.Equals(x.BuildMode, "Full IIS Deploy", StringComparison.OrdinalIgnoreCase) || string.Equals(x.BuildMode, "Full Deploy", StringComparison.OrdinalIgnoreCase)),
-            PreparedDeployCount = completed.Count(x => x.BuildMode is "Prepared IIS Publish" or "Visual Studio prepared" or "Publish folder"),
-            Attempts = ordered
+            CumulativeRuntime = Duration(runtimeTicks),
+            AverageRuntime = AverageDuration(runtimeTicks, completed),
+            AverageSuccessfulRuntime = AverageDuration(successfulTicks, success),
+            FastestRuntime = TimeSpan.FromTicks(completed == 0 ? 0 : fastest),
+            SlowestRuntime = TimeSpan.FromTicks(slowest),
+            AverageInterval = AverageDuration(intervalTicks, intervalCount),
+            SmartDeployCount = smart,
+            FullDeployCount = full,
+            PreparedDeployCount = prepared,
+            Attempts = attempts
         };
     }
 
@@ -477,8 +558,11 @@ public sealed class DeploymentHistoryService
     internal static bool IsLocalTest(string mode) => string.Equals(mode, "Fast Local Test", StringComparison.OrdinalIgnoreCase);
 
     internal static bool IsRecordedHostedDeployment(DeploymentHistoryRecord row) =>
-        row.EndedAtUtc.HasValue && IsResult(row, "Successful") &&
-        HostedModes.Contains(row.BuildMode, StringComparer.OrdinalIgnoreCase);
+        IsRecordedHostedDeployment(row.EndedAtUtc, row.Result, row.BuildMode);
+
+    private static bool IsRecordedHostedDeployment(DateTime? ended, string result, string mode) =>
+        ended.HasValue && string.Equals(result, "Successful", StringComparison.OrdinalIgnoreCase) &&
+        HostedModes.Contains(mode, StringComparer.OrdinalIgnoreCase);
 
     internal static string DescribeAttemptResult(DeploymentHistoryRecord row)
     {
@@ -489,9 +573,6 @@ public sealed class DeploymentHistoryService
         if (IsRecordedHostedDeployment(row)) return "Recorded hosted success";
         return "Successful attempt — hosting not established";
     }
-
-    private static TimeSpan Sum(IEnumerable<TimeSpan> values) => TimeSpan.FromTicks(values.Sum(x => x.Ticks));
-    private static TimeSpan Average(IReadOnlyCollection<TimeSpan> values) => values.Count == 0 ? TimeSpan.Zero : TimeSpan.FromTicks((long)values.Average(x => x.Ticks));
 
     private static string DetectApplicationVersion(DeploymentProfile profile)
     {

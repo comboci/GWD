@@ -292,6 +292,8 @@ public sealed partial class DiagnosticsCenterForm : Form
         const int pageSize = 200;
         var records = Array.Empty<DeploymentHistoryRecord>();
         var page = 0;
+        var total = 0;
+        var loadingPage = false;
         var generation = 0;
         var selectingProjects = false;
         var loadingProjects = false;
@@ -310,13 +312,13 @@ public sealed partial class DiagnosticsCenterForm : Form
             column.SortMode = DataGridViewColumnSortMode.NotSortable;
         grid.CellValueNeeded += (_, e) =>
         {
-            var index = page * pageSize + e.RowIndex;
+            var index = e.RowIndex;
             if (e.RowIndex < 0 || index < 0 || index >= records.Length) return;
             var a = records[index];
             e.Value = e.ColumnIndex switch
             {
                 0 => a.StartedAtUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"),
-                1 => a.EndedAtUtc.HasValue ? a.Result : "Interrupted",
+                1 => DeploymentHistoryService.DescribeAttemptResult(a),
                 2 => a.EndedAtUtc.HasValue ? TimeSpan.FromSeconds(Math.Max(0, a.ElapsedSeconds)).ToString(@"hh\:mm\:ss") : "—",
                 3 => a.BuildMode,
                 4 => string.IsNullOrWhiteSpace(a.ApplicationVersion) ? "—" : a.ApplicationVersion,
@@ -328,23 +330,25 @@ public sealed partial class DiagnosticsCenterForm : Form
         void RenderPage()
         {
             if (tab.IsDisposed) return;
-            var pages = Math.Max(1, (records.Length + pageSize - 1) / pageSize);
+            var pages = total == 0 ? 1 : (total - 1) / pageSize + 1;
             page = Math.Clamp(page, 0, pages - 1);
-            grid.RowCount = Math.Min(pageSize, Math.Max(0, records.Length - page * pageSize));
+            grid.RowCount = records.Length;
             grid.ClearSelection();
             grid.Invalidate();
-            previous.Enabled = page > 0;
-            next.Enabled = page < pages - 1;
-            pageInfo.Text = $"Page {page + 1}/{pages} — {records.Length} deployment(s)";
+            previous.Enabled = !loadingPage && page > 0;
+            next.Enabled = !loadingPage && page < pages - 1;
+            pageInfo.Text = $"Page {page + 1}/{pages} — {total} attempt(s)";
         }
 
-        async Task LoadProjectAsync()
+        async Task LoadProjectAsync(int requestedPage = 0)
         {
             historyRequest?.Cancel();
             var requested = ++generation;
             if (projects.SelectedItem is not ProjectChoice choice)
             {
                 records = Array.Empty<DeploymentHistoryRecord>();
+                page = total = 0;
+                loadingPage = false;
                 summary.Text = "No deployment history has been recorded yet.";
                 RenderPage();
                 return;
@@ -352,24 +356,25 @@ public sealed partial class DiagnosticsCenterForm : Form
             var request = new CancellationTokenSource();
             historyRequest = request;
             var id = choice.ProjectId;
-            records = Array.Empty<DeploymentHistoryRecord>();
-            page = 0;
+            loadingPage = true;
+            if (requestedPage == 0)
+            {
+                records = Array.Empty<DeploymentHistoryRecord>();
+                page = total = 0;
+                summary.Text = "Loading project history...";
+            }
             RenderPage();
-            summary.Text = "Loading project history...";
             pageInfo.Text = "Loading...";
             try
             {
-                var result = await Task.Run(() =>
-                {
-                    var s = _history.GetSummary(id, request.Token);
-                    return (Text: s is null ? string.Empty : BuildSummaryText(s),
-                        Records: s?.Attempts.OrderByDescending(x => x.StartedAtUtc).ToArray() ?? Array.Empty<DeploymentHistoryRecord>());
-                }, request.Token);
+                var result = await Task.Run(() => _history.GetHistoryPage(id, requestedPage, pageSize, request.Token), request.Token);
                 if (request.IsCancellationRequested || requested != generation || IsDisposed || Disposing || tab.IsDisposed ||
                     (projects.SelectedItem as ProjectChoice)?.ProjectId != id) return;
-                records = result.Records;
-                summary.Text = records.Length == 0 ? "No deployment history has been recorded yet." : result.Text;
-                page = 0;
+                records = result.Rows.ToArray();
+                total = result.TotalAttempts;
+                page = result.PageIndex;
+                loadingPage = false;
+                summary.Text = result.Summary is null ? "No deployment history has been recorded yet." : BuildSummaryText(result.Summary);
                 RenderPage();
             }
             catch (OperationCanceledException) when (request.IsCancellationRequested) { }
@@ -378,6 +383,8 @@ public sealed partial class DiagnosticsCenterForm : Form
                 InternalDiagnostics.Record(ex, "Load diagnostic project history");
                 if (requested != generation || IsDisposed || Disposing || tab.IsDisposed) return;
                 records = Array.Empty<DeploymentHistoryRecord>();
+                page = total = 0;
+                loadingPage = false;
                 summary.Text = "Deployment history unavailable: " + SecretRedactor.Redact(ex.Message);
                 RenderPage();
             }
@@ -451,8 +458,8 @@ public sealed partial class DiagnosticsCenterForm : Form
         };
         _tabRefreshActions[tab] = LoadProjectsAsync;
         _tabRefreshAvailable[tab] = () => !loadingProjects;
-        previous.Click += (_, _) => { if (page > 0) { page--; RenderPage(); } };
-        next.Click += (_, _) => { if ((page + 1) * pageSize < records.Length) { page++; RenderPage(); } };
+        previous.Click += async (_, _) => { if (!loadingPage && page > 0) await LoadProjectAsync(page - 1); };
+        next.Click += async (_, _) => { if (!loadingPage && (long)(page + 1) * pageSize < total) await LoadProjectAsync(page + 1); };
         tab.Disposed += (_, _) =>
         {
             generation++;

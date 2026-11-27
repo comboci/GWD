@@ -149,11 +149,10 @@ public sealed partial class WizardForm : Form
         _profile.DeploymentRepositoryFolder = _appData.GetDeploymentRepositoryFolder();
         _profile.WorkspaceRoot = _appData.GetWorkspaceRoot();
         _profile.InstallerCacheFolder = Path.Combine(_profile.DeploymentRepositoryFolder, "Installers");
-        _appData.SaveDeploymentRepositoryFolder(_profile.DeploymentRepositoryFolder);
         // V40: the selected dependency mode is authoritative and persists across page rebuilds/restarts.
         _profile.DependencyResolutionMode = NormalizeDependencyMode(_appData.GetDependencyResolutionMode());
         _profile.OfflineBuild = string.Equals(_profile.DependencyResolutionMode, "Offline Only", StringComparison.OrdinalIgnoreCase);
-        var identity = _appData.GetDeploymentIdentitySettings();
+        var identity = _identitySettingsBaseline = _appData.GetDeploymentIdentitySettings();
         _profile.ApplicationName = identity.ApplicationName;
         _profile.SiteName = identity.SiteName;
         _profile.AppPoolName = identity.SiteName;
@@ -165,7 +164,7 @@ public sealed partial class WizardForm : Form
             _profile.RemoteUserName = savedRemote.UserName;
             _profile.RemotePassword = savedRemote.Password;
         }
-        var hostingSettings = _appData.GetHostingSettings();
+        var hostingSettings = _hostingSettingsBaseline = _appData.GetHostingSettings();
         _profile.HostingRoot = NormalizeAutoHostingRoot(hostingSettings.HostingRoot, identity.ApplicationName);
         _profile.DeploymentLayout = hostingSettings.DeploymentLayout;
         _profile.CleanupPreviousDeployments = hostingSettings.CleanupPreviousDeployments;
@@ -213,7 +212,13 @@ public sealed partial class WizardForm : Form
         Disposed += (_, _) => StopVisualResources();
         Disposed += (_, _) => { if (!_log.IsDisposed) _log.Dispose(); };
         FormClosing += WizardForm_FormClosing;
-        Shown += (_, _) => UpdateNavigationState();
+        Shown += (_, _) =>
+        {
+            UpdateNavigationState();
+            var status = _appData.GetSettingsAccessStatus();
+            if (status.Warning is string warning)
+                MessageBox.Show(this, warning, "Settings read-only", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        };
         Disposed += (_, _) => CancelNavigationSourceProbe();
         _healthMonitor.Updated += OnHealthUpdated;
         _healthMonitor.Start();
@@ -2372,11 +2377,11 @@ public sealed partial class WizardForm : Form
             : "Do you want to close Deployment Manager?";
         if (MessageBox.Show(this, warning, "Confirm exit", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
         { e.Cancel = true; return; }
-        if (!DrainSettingsSaves()) { e.Cancel = true; return; }
+        if (!DrainSettingsSaves(closing: true)) { e.Cancel = true; return; }
         if (_settingsWriter.FailureCount > 0 && MessageBox.Show(this,
             "Some settings could not be saved. Check Diagnostics. Close without those changes?",
             "Settings not fully saved", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
-        { e.Cancel = true; return; }
+        { _settingsWriter.ResumeAccepting(); e.Cancel = true; return; }
         CancelNavigationSourceProbe();
         CancelBackgroundVerification();
         _acceptUiLogLines = false;

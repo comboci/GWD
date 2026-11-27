@@ -22,6 +22,7 @@ public sealed class AppDataService
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     public string Root { get; } = ResolveRoot();
+    private const long MaximumSettingsBytes = 1024 * 1024;
     public string Logs => Path.Combine(Root, "Logs");
     public string Cache => Path.Combine(Root, "Cache");
     public string NpmCache => Path.Combine(Cache, "npm");
@@ -35,8 +36,8 @@ public sealed class AppDataService
 
     public AppDataService()
     {
-        Directory.CreateDirectory(Root);
         InternalDiagnostics.Configure(Root);
+        EnsureDirectory(Root, nameof(Root));
         EnsureDirectory(Logs, nameof(Logs));
         EnsureDirectory(Cache, nameof(Cache));
         EnsureDirectory(NpmCache, nameof(NpmCache));
@@ -54,7 +55,7 @@ public sealed class AppDataService
         WithSettingsWriter(() =>
         {
             var current = ReadSettingsCore();
-            if (settings.Revision != current.Revision)
+            if (settings.IsReadOnlyFallback || settings.Revision != current.Revision)
                 throw new InvalidOperationException("Settings changed; reload before saving a complete snapshot.");
             // The bulk API must not bypass the credential writer or copy older
             // protected bytes back into a credential that was explicitly erased.
@@ -72,6 +73,8 @@ public sealed class AppDataService
 
     public string GetInstallerCacheFolder()
     {
+        var settings = LoadSettings();
+        if (!string.IsNullOrWhiteSpace(settings.InstallerCacheFolder)) return settings.InstallerCacheFolder;
         try
         {
             using var key = Registry.CurrentUser.OpenSubKey(RegistryPath, writable: false);
@@ -80,8 +83,7 @@ public sealed class AppDataService
         }
         catch (Exception ex) { InternalDiagnostics.Record(ex, "Read InstallerCacheFolder registry"); }
 
-        var settings = LoadSettings();
-        return !string.IsNullOrWhiteSpace(settings.InstallerCacheFolder) ? settings.InstallerCacheFolder : GetDefaultRepositoryFolder();
+        return GetDefaultRepositoryFolder();
     }
 
     public void SaveInstallerCacheFolder(string folder)
@@ -91,15 +93,7 @@ public sealed class AppDataService
         {
             settings.InstallerCacheFolder = folder;
             settings.DeploymentRepositoryFolder = folder;
-        }, () =>
-        {
-            try
-            {
-                using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
-                key.SetValue("InstallerCacheFolder", folder, RegistryValueKind.String);
-            }
-            catch (Exception ex) { InternalDiagnostics.Record(ex, "Write InstallerCacheFolder registry"); }
-        });
+        }, () => MirrorInstallerCacheFolder(folder));
     }
 
     public string GetDeploymentRepositoryFolder()
@@ -112,6 +106,11 @@ public sealed class AppDataService
     {
         if (string.IsNullOrWhiteSpace(folder)) return;
         SaveInstallerCacheFolder(folder);
+        EnsureRepositoryDirectories(folder);
+    }
+
+    private static void EnsureRepositoryDirectories(string folder)
+    {
         try
         {
             Directory.CreateDirectory(folder);
@@ -146,6 +145,43 @@ public sealed class AppDataService
     {
         if (string.IsNullOrWhiteSpace(folder)) return;
         UpdateSettings(settings => settings.ManagerReleaseRoot = Path.GetFullPath(folder));
+    }
+
+    public void SaveManagerPaths(Guid expectedRevision, string? release, string? repository, string? workspace)
+    {
+        WithSettingsWriter(() =>
+        {
+            var current = ReadSettingsCore();
+            if (current.Revision != expectedRevision)
+                throw new InvalidOperationException("Settings changed in another window. Reopen Settings before saving.");
+            if (release is not null) current.ManagerReleaseRoot = release;
+            if (repository is not null)
+            {
+                current.DeploymentRepositoryFolder = repository;
+                current.InstallerCacheFolder = repository;
+            }
+            if (workspace is not null) current.WorkspaceRoot = workspace;
+            SaveSettingsCore(current);
+            if (repository is not null) MirrorInstallerCacheFolder(repository);
+            return true;
+        });
+        if (repository is not null) EnsureRepositoryDirectories(repository);
+        if (workspace is not null) EnsureDirectory(workspace, "workspace root");
+    }
+
+    // JSON is canonical after its first successful write. The legacy mirror
+    // remains best-effort for registry-only consumers, never for recovery.
+    private static void MirrorInstallerCacheFolder(string folder)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
+            key.SetValue("InstallerCacheFolder", folder, RegistryValueKind.String);
+        }
+        catch (Exception ex)
+        {
+            InternalDiagnostics.Record(new IOException("Legacy registry mirror failed (" + ex.GetType().Name + ")."), "Settings registry");
+        }
     }
 
     public string GetDefaultProjectFolder()
@@ -255,13 +291,14 @@ public sealed class AppDataService
             if (!settings.RememberRemoteCredential || string.IsNullOrWhiteSpace(settings.RemotePasswordProtected))
                 return (settings.RemoteHost, settings.RemoteUserName, "", false);
             var protectedBytes = Convert.FromBase64String(settings.RemotePasswordProtected);
-            var password = Encoding.UTF8.GetString(ProtectedData.Unprotect(protectedBytes, null, DataProtectionScope.CurrentUser));
-            return (settings.RemoteHost, settings.RemoteUserName, password, true);
+            var clear = ProtectedData.Unprotect(protectedBytes, null, DataProtectionScope.CurrentUser);
+            try { return (settings.RemoteHost, settings.RemoteUserName, Encoding.UTF8.GetString(clear), true); }
+            finally { CryptographicOperations.ZeroMemory(clear); }
         }
         catch (Exception ex)
         {
             generation = Guid.Empty;
-            InternalDiagnostics.Record(ex, "Read remote credential");
+            InternalDiagnostics.Record(new IOException("Remote credential read failed (" + ex.GetType().Name + ")."), "Read remote credential");
             return ("", "", "", false);
         }
     }
@@ -299,9 +336,10 @@ public sealed class AppDataService
         settings.RemoteHost = remember ? host : "";
         settings.RemoteUserName = remember ? userName : "";
         settings.RememberRemoteCredential = remember;
-        settings.RemotePasswordProtected = remember
-            ? Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(password), null, DataProtectionScope.CurrentUser))
-            : "";
+        if (!remember) { settings.RemotePasswordProtected = ""; return; }
+        var clear = Encoding.UTF8.GetBytes(password);
+        try { settings.RemotePasswordProtected = Convert.ToBase64String(ProtectedData.Protect(clear, null, DataProtectionScope.CurrentUser)); }
+        finally { CryptographicOperations.ZeroMemory(clear); }
     }
 
     public string GetDependencyResolutionMode()
@@ -323,7 +361,10 @@ public sealed class AppDataService
         return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "GenericWebDeploymentManager", "Repository");
     }
 
-    public (string HostingRoot, string DeploymentLayout, bool CleanupPreviousDeployments, bool UseDefaultIisWebsite) GetHostingSettings()
+    public (string HostingRoot, string DeploymentLayout, bool CleanupPreviousDeployments, bool UseDefaultIisWebsite) GetHostingSettings() =>
+        ReadHostingSettings(strict: false);
+
+    private static (string HostingRoot, string DeploymentLayout, bool CleanupPreviousDeployments, bool UseDefaultIisWebsite) ReadHostingSettings(bool strict)
     {
         var defaultRoot = @"C:\inetpub\wwwroot\NSPOfficeAutomation";
         var defaultLayout = "Single Folder";
@@ -341,17 +382,21 @@ public sealed class AppDataService
             if (cleanupValue is int i) cleanup = i != 0;
             if (defaultSiteValue is int d) useDefaultIisWebsite = d != 0;
         }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Read hosting settings registry"); }
+        catch (Exception ex) when (!strict) { InternalDiagnostics.Record(ex, "Read hosting settings registry"); }
         return (defaultRoot, defaultLayout, cleanup, useDefaultIisWebsite);
     }
 
-    public void SaveHostingSettings(string hostingRoot, string deploymentLayout, bool cleanupPreviousDeployments, bool useDefaultIisWebsite = false, bool throwOnFailure = false)
+    public void SaveHostingSettings(string hostingRoot, string deploymentLayout, bool cleanupPreviousDeployments, bool useDefaultIisWebsite = false, bool throwOnFailure = false,
+        (string HostingRoot, string DeploymentLayout, bool CleanupPreviousDeployments, bool UseDefaultIisWebsite)? expected = null)
     {
         if (string.IsNullOrWhiteSpace(hostingRoot)) return;
         try
         {
             WithSettingsWriter(() =>
             {
+                _ = ReadSettingsCore();
+                if (expected.HasValue && ReadHostingSettings(strict: true) != expected.Value)
+                    throw new InvalidOperationException("Hosting settings changed in another window; reopen Deployment Manager.");
                 using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
                 key.SetValue("HostingRoot", hostingRoot, RegistryValueKind.String);
                 key.SetValue("DeploymentLayout", deploymentLayout, RegistryValueKind.String);
@@ -363,7 +408,10 @@ public sealed class AppDataService
         catch (Exception ex) when (!throwOnFailure) { InternalDiagnostics.Record(ex, "Write hosting settings registry"); }
     }
 
-    public (string ApplicationName, string SiteName, string DatabaseName) GetDeploymentIdentitySettings()
+    public (string ApplicationName, string SiteName, string DatabaseName) GetDeploymentIdentitySettings() =>
+        ReadDeploymentIdentitySettings(strict: false);
+
+    private static (string ApplicationName, string SiteName, string DatabaseName) ReadDeploymentIdentitySettings(bool strict)
     {
         var app = "NSP Office Automation";
         var site = "NSPOfficeAutomation";
@@ -375,16 +423,20 @@ public sealed class AppDataService
             site = key?.GetValue("SiteName") as string ?? site;
             db = key?.GetValue("DatabaseName") as string ?? db;
         }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Read deployment identity registry"); }
+        catch (Exception ex) when (!strict) { InternalDiagnostics.Record(ex, "Read deployment identity registry"); }
         return (app, site, db);
     }
 
-    public void SaveDeploymentIdentitySettings(string applicationName, string siteName, string databaseName, bool throwOnFailure = false)
+    public void SaveDeploymentIdentitySettings(string applicationName, string siteName, string databaseName, bool throwOnFailure = false,
+        (string ApplicationName, string SiteName, string DatabaseName)? expected = null)
     {
         try
         {
             WithSettingsWriter(() =>
             {
+                _ = ReadSettingsCore();
+                if (expected.HasValue && ReadDeploymentIdentitySettings(strict: true) != expected.Value)
+                    throw new InvalidOperationException("Identity settings changed in another window; reopen Deployment Manager.");
                 using var key = Registry.CurrentUser.CreateSubKey(RegistryPath, writable: true);
                 key.SetValue("ApplicationName", applicationName, RegistryValueKind.String);
                 key.SetValue("SiteName", siteName, RegistryValueKind.String);
@@ -516,14 +568,52 @@ public sealed class AppDataService
             return true;
         });
 
+    public (string? Warning, bool CanReset) GetSettingsAccessStatus()
+    {
+        try { _ = ReadSettingsCore(); return (null, false); }
+        catch (SettingsContentException)
+        {
+            return ("settings.json is malformed. Existing settings were not overwritten. Restore a valid file or explicitly preserve and reset it in Settings.", true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            return ("settings.json could not be accessed. Existing settings were not overwritten. Check folder permissions or file locks, then reopen Settings.", false);
+        }
+    }
+
+    // Called only after explicit UI confirmation. The mutex rechecks content,
+    // and Replace preserves the corrupt original in a separate file atomically.
+    // A valid, absent, or inaccessible file is never reset by this path.
+    public string PreserveAndResetCorruptSettings() => WithSettingsWriter(() =>
+    {
+        try { _ = ReadSettingsCore(); }
+        catch (SettingsContentException)
+        {
+            var backup = SettingsFile + ".corrupt-" + Guid.NewGuid().ToString("N") + ".bak";
+            var reset = new DeploymentManagerSettings
+            {
+                Revision = Guid.NewGuid(),
+                RemoteCredentialGeneration = Guid.NewGuid()
+            };
+            WriteJsonAtomic(SettingsFile, reset, flushToDisk: true, replaceExisting: true, backupPath: backup);
+            return backup;
+        }
+        throw new InvalidOperationException("No corrupt settings file remains. Reopen Settings to load the current file.");
+    });
+
     private DeploymentManagerSettings LoadSettings()
     {
         try { return ReadSettingsCore(); }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
-            InternalDiagnostics.Record(ex, "Load settings.json");
-            return new();
+            InternalDiagnostics.Record(new IOException("Settings read failed (" + ex.GetType().Name + ")."), "Load settings.json");
+            return new() { IsReadOnlyFallback = true };
         }
+    }
+
+    private sealed class SettingsContentException : IOException
+    {
+        internal SettingsContentException() : base("settings.json is malformed or unsupported.") { }
     }
 
     private DeploymentManagerSettings ReadSettingsCore()
@@ -531,19 +621,27 @@ public sealed class AppDataService
         try
         {
             using var input = new FileStream(SettingsFile, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
-            return JsonSerializer.Deserialize<DeploymentManagerSettings>(input)
-                ?? throw new IOException("Cannot replace empty deployment settings.");
+            if (input.Length == 0 || input.Length > MaximumSettingsBytes) throw new SettingsContentException();
+            using var json = JsonDocument.Parse(input, new JsonDocumentOptions { MaxDepth = 32 });
+            if (json.RootElement.ValueKind != JsonValueKind.Object) throw new SettingsContentException();
+            var fields = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in json.RootElement.EnumerateObject())
+                if (!fields.Add(property.Name) || (property.Value.ValueKind == JsonValueKind.Null &&
+                    typeof(DeploymentManagerSettings).GetProperty(property.Name)?.PropertyType == typeof(string)))
+                    throw new SettingsContentException();
+            return json.RootElement.Deserialize<DeploymentManagerSettings>() ?? throw new SettingsContentException();
         }
         catch (FileNotFoundException) { return new(); }
+        catch (JsonException) { throw new SettingsContentException(); }
     }
 
     private void SaveSettingsCore(DeploymentManagerSettings settings)
     {
         settings.Revision = Guid.NewGuid();
-        WriteJsonAtomic(SettingsFile, settings, flushToDisk: true);
+        WriteJsonAtomic(SettingsFile, settings, flushToDisk: true, replaceExisting: true);
     }
 
-    private static void WriteJsonAtomic<T>(string path, T value, bool flushToDisk = false)
+    private static void WriteJsonAtomic<T>(string path, T value, bool flushToDisk = false, bool replaceExisting = false, string? backupPath = null)
     {
         var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -553,12 +651,22 @@ public sealed class AppDataService
             {
                 using var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 JsonSerializer.Serialize(output, value, JsonOptions);
+                if (output.Length > MaximumSettingsBytes) throw new IOException("The settings exceed the allowed size.");
                 output.Flush(flushToDisk: true);
             }
             else File.WriteAllText(temp, JsonSerializer.Serialize(value, JsonOptions));
-            File.Move(temp, path, true);
+            if (!replaceExisting) File.Move(temp, path, true);
+            else
+            {
+                try { File.Replace(temp, path, backupPath); }
+                catch (FileNotFoundException) when (backupPath is null) { File.Move(temp, path, overwrite: false); }
+            }
         }
-        catch (Exception ex) { InternalDiagnostics.Record(ex, "Atomic JSON save: " + path); throw; }
+        catch (Exception ex)
+        {
+            InternalDiagnostics.Record(new IOException("Atomic JSON save failed (" + ex.GetType().Name + ")."), "Atomic JSON save");
+            throw;
+        }
         finally
         {
             try { if (File.Exists(temp)) File.Delete(temp); }
@@ -606,6 +714,11 @@ public sealed class DeploymentState
 
 public sealed class DeploymentManagerSettings
 {
+    [System.Text.Json.Serialization.JsonIgnore]
+    internal bool IsReadOnlyFallback { get; set; }
+
+    [System.Text.Json.Serialization.JsonExtensionData]
+    public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
     public Guid Revision { get; set; }
     public Guid RemoteCredentialGeneration { get; set; }
     public string InstallerCacheFolder { get; set; } = string.Empty;

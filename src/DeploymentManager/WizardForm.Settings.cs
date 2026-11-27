@@ -2,6 +2,10 @@ namespace GenericWeb.DeploymentManager;
 
 public sealed partial class WizardForm
 {
+    // The constructor initializes these; only the ordered writer advances them.
+    private (string ApplicationName, string SiteName, string DatabaseName) _identitySettingsBaseline;
+    private (string HostingRoot, string DeploymentLayout, bool CleanupPreviousDeployments, bool UseDefaultIisWebsite) _hostingSettingsBaseline;
+
     private void QueueDeferredSettingsSave(string key, Action save)
     {
         _deferredSettingsSaves[key] = (++_settingsWriteOrder, save);
@@ -21,20 +25,25 @@ public sealed partial class WizardForm
         _settingsSaveTimer.Stop();
         if (_deferredSettingsSaves.Count == 0) return;
         var pending = _deferredSettingsSaves.OrderBy(entry => entry.Value.Order).ToArray();
-        _deferredSettingsSaves.Clear();
         foreach (var (key, settings) in pending)
-            _settingsWriter.Enqueue(key, settings.Save);
+        {
+            if (_settingsWriter.Enqueue(key, settings.Save))
+                _deferredSettingsSaves.Remove(key);
+        }
+        // Retain the bounded set of UI keys until the worker has room.
+        if (_deferredSettingsSaves.Count > 0) _settingsSaveTimer.Start();
     }
 
-    private bool DrainSettingsSaves()
+    private bool DrainSettingsSaves(bool closing = false)
     {
         FlushDeferredSettingsSaves();
-        if (_settingsWriter.TryDrain(TimeSpan.FromSeconds(2)))
+        if (_deferredSettingsSaves.Count == 0 && _settingsWriter.TryDrain(TimeSpan.FromSeconds(2), stopAccepting: closing))
         {
             if (_settingsWriter.FailureCount > 0)
                 NotifyUi(UiNoticeKind.Warning, "Some settings could not be saved. Check Diagnostics.");
             return true;
         }
+        if (closing) _settingsWriter.ResumeAccepting();
         NotifyUi(UiNoticeKind.Warning, "Settings are still being saved. Try again shortly.");
         return false;
     }
@@ -42,13 +51,23 @@ public sealed partial class WizardForm
     private void PostSettingsSave(string key, Action save)
     {
         FlushDeferredSettingsSaves();
-        _settingsWriter.Enqueue(key, save);
+        if (!_settingsWriter.Enqueue(key, save))
+        {
+            QueueDeferredSettingsSave(key, save);
+            NotifyUi(UiNoticeKind.Warning, "Settings write has been deferred. Your edit has not been saved yet.");
+        }
     }
 
     private void SaveIdentitySettings(bool defer)
     {
         var values = (App: _profile.ApplicationName, Site: _profile.SiteName, Database: _profile.DatabaseName);
-        void Save() => _appData.SaveDeploymentIdentitySettings(values.App, values.Site, values.Database, throwOnFailure: true);
+        void Save()
+        {
+            if (values == _identitySettingsBaseline) return;
+            _appData.SaveDeploymentIdentitySettings(values.App, values.Site, values.Database,
+                throwOnFailure: true, expected: _identitySettingsBaseline);
+            _identitySettingsBaseline = values;
+        }
         if (defer) QueueDeferredSettingsSave("identity", Save); else PostSettingsSave("identity", Save);
     }
 
@@ -56,7 +75,13 @@ public sealed partial class WizardForm
     {
         var values = (Root: _profile.HostingRoot, Layout: _profile.DeploymentLayout,
             Cleanup: _profile.CleanupPreviousDeployments, DefaultSite: _profile.UseDefaultIisWebsite);
-        void Save() => _appData.SaveHostingSettings(values.Root, values.Layout, values.Cleanup, values.DefaultSite, throwOnFailure: true);
+        void Save()
+        {
+            if (values == _hostingSettingsBaseline || string.IsNullOrWhiteSpace(values.Root)) return;
+            _appData.SaveHostingSettings(values.Root, values.Layout, values.Cleanup, values.DefaultSite,
+                throwOnFailure: true, expected: _hostingSettingsBaseline);
+            _hostingSettingsBaseline = values;
+        }
         if (defer) QueueDeferredSettingsSave("hosting", Save); else PostSettingsSave("hosting", Save);
     }
 
